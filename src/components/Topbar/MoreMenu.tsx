@@ -40,7 +40,7 @@ export function MoreMenu({
               }}
             >
               <IconMaximize size={14} />
-              {zenMode ? "退出专注模式" : "专注模式（禅模式）"}
+              {zenMode ? "退出禅模式" : "禅模式"}
             </button>
             <div className="export-sep" />
             <button

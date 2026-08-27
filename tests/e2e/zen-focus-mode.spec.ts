@@ -12,8 +12,11 @@ test.describe("禅模式与打字机/专注模式交互", () => {
     await page.locator('button[aria-label="更多操作"]').click();
     await expect(page.locator(".export-dropdown")).toBeVisible();
 
-    // 点击禅模式
-    await page.locator("button.export-item", { hasText: "专注模式（禅模式）" }).click();
+    // 点击禅模式（与设置面板的「专注模式」是不同功能，文案已区分）
+    await page
+      .locator(".export-dropdown button.export-item")
+      .filter({ hasText: /^禅模式$/ })
+      .click();
 
     // 应该进入禅模式全屏容器
     await expect(page.locator(".app-shell.zen-mode")).toBeVisible();
