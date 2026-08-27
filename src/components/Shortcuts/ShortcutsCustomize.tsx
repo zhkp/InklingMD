@@ -11,8 +11,12 @@ import {
   captureFromEvent,
   type ShortcutId,
 } from "../../store/shortcuts";
+import { getSourceModeConflictBindings } from "../../lib/codemirror-shared";
 import { IconX } from "../icons";
 import "./ShortcutsCustomize.css";
+
+// 源码模式 CM 内建键位占用的组合（模块级只算一次）
+const sourceModeConflicts = getSourceModeConflictBindings();
 
 export function ShortcutsCustomize({ onClose }: { onClose: () => void }) {
   const overrides = useShortcuts((s) => s.overrides);
@@ -52,6 +56,12 @@ export function ShortcutsCustomize({ onClose }: { onClose: () => void }) {
       );
       if (conflict) {
         setError(`与「${conflict.desc}」冲突，请换一个组合`);
+        return;
+      }
+
+      // 3. 源码模式 CM 内建键位冲突检测：绑到这些组合会在源码编辑时双重触发
+      if (sourceModeConflicts.includes(binding)) {
+        setError("该组合已被源代码模式编辑器内置键位占用，请换一个组合");
         return;
       }
       setError(null);

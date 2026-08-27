@@ -102,6 +102,9 @@ function EditorInner({
   const lastSyncedRef = useRef(value);
   // 持续缓存富文本编辑器的滚动位置，避免在 display:none 或切换时现场读取被浏览器重排钳 0
   const wysiwygScrollTopRef = useRef(0);
+  // 同理缓存 scrollHeight：进入源码模式的过渡读取它做比例映射，届时容器已
+  // display:none 塌陷，现场读取 ≈ clientHeight，会把映射目标算成天文数字（issue #136 review）
+  const wysiwygScrollHeightRef = useRef(0);
   // 标记初始 value 是否已完成同步。publisher 在 view 创建时会把 lastSynced
   // 基线重置为「解析后 doc 的序列化结果」，与原始 value 存在规范化差异，
   // 若不跳过，外部同步 effect 会在每次挂载时把 doc 冗余重灌一遍。
@@ -261,8 +264,10 @@ function EditorInner({
             view.dom.closest<HTMLElement>(".editor-scroll");
           if (scrollEl) {
             wysiwygScrollTopRef.current = scrollEl.scrollTop;
+            wysiwygScrollHeightRef.current = scrollEl.scrollHeight;
             const onScroll = () => {
               wysiwygScrollTopRef.current = scrollEl.scrollTop;
+              wysiwygScrollHeightRef.current = scrollEl.scrollHeight;
             };
             scrollEl.addEventListener("scroll", onScroll, { passive: true });
             cleanupScroll = () => scrollEl.removeEventListener("scroll", onScroll);
@@ -299,6 +304,7 @@ function EditorInner({
     getEditor,
     lastSyncedRef,
     getWysiwygScrollTop: () => wysiwygScrollTopRef.current,
+    getWysiwygScrollHeight: () => wysiwygScrollHeightRef.current,
   });
 
   // 点击编辑器空白区域时的光标定位（详见 editor-root-click.ts）

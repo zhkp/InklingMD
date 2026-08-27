@@ -37,6 +37,8 @@ interface SourceModeTransitionOptions {
   lastSyncedRef: { current: string };
   /** 持续缓存的富文本滚动位置（避免在 display:none 时现场读取被浏览器重排钳 0） */
   getWysiwygScrollTop?: () => number;
+  /** 持续缓存的富文本滚动容器总高度（同理：过渡现场读取时容器已塌陷，值不可信） */
+  getWysiwygScrollHeight?: () => number;
 }
 
 /**
@@ -51,6 +53,7 @@ export function useSourceModeTransition({
   getEditor,
   lastSyncedRef,
   getWysiwygScrollTop,
+  getWysiwygScrollHeight,
 }: SourceModeTransitionOptions) {
   const prevSourceModeRef = useRef(sourceMode);
   const exitSnapshotRef = useRef<CursorScrollSnapshot | null>(null);
@@ -69,6 +72,10 @@ export function useSourceModeTransition({
 
       let cursor = 0;
       let scrollTop = getWysiwygScrollTop ? getWysiwygScrollTop() : 0;
+      // 进入瞬间 .md-editor-wysiwyg 已 display:none 塌陷，现场读 scrollHeight
+      // ≈ clientHeight，会让比例映射分母失真、目标被钳到容器底部。与
+      // scrollTop 同策略：读持续缓存的实时高度，无缓存时才退回现场值。
+      let scrollHeight = getWysiwygScrollHeight ? getWysiwygScrollHeight() : 0;
       // 先 flush 防抖窗口内的待发编辑（idle 编辑器自动跳过），store 内容即事实源。
       // 不能无条件「当场序列化」：未编辑文档的序列化结果可能与原文有规范化
       // 差异，会被误当编辑发布、标 dirty 并改写从未编辑的文件
@@ -77,7 +84,6 @@ export function useSourceModeTransition({
         useWorkspace.getState().openTabs.find((t) => t.path === filePath)
           ?.content ?? value;
       const editor = getEditor();
-      let scrollHeight = 0;
       if (editor) {
         editor.action((ctx) => {
           const view = ctx.get(editorViewCtx);
@@ -89,7 +95,7 @@ export function useSourceModeTransition({
             view.dom.closest(".editor-scroll");
           if (scrollEl instanceof HTMLElement) {
             if (scrollTop === 0) scrollTop = scrollEl.scrollTop;
-            scrollHeight = scrollEl.scrollHeight;
+            if (scrollHeight <= 0) scrollHeight = scrollEl.scrollHeight;
           }
         });
       }

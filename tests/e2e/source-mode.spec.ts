@@ -170,4 +170,83 @@ test.describe("源代码模式", () => {
       .poll(async () => wysiwyg.evaluate(bottomRatio), { timeout: 5_000 })
       .toBeGreaterThan(0.7);
   });
+
+  test("SM8 中部位置双向切换：阅读进度按比例保留 ±0.15（review 补测）", async ({ page }) => {
+    // 旧实现现场读取已 display:none 塌陷的 scrollHeight（≈clientHeight），
+    // 中部位置（0.504）映射成天文数字被钳到底部（1.000）。本用例钉住中部。
+    await page.locator(".ProseMirror").click();
+    await page.keyboard.press(`${MOD}+KeyA`);
+    const paragraphs: string[] = [];
+    for (let i = 0; i < 400; i++) {
+      paragraphs.push(`第 ${i} 节：中部位置模式切换阅读进度保留回归段落 ${i}。`);
+    }
+    await page.keyboard.insertText(paragraphs.join("\n\n"));
+    await expect(page.locator(".ProseMirror")).toContainText("第 399 节", { timeout: 10_000 });
+    await page.waitForTimeout(600);
+
+    const wysiwyg = page.locator(".editor-scroll");
+    const cm = page.getByTestId("source-mode-editor");
+    const cmScroller = cm.locator(".cm-scroller");
+    const progressOf = (el: Element) => {
+      const range = el.scrollHeight - el.clientHeight;
+      return range > 0 ? el.scrollTop / range : 0;
+    };
+
+    // 滚到中部并把光标落在可视中央：光标与阅读进度一致，
+    // 进入源码模式后的「光标可视兜底」才不会把视口拉走
+    await wysiwyg.evaluate((el) => {
+      el.scrollTop = (el.scrollHeight - el.clientHeight) * 0.5;
+    });
+    const box = await wysiwyg.boundingBox();
+    await page.mouse.click(box!.x + box!.width / 2, box!.y + box!.height / 2);
+    const before = await wysiwyg.evaluate(progressOf);
+    expect(before).toBeGreaterThan(0.25);
+    expect(before).toBeLessThan(0.75);
+
+    // ---- 进入源码模式：进度保持在中部（修复前被钳到底部） ----
+    await page.keyboard.press(`${MOD}+Alt+KeyS`);
+    await expect(cm).toBeVisible({ timeout: 5_000 });
+    await expect
+      .poll(
+        async () => Math.abs((await cmScroller.evaluate(progressOf)) - before),
+        { timeout: 5_000 },
+      )
+      .toBeLessThanOrEqual(0.15);
+    const cmBeforeExit = await cmScroller.evaluate(progressOf);
+
+    // ---- 退出源码模式：进度回到中部 ----
+    await page.keyboard.press(`${MOD}+Alt+KeyS`);
+    await expect(page.locator(".ProseMirror")).toBeVisible({ timeout: 5_000 });
+    await expect
+      .poll(
+        async () => Math.abs((await wysiwyg.evaluate(progressOf)) - cmBeforeExit),
+        { timeout: 5_000 },
+      )
+      .toBeLessThanOrEqual(0.15);
+  });
+
+  test("SM9 源码模式全局快捷键不被 CM 内建键位双触发（review 问题 2）", async ({ page }) => {
+    await page.keyboard.press(`${MOD}+Alt+KeyS`);
+    const cm = page.getByTestId("source-mode-editor");
+    await expect(cm).toBeVisible({ timeout: 5_000 });
+    const cmContent = cm.locator(".cm-content");
+    await cmContent.click();
+
+    const tabsBefore = await page.locator(".tab-name").count();
+
+    // Ctrl+/：只应打开快捷键帮助；修复前 CM toggleComment 会同时插入注释
+    await page.keyboard.press(`${MOD}+/`);
+    await expect(
+      page.getByRole("dialog", { name: "快捷键帮助" }),
+    ).toBeVisible({ timeout: 5_000 });
+    expect(await cmContent.innerText()).not.toContain("<!--");
+    await page.keyboard.press("Escape");
+    await expect(page.getByRole("dialog", { name: "快捷键帮助" })).toBeHidden();
+
+    // Ctrl+N：只应新建草稿；修复前 CM cursorLineDown 会同时吃掉按键
+    await page.keyboard.press(`${MOD}+KeyN`);
+    await expect
+      .poll(async () => page.locator(".tab-name").count(), { timeout: 5_000 })
+      .toBe(tabsBefore + 1);
+  });
 });

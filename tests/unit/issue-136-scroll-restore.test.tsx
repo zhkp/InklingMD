@@ -375,6 +375,44 @@ describe("进入源码模式快照（方向 B 映射的输入）", () => {
     expect(result.current.enterSnapshot!.scrollHeight).toBe(10000);
     expect(result.current.enterSnapshot!.cursor).toBeGreaterThan(0);
   });
+
+  it("容器已 display:none 塌陷时优先用持续缓存值，忽略现场读取（review 问题 1）", () => {
+    // 现场：切换瞬间 .md-editor-wysiwyg 已塌陷，scrollTop 被钳 0、
+    // scrollHeight ≈ clientHeight（review 实测 542），两者都不可信
+    const filePath = "/tmp/issue-136-enter-collapsed.md";
+    const value = makeLongMarkdown(PARA_COUNT);
+    const lastSyncedRef = { current: value };
+    const scrollEl = makeScrollEl({ scrollTop: 0, scrollHeight: 542 });
+    const doc = makeLongDoc(PARA_COUNT);
+    const { mockEditor, mockView } = makeMockPmEditor(doc, scrollEl);
+    mockView.state.selection.head = Math.floor(doc.content.size / 2);
+    seedTabMemory(filePath, null, null, value);
+
+    const { result, rerender } = renderHook(
+      ({ sourceMode }: { sourceMode: boolean }) =>
+        useSourceModeTransition({
+          sourceMode,
+          filePath,
+          value,
+          getEditor: () => mockEditor,
+          lastSyncedRef,
+          // 持续缓存：切换前最后一次滚动时记录的真实值（review 实测场景）
+          getWysiwygScrollTop: () => 31452,
+          getWysiwygScrollHeight: () => 63446,
+        }),
+      { initialProps: { sourceMode: false } },
+    );
+
+    rerender({ sourceMode: true });
+
+    // 缓存值胜出：塌陷的现场值（0/542）被忽略
+    expect(result.current.enterSnapshot!.scrollTop).toBe(31452);
+    expect(result.current.enterSnapshot!.scrollHeight).toBe(63446);
+    // 阅读进度比例 ≈ 0.5（中部）；旧实现拿 31452/542 做映射会把目标算成
+    // 天文数字、被钳到容器底部（实测 progress 0.504 → 1.000）
+    expect(31452 / 63446).toBeCloseTo(0.496, 2);
+    expect(result.current.enterSnapshot!.cursor).toBeGreaterThan(0);
+  });
 });
 
 /* ---------- 方向 B：进入源码模式的滚动收敛 ---------- */
