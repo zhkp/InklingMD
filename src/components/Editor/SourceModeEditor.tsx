@@ -18,6 +18,7 @@ import {
   registerSourceModeSearch,
   unregisterSourceModeSearch,
 } from "../../lib/source-mode-search";
+import { mapScrollTop } from "../../lib/source-mode-cursor";
 import { useSettings } from "../../store/settings";
 
 export interface SourceModeSnapshot {
@@ -36,6 +37,8 @@ export interface SourceModeEditorProps {
   initialCursor?: number;
   /** 进入时的初始 scrollTop */
   initialScrollTop?: number;
+  /** 进入前 WYSIWYG 滚动容器总高度，用于按比例把阅读进度映射到 CM 容器 */
+  initialScrollHeight?: number;
   spellcheck: boolean;
   /** 卸载前回传 CM 光标与滚动位置 */
   onUnmountSnapshot?: (snapshot: SourceModeSnapshot) => void;
@@ -49,6 +52,7 @@ export function SourceModeEditor({
   onChange,
   initialCursor = 0,
   initialScrollTop = 0,
+  initialScrollHeight = 0,
   spellcheck,
   onUnmountSnapshot,
   onOutlineChange,
@@ -193,12 +197,58 @@ export function SourceModeEditor({
       cmd(v);
       v.focus();
     });
+    // 进入源码模式的滚动恢复（issue #136）：CM6 视口化渲染 + 高度估算，
+    // 挂载瞬间的 scrollHeight 不是最终值，单次赋值会被钳制在错误的
+    // maxScroll 后不再收敛。与退出方向一致改为「立即设置 + 逐帧重试直到
+    // 收敛」（30 帧上限，测量稳定后通常 1-2 帧到位），收敛后兜底保证光标可见。
+    // 两容器高度不同（渲染视图 ≠ 源码文本），目标值按高度比例映射，
+    // 且每帧用当前最新 scrollHeight 重算，跟随 CM 测量修正
+    const scroller = view.scrollDOM;
+    let restoreRaf: number | null = null;
+    const computeTarget = () =>
+      initialScrollHeight > 0 && scroller.scrollHeight > 0
+        ? mapScrollTop(initialScrollTop, initialScrollHeight, scroller.scrollHeight)
+        : initialScrollTop;
+    const ensureCursorVisible = () => {
+      restoreRaf = null;
+      const v = viewRef.current;
+      if (!v || !scroller.isConnected) return;
+      const head = v.state.selection.main.head;
+      const coords = v.coordsAtPos(head);
+      if (!coords) return;
+      const box = scroller.getBoundingClientRect();
+      if (coords.top < box.top || coords.bottom > box.bottom) {
+        v.dispatch({
+          effects: EditorView.scrollIntoView(head, { y: "center" }),
+        });
+      }
+    };
     if (initialScrollTop > 0) {
-      view.scrollDOM.scrollTop = initialScrollTop;
+      const apply = () => {
+        if (scroller.isConnected) scroller.scrollTop = computeTarget();
+      };
+      apply();
+      let frames = 0;
+      const settle = () => {
+        restoreRaf = null;
+        if (!scroller.isConnected) return;
+        const target = computeTarget();
+        if (Math.abs(scroller.scrollTop - target) < 1 || ++frames > 30) {
+          ensureCursorVisible();
+          return;
+        }
+        apply();
+        restoreRaf = requestAnimationFrame(settle);
+      };
+      restoreRaf = requestAnimationFrame(settle);
+    } else {
+      // 无滚动目标（停留在顶部）也要保证恢复的光标在可视区域
+      restoreRaf = requestAnimationFrame(ensureCursorVisible);
     }
     requestAnimationFrame(() => view.focus());
 
     return () => {
+      if (restoreRaf !== null) cancelAnimationFrame(restoreRaf);
       if (scrollRaf !== null) cancelAnimationFrame(scrollRaf);
       unregisterSourceModeScroll(filePath);
       unregisterSourceModeSearch(filePath);

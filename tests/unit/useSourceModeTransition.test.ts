@@ -88,6 +88,7 @@ describe("useSourceModeTransition", () => {
     const mockView = {
       state: {
         plugins: [],
+        selection: { head: 18 },
         doc: {
           content: { size: 40 },
           resolve: vi.fn().mockReturnValue({ pos: 18 }),

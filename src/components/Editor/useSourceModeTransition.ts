@@ -77,21 +77,23 @@ export function useSourceModeTransition({
         useWorkspace.getState().openTabs.find((t) => t.path === filePath)
           ?.content ?? value;
       const editor = getEditor();
+      let scrollHeight = 0;
       if (editor) {
         editor.action((ctx) => {
           const view = ctx.get(editorViewCtx);
           const head = view.state.selection.head;
           const textBefore = view.state.doc.textBetween(0, head, "\n", "\n");
           cursor = prosePosToMarkdownOffset(fresh, textBefore);
-          if (scrollTop === 0) {
-            const scrollEl =
-              (view as EditorView & { scrollDOM?: HTMLElement }).scrollDOM ??
-              view.dom.closest(".editor-scroll");
-            scrollTop = scrollEl instanceof HTMLElement ? scrollEl.scrollTop : 0;
+          const scrollEl =
+            (view as EditorView & { scrollDOM?: HTMLElement }).scrollDOM ??
+            view.dom.closest(".editor-scroll");
+          if (scrollEl instanceof HTMLElement) {
+            if (scrollTop === 0) scrollTop = scrollEl.scrollTop;
+            scrollHeight = scrollEl.scrollHeight;
           }
         });
       }
-      setEnterSnapshot({ cursor, scrollTop });
+      setEnterSnapshot({ cursor, scrollTop, scrollHeight });
       lastSyncedRef.current = fresh;
     }
 
@@ -195,6 +197,16 @@ export function useSourceModeTransition({
                     }
                   };
                   applyScroll();
+                  // 单一写者原则（issue #136）：把映射后的光标与滚动位置写回
+                  // tab 记忆，取代进入源码模式前的过期值。后续切 tab 再切回时
+                  // 「编辑位置记忆」effect 恢复的就是本次模式切换的最终位置。
+                  useWorkspace
+                    .getState()
+                    .saveCursorState(
+                      filePath,
+                      view.state.selection.head,
+                      Math.round(targetTop),
+                    );
                   let frames = 0;
                   const settle = () => {
                     if (!scrollEl.isConnected) return;

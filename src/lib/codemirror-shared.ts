@@ -1,7 +1,12 @@
 // CodeMirror 6 共享主题与扩展工厂
 // 供代码块 NodeView 与源代码模式编辑器复用
 
-import { history, historyKeymap, indentWithTab } from "@codemirror/commands";
+import {
+  defaultKeymap,
+  history,
+  historyKeymap,
+  indentWithTab,
+} from "@codemirror/commands";
 import { markdown } from "@codemirror/lang-markdown";
 import {
   bracketMatching,
@@ -92,7 +97,9 @@ export function createSourceModeExtensions(opts: SourceModeExtensionOpts): Exten
     bracketMatching(),
     indentOnInput(),
     history(),
-    keymap.of([...historyKeymap, indentWithTab]),
+    // defaultKeymap 提供标准导航/编辑键（Ctrl+Home/End、方向键、词移动等）；
+    // 此前仅绑定 historyKeymap + indentWithTab，源码模式下这些键全部无效
+    keymap.of([...defaultKeymap, ...historyKeymap, indentWithTab]),
     // 内置查找替换（issue #29）：源码模式下 Ctrl+F / Ctrl+R 使用 CM 面板，
     // 与 WYSIWYG 的 SearchPanel 互斥（App.tsx 在源码模式把快捷键路由到这里）。
     // 新版 @codemirror/search 已把替换框内建进搜索面板，Mod-r 用 replaceNext
