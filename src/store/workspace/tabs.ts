@@ -821,6 +821,64 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
             }
           }
 
+          // review 修复：合并路径不得绕过外部修改冲突检测——
+          // 用目标 tab 的磁盘基线跑与常规保存一致的 mtime 快速路径 + 全文比对，
+          // 否则「外部改过 A + 草稿另存为 A」会静默覆盖外部编辑
+          if (isTauri()) {
+            let mergeMtimeChanged = true;
+            try {
+              if (mergeTarget.diskMtime !== undefined) {
+                const currentMtime = await fileMtime(savePath);
+                if (Math.abs(currentMtime - mergeTarget.diskMtime) < 5) {
+                  mergeMtimeChanged = false;
+                }
+              }
+            } catch {
+              mergeMtimeChanged = true;
+            }
+            let mergeConflict = false;
+            if (mergeMtimeChanged) {
+              try {
+                const latestOnDisk = await readTextFile(savePath);
+                if (
+                  mergeTarget.diskContent !== undefined &&
+                  latestOnDisk !== mergeTarget.diskContent
+                ) {
+                  mergeConflict = true;
+                }
+              } catch {
+                // 文件可能被删除或不可读，继续尝试写入
+              }
+            }
+            if (mergeConflict) {
+              if (!interactive) {
+                // 自动保存等非交互场景：标记冲突、不静默覆盖
+                set((current) => ({
+                  openTabs: current.openTabs.map((t) =>
+                    t.path === savePath ? { ...t, conflictPending: true } : t,
+                  ),
+                }));
+                applyTabSaving(activeTabPath, false);
+                return;
+              }
+              try {
+                const { ask } = await import("@tauri-apps/plugin-dialog");
+                const confirmed = await ask(
+                  "目标文件已被外部程序修改。覆盖保存将丢失外部修改，是否继续覆盖？",
+                  { title: "保存冲突提示", kind: "warning" },
+                );
+                if (!confirmed) {
+                  applyTabSaving(activeTabPath, false);
+                  return;
+                }
+              } catch {
+                // 弹窗异常视为放弃覆盖，安全退出
+                applyTabSaving(activeTabPath, false);
+                return;
+              }
+            }
+          }
+
           await writeTextFile(savePath, contentToSave);
           const mergedAt = Date.now();
           let mergedMtime: number | undefined;
@@ -829,19 +887,52 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
           } catch {
             // 忽略 mtime 失败
           }
+          // review 修复：异步窗口（对话框/写盘）结束后重新读取最新状态——
+          // 期间用户可能切换/关闭了 tab，完成时尊重用户的选择，
+          // 顶层镜像从实际活跃 tab 派生，不得无条件抢占（issue #148 模式）
           const latestState = get();
+          const draft = latestState.openTabs.find((t) => t.path === activeTabPath);
+          const targetStillOpen = latestState.openTabs.some((t) => t.path === savePath);
           // 写盘窗口期草稿若又有新编辑（内容不一致）则保留草稿，
           // 只合并已写盘内容，不丢弃新编辑
-          const draft = latestState.openTabs.find((t) => t.path === activeTabPath);
           const closeDraft = !draft || draft.content === contentToSave;
-          const nextTabs = latestState.openTabs
-            .filter((t) => (closeDraft ? t.path !== activeTabPath : true))
-            .map((t) => {
-              if (t.path === savePath) {
+          const stillOnDraft = latestState.activeTabPath === activeTabPath;
+          const nextRecent = pushRecent(latestState.recentFiles, savePath);
+          persistRecentFiles(nextRecent);
+
+          let nextTabs: OpenTab[];
+          if (targetStillOpen) {
+            nextTabs = latestState.openTabs
+              .filter((t) => (closeDraft ? t.path !== activeTabPath : true))
+              .map((t) => {
+                if (t.path === savePath) {
+                  return {
+                    ...t,
+                    content: contentToSave,
+                    dirty: false,
+                    conflictPending: false,
+                    saving: false,
+                    lastSavedAt: mergedAt,
+                    diskContent: contentToSave,
+                    diskMtime: mergedMtime,
+                  };
+                }
+                if (!closeDraft && t.path === activeTabPath) {
+                  return { ...t, saving: false };
+                }
+                return t;
+              });
+          } else {
+            // 目标 tab 在窗口期被关闭：回退改名语义，草稿承接已保存的路径，
+            // 避免 activeTabPath 指向不存在的 tab
+            nextTabs = latestState.openTabs.map((t) => {
+              if (t.path === activeTabPath) {
+                const isStillDirty = t.content !== contentToSave;
                 return {
                   ...t,
-                  content: contentToSave,
-                  dirty: false,
+                  path: savePath,
+                  isUntitled: false,
+                  dirty: isStillDirty,
                   conflictPending: false,
                   saving: false,
                   lastSavedAt: mergedAt,
@@ -849,26 +940,32 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
                   diskMtime: mergedMtime,
                 };
               }
-              if (!closeDraft && t.path === activeTabPath) {
-                return { ...t, saving: false };
-              }
               return t;
             });
-          const nextRecent = pushRecent(latestState.recentFiles, savePath);
-          persistRecentFiles(nextRecent);
-          const splitsDraft = latestState.splitFile === activeTabPath;
+          }
+
+          // 仅当合并完成时用户仍停留在草稿上才激活合并结果；
+          // 窗口期已切走（或关闭了草稿）则保留用户的选择
+          const nextActivePath = stillOnDraft ? savePath : latestState.activeTabPath;
+          const nextActiveTab = nextTabs.find((t) => t.path === nextActivePath);
+          // review 修复：分屏是合并目标时，合并后对照内容已陈旧且主/分屏同文件
+          // （splitOpen 守卫刻意阻止的状态）——关闭分屏（对照已无意义）；
+          // 分屏是草稿本身时同样关闭
+          const splitAffected =
+            latestState.splitFile === activeTabPath ||
+            latestState.splitFile === savePath;
           set({
             openTabs: nextTabs,
-            activeTabPath: savePath,
-            currentFile: savePath,
-            currentContent: contentToSave,
-            dirty: false,
-            saving: false,
-            saveError: null,
-            conflictPending: false,
-            lastSavedAt: mergedAt,
+            activeTabPath: nextActivePath,
+            currentFile: nextActivePath,
+            currentContent: nextActiveTab?.content ?? "",
+            dirty: nextActiveTab ? nextActiveTab.dirty : false,
+            saving: nextActiveTab ? !!nextActiveTab.saving : false,
+            conflictPending: nextActiveTab ? !!nextActiveTab.conflictPending : false,
+            saveError: stillOnDraft ? null : latestState.saveError,
+            lastSavedAt: stillOnDraft ? mergedAt : latestState.lastSavedAt,
             recentFiles: nextRecent,
-            ...(splitsDraft ? { splitFile: null, splitContent: "" } : {}),
+            ...(splitAffected ? { splitFile: null, splitContent: "" } : {}),
           });
           return;
         }
