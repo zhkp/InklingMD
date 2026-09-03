@@ -792,6 +792,204 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
           }
         }
 
+        // issue #150：目标路径已在其他 tab 打开时走合并路径——
+        // 不能把草稿 tab 直接改名为已存在的 path（两个同 path tab 会导致
+        // TabsBar key 重复、按 path find/filter 的编辑写错项、关闭删双份）。
+        // 语义：草稿内容写入目标文件，并入已有 tab 并关闭草稿、激活目标。
+        // 排除正在保存的 tab 自身：普通文件保存时 savePath === activeTabPath，
+        // 只有「另一个」同 path tab 才构成需要合并的重复
+        const mergeTarget = get().openTabs.find(
+          (t) => t.path === savePath && t.path !== activeTabPath,
+        );
+        if (mergeTarget) {
+          // 复审修复：入口快照目标内容。异步窗口（冲突检测/写盘 await）期间
+          // 用户可能切到目标 tab 继续输入——若完成时目标内容与快照不一致，
+          // 说明窗口期有新编辑，合并 set 不得用草稿内容覆盖、不得清掉 dirty，
+          // 与草稿侧 closeDraft 的保护对称（否则用户编辑被静默丢弃）
+          const targetContentAtEntry = mergeTarget.content;
+          if (mergeTarget.dirty) {
+            // 目标 tab 有未保存内容，覆盖将丢失这些编辑，需用户确认
+            try {
+              const { ask } = await import("@tauri-apps/plugin-dialog");
+              const confirmed = await ask(
+                `文件「${savePath.split(/[\\/]/).pop()}」已打开且有未保存的内容，保存将覆盖这些内容。是否继续？`,
+                { title: "另存为覆盖确认", kind: "warning" },
+              );
+              if (!confirmed) {
+                applyTabSaving(activeTabPath, false);
+                return;
+              }
+            } catch {
+              // 弹窗异常视为放弃覆盖，安全退出
+              applyTabSaving(activeTabPath, false);
+              return;
+            }
+          }
+
+          // review 修复：合并路径不得绕过外部修改冲突检测——
+          // 用目标 tab 的磁盘基线跑与常规保存一致的 mtime 快速路径 + 全文比对，
+          // 否则「外部改过 A + 草稿另存为 A」会静默覆盖外部编辑
+          if (isTauri()) {
+            let mergeMtimeChanged = true;
+            try {
+              if (mergeTarget.diskMtime !== undefined) {
+                const currentMtime = await fileMtime(savePath);
+                if (Math.abs(currentMtime - mergeTarget.diskMtime) < 5) {
+                  mergeMtimeChanged = false;
+                }
+              }
+            } catch {
+              mergeMtimeChanged = true;
+            }
+            let mergeConflict = false;
+            if (mergeMtimeChanged) {
+              try {
+                const latestOnDisk = await readTextFile(savePath);
+                if (
+                  mergeTarget.diskContent !== undefined &&
+                  latestOnDisk !== mergeTarget.diskContent
+                ) {
+                  mergeConflict = true;
+                }
+              } catch {
+                // 文件可能被删除或不可读，继续尝试写入
+              }
+            }
+            if (mergeConflict) {
+              if (!interactive) {
+                // 自动保存等非交互场景：标记冲突、不静默覆盖
+                set((current) => ({
+                  openTabs: current.openTabs.map((t) =>
+                    t.path === savePath ? { ...t, conflictPending: true } : t,
+                  ),
+                }));
+                applyTabSaving(activeTabPath, false);
+                return;
+              }
+              try {
+                const { ask } = await import("@tauri-apps/plugin-dialog");
+                const confirmed = await ask(
+                  "目标文件已被外部程序修改。覆盖保存将丢失外部修改，是否继续覆盖？",
+                  { title: "保存冲突提示", kind: "warning" },
+                );
+                if (!confirmed) {
+                  applyTabSaving(activeTabPath, false);
+                  return;
+                }
+              } catch {
+                // 弹窗异常视为放弃覆盖，安全退出
+                applyTabSaving(activeTabPath, false);
+                return;
+              }
+            }
+          }
+
+          await writeTextFile(savePath, contentToSave);
+          const mergedAt = Date.now();
+          let mergedMtime: number | undefined;
+          try {
+            mergedMtime = await fileMtime(savePath);
+          } catch {
+            // 忽略 mtime 失败
+          }
+          // review 修复：异步窗口（对话框/写盘）结束后重新读取最新状态——
+          // 期间用户可能切换/关闭了 tab，完成时尊重用户的选择，
+          // 顶层镜像从实际活跃 tab 派生，不得无条件抢占（issue #148 模式）
+          const latestState = get();
+          const draft = latestState.openTabs.find((t) => t.path === activeTabPath);
+          const targetStillOpen = latestState.openTabs.some((t) => t.path === savePath);
+          // 写盘窗口期草稿若又有新编辑（内容不一致）则保留草稿，
+          // 只合并已写盘内容，不丢弃新编辑
+          const closeDraft = !draft || draft.content === contentToSave;
+          const stillOnDraft = latestState.activeTabPath === activeTabPath;
+          const nextRecent = pushRecent(latestState.recentFiles, savePath);
+          persistRecentFiles(nextRecent);
+
+          let nextTabs: OpenTab[];
+          if (targetStillOpen) {
+            nextTabs = latestState.openTabs
+              .filter((t) => (closeDraft ? t.path !== activeTabPath : true))
+              .map((t) => {
+                if (t.path === savePath) {
+                  // 复审修复：窗口期目标有新编辑（内容相对入口快照变化）时，
+                  // 保留用户的在编辑器内容并保持 dirty（后续自动保存会落盘），
+                  // 只同步确实已变的磁盘基线；脏确认弹窗只授权「确认那一刻」
+                  // 的内容覆盖，不覆盖确认之后窗口期产生的新编辑
+                  if (t.content !== targetContentAtEntry) {
+                    return {
+                      ...t,
+                      dirty: true,
+                      conflictPending: false,
+                      saving: false,
+                      lastSavedAt: mergedAt,
+                      diskContent: contentToSave,
+                      diskMtime: mergedMtime,
+                    };
+                  }
+                  return {
+                    ...t,
+                    content: contentToSave,
+                    dirty: false,
+                    conflictPending: false,
+                    saving: false,
+                    lastSavedAt: mergedAt,
+                    diskContent: contentToSave,
+                    diskMtime: mergedMtime,
+                  };
+                }
+                if (!closeDraft && t.path === activeTabPath) {
+                  return { ...t, saving: false };
+                }
+                return t;
+              });
+          } else {
+            // 目标 tab 在窗口期被关闭：回退改名语义，草稿承接已保存的路径，
+            // 避免 activeTabPath 指向不存在的 tab
+            nextTabs = latestState.openTabs.map((t) => {
+              if (t.path === activeTabPath) {
+                const isStillDirty = t.content !== contentToSave;
+                return {
+                  ...t,
+                  path: savePath,
+                  isUntitled: false,
+                  dirty: isStillDirty,
+                  conflictPending: false,
+                  saving: false,
+                  lastSavedAt: mergedAt,
+                  diskContent: contentToSave,
+                  diskMtime: mergedMtime,
+                };
+              }
+              return t;
+            });
+          }
+
+          // 仅当合并完成时用户仍停留在草稿上才激活合并结果；
+          // 窗口期已切走（或关闭了草稿）则保留用户的选择
+          const nextActivePath = stillOnDraft ? savePath : latestState.activeTabPath;
+          const nextActiveTab = nextTabs.find((t) => t.path === nextActivePath);
+          // review 修复：分屏是合并目标时，合并后对照内容已陈旧且主/分屏同文件
+          // （splitOpen 守卫刻意阻止的状态）——关闭分屏（对照已无意义）；
+          // 分屏是草稿本身时同样关闭
+          const splitAffected =
+            latestState.splitFile === activeTabPath ||
+            latestState.splitFile === savePath;
+          set({
+            openTabs: nextTabs,
+            activeTabPath: nextActivePath,
+            currentFile: nextActivePath,
+            currentContent: nextActiveTab?.content ?? "",
+            dirty: nextActiveTab ? nextActiveTab.dirty : false,
+            saving: nextActiveTab ? !!nextActiveTab.saving : false,
+            conflictPending: nextActiveTab ? !!nextActiveTab.conflictPending : false,
+            saveError: stillOnDraft ? null : latestState.saveError,
+            lastSavedAt: stillOnDraft ? mergedAt : latestState.lastSavedAt,
+            recentFiles: nextRecent,
+            ...(splitAffected ? { splitFile: null, splitContent: "" } : {}),
+          });
+          return;
+        }
+
         await writeTextFile(savePath, contentToSave);
         const now = Date.now();
         let savedMtime: number | undefined;

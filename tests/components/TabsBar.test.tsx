@@ -4,7 +4,7 @@
 // 中键关闭、未保存确认
 
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
+import { render, screen, fireEvent, act } from "@testing-library/react";
 import { TabsBar } from "../../src/components/Tabs/TabsBar";
 import { useWorkspace, type OpenTab } from "../../src/store/workspace";
 
@@ -203,5 +203,71 @@ describe("TabsBar", () => {
     const activeTab = container.querySelector(".tab-active");
     expect(activeTab).not.toBeNull();
     expect(activeTab?.textContent).toContain("b.md");
+  });
+});
+
+describe("TabsBar 激活 tab 滚入视野 (#187)", () => {
+  // jsdom 无布局引擎，给 scrollIntoView 装 spy，
+  // 断言「哪个元素、以什么参数」被滚动（而非只查状态值的伪断言）
+  const scrollIntoViewMock = vi.fn();
+
+  beforeEach(() => {
+    scrollIntoViewMock.mockClear();
+    Element.prototype.scrollIntoView = scrollIntoViewMock;
+  });
+
+  it("挂载时把当前激活的 tab 滚入视野", () => {
+    useWorkspace.setState({
+      openTabs: [makeTab({ path: "/a.md" }), makeTab({ path: "/b.md" })],
+      activeTabPath: "/b.md",
+    });
+    render(<TabsBar />);
+
+    expect(scrollIntoViewMock).toHaveBeenCalledTimes(1);
+    const tabB = screen.getByText("b.md").closest(".tab");
+    expect(scrollIntoViewMock.mock.instances[0]).toBe(tabB);
+    expect(scrollIntoViewMock).toHaveBeenCalledWith({
+      inline: "nearest",
+      block: "nearest",
+    });
+  });
+
+  it("切换激活 tab 后，新激活的 tab 元素滚入视野", () => {
+    useWorkspace.setState({
+      openTabs: [makeTab({ path: "/a.md" }), makeTab({ path: "/b.md" })],
+      activeTabPath: "/a.md",
+    });
+    render(<TabsBar />);
+    scrollIntoViewMock.mockClear();
+
+    act(() => {
+      useWorkspace.setState({ activeTabPath: "/b.md" });
+    });
+
+    expect(scrollIntoViewMock).toHaveBeenCalledTimes(1);
+    const tabB = screen.getByText("b.md").closest(".tab");
+    expect(scrollIntoViewMock.mock.instances[0]).toBe(tabB);
+    expect(scrollIntoViewMock).toHaveBeenCalledWith({
+      inline: "nearest",
+      block: "nearest",
+    });
+  });
+
+  it("激活未变化时不重复滚动（依赖仅 activeTabPath）", () => {
+    useWorkspace.setState({
+      openTabs: [makeTab({ path: "/a.md", dirty: false })],
+      activeTabPath: "/a.md",
+    });
+    const { rerender } = render(<TabsBar />);
+    expect(scrollIntoViewMock).toHaveBeenCalledTimes(1);
+
+    // 与激活无关的重渲染（如 dirty 标记变化）不触发额外滚动
+    act(() => {
+      useWorkspace.setState({
+        openTabs: [makeTab({ path: "/a.md", dirty: true })],
+      });
+    });
+    rerender(<TabsBar />);
+    expect(scrollIntoViewMock).toHaveBeenCalledTimes(1);
   });
 });
