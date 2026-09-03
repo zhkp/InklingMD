@@ -53,6 +53,11 @@ identifier = "allow-create-dir"
 description = "Allow create_dir command"
 commands.allow = ["create_dir"]
 
+[[permission]]
+identifier = "allow-asset-dir"
+description = "Allow allow_asset_dir command"
+commands.allow = ["allow_asset_dir"]
+
 # 全局搜索命令
 [[permission]]
 identifier = "allow-search-in-workspace"

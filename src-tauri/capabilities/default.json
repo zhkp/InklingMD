@@ -23,6 +23,7 @@
     "allow-delete-path",
     "allow-create-file",
     "allow-create-dir",
+    "allow-asset-dir",
     "allow-search-in-workspace",
     "allow-pandoc-check",
     "allow-pandoc-export-docx",
