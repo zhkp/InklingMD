@@ -10,6 +10,7 @@ pub use search::search_in_workspace;
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::io;
 use std::io::Write;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -466,6 +467,120 @@ mod tests {
         assert_eq!(fs::read_to_string(&target).unwrap(), "target");
     }
 
+    // ===== issue #159：编码与大小护栏 =====
+
+    #[test]
+    fn read_reports_encoding_marker_for_non_utf8() {
+        let temp = TestDir::new("read-encoding");
+        let gbk_file = temp.path.join("gbk.md");
+        // GBK 编码的「你好」字节序列，非合法 UTF-8
+        fs::write(&gbk_file, [0xC4, 0xE3, 0xBA, 0xC3]).unwrap();
+
+        let error = read_text_file_sync(gbk_file.to_string_lossy().into_owned()).unwrap_err();
+        // 结构化标记供前端映射；不再透传 "stream did not contain valid UTF-8"
+        assert!(error.contains(READ_ERROR_ENCODING_UNSUPPORTED));
+        assert!(!error.contains("stream did not contain valid UTF-8"));
+    }
+
+    #[test]
+    fn read_rejects_files_above_size_limit_but_accepts_the_limit() {
+        let temp = TestDir::new("read-size");
+
+        let oversized = temp.path.join("oversized.md");
+        fs::write(&oversized, vec![b'a'; MAX_READ_SIZE as usize + 1]).unwrap();
+        let error = read_text_file_sync(oversized.to_string_lossy().into_owned()).unwrap_err();
+        assert!(error.contains(READ_ERROR_FILE_TOO_LARGE));
+
+        // 恰好等于上限仍可打开（护栏只拦超限）
+        let at_limit = temp.path.join("at-limit.md");
+        fs::write(&at_limit, vec![b'a'; MAX_READ_SIZE as usize]).unwrap();
+        let content = read_text_file_sync(at_limit.to_string_lossy().into_owned()).unwrap();
+        assert_eq!(content.len(), MAX_READ_SIZE as usize);
+    }
+
+    // ===== issue #161：跨盘移动与原子占用 =====
+
+    #[test]
+    fn rename_moves_directory_with_contents_same_volume() {
+        let temp = TestDir::new("rename-dir");
+        let source_dir = temp.path.join("docs");
+        fs::create_dir_all(source_dir.join("sub")).unwrap();
+        fs::write(source_dir.join("a.md"), "alpha").unwrap();
+        fs::write(source_dir.join("sub/b.md"), "beta").unwrap();
+
+        let target_dir = temp.path.join("renamed-docs");
+        rename_path_sync(
+            source_dir.to_string_lossy().into_owned(),
+            target_dir.to_string_lossy().into_owned(),
+        )
+        .unwrap();
+
+        assert!(!source_dir.exists());
+        assert_eq!(fs::read_to_string(target_dir.join("a.md")).unwrap(), "alpha");
+        assert_eq!(fs::read_to_string(target_dir.join("sub/b.md")).unwrap(), "beta");
+    }
+
+    #[test]
+    fn cross_device_detection_matches_platform_errors() {
+        #[cfg(windows)]
+        let cross = io::Error::from_raw_os_error(17); // ERROR_NOT_SAME_DEVICE
+        #[cfg(unix)]
+        let cross = io::Error::from_raw_os_error(18); // EXDEV
+        assert!(is_cross_device_error(&cross));
+
+        let not_cross = io::Error::from_raw_os_error(
+            #[cfg(windows)]
+            5, // ERROR_ACCESS_DENIED
+            #[cfg(unix)]
+            13, // EACCES
+        );
+        assert!(!is_cross_device_error(&not_cross));
+    }
+
+    #[test]
+    fn move_cross_device_moves_file_and_removes_source() {
+        let temp = TestDir::new("cross-file");
+        let source = temp.path.join("from.md");
+        let target = temp.path.join("to.md");
+        fs::write(&source, "跨盘内容").unwrap();
+
+        move_cross_device(&source, &target).unwrap();
+
+        assert!(!source.exists());
+        assert_eq!(fs::read_to_string(&target).unwrap(), "跨盘内容");
+    }
+
+    #[test]
+    fn move_cross_device_moves_directory_recursively() {
+        let temp = TestDir::new("cross-dir");
+        let source = temp.path.join("from-dir");
+        fs::create_dir_all(source.join("nested")).unwrap();
+        fs::write(source.join("top.md"), "top").unwrap();
+        fs::write(source.join("nested/deep.md"), "deep").unwrap();
+        let target = temp.path.join("to-dir");
+
+        move_cross_device(&source, &target).unwrap();
+
+        assert!(!source.exists());
+        assert_eq!(fs::read_to_string(target.join("top.md")).unwrap(), "top");
+        assert_eq!(fs::read_to_string(target.join("nested/deep.md")).unwrap(), "deep");
+    }
+
+    #[test]
+    fn move_cross_device_failure_keeps_source_intact() {
+        let temp = TestDir::new("cross-fail");
+        let source = temp.path.join("from.md");
+        fs::write(&source, "原件").unwrap();
+        // 目标父目录不存在 → 复制必然失败
+        let target = temp.path.join("missing-parent/to.md");
+
+        let error = move_cross_device(&source, &target).unwrap_err();
+        assert!(error.contains("跨盘复制失败"));
+        // 核心保证：失败后源原件完整保留，不产生半成品目标
+        assert_eq!(fs::read_to_string(&source).unwrap(), "原件");
+        assert!(!target.exists());
+    }
+
     #[test]
     fn delete_reports_a_missing_path_instead_of_succeeding() {
         let temp = TestDir::new("delete-missing");
@@ -742,12 +857,40 @@ pub async fn read_text_file(file_path: String) -> Result<String, String> {
         .map_err(|e| format!("文件读取任务失败: {e}"))?
 }
 
+/// issue #159：文本读取大小上限——防止数百 MB 文件整体读入内存并经 JSON IPC 传输。
+/// 打开场景比搜索侧（5MB）放宽到 10MB，仍可挡住病态大文件。
+const MAX_READ_SIZE: u64 = 10 * 1024 * 1024;
+
+/// issue #159：非 UTF-8 结构化错误标记（前端按此映射为可读提示，契约见前端 fs.ts）
+pub const READ_ERROR_ENCODING_UNSUPPORTED: &str = "ENCODING_UNSUPPORTED";
+/// issue #159：文件过大结构化错误标记
+pub const READ_ERROR_FILE_TOO_LARGE: &str = "FILE_TOO_LARGE";
+
 fn read_text_file_sync(file_path: String) -> Result<String, String> {
     let path = Path::new(&file_path);
     if !path.exists() {
         return Err(format!("文件不存在: {}", file_path));
     }
-    fs::read_to_string(path).map_err(|e| format!("读取失败 {}: {}", file_path, e))
+    // issue #159：大小护栏，先用元数据判断，避免超大文件整体进内存
+    if let Ok(meta) = fs::metadata(path) {
+        if meta.len() > MAX_READ_SIZE {
+            return Err(format!(
+                "{}: 文件过大（{:.1} MB，超过 {} MB 打开上限），无法打开",
+                READ_ERROR_FILE_TOO_LARGE,
+                meta.len() as f64 / (1024.0 * 1024.0),
+                MAX_READ_SIZE / (1024 * 1024),
+            ));
+        }
+    }
+    // issue #159：非 UTF-8（GBK/Big5 等）返回结构化标记，
+    // 不再把 "stream did not contain valid UTF-8" 英文错误直接透传给用户
+    let bytes = fs::read(path).map_err(|e| format!("读取失败 {}: {}", file_path, e))?;
+    String::from_utf8(bytes).map_err(|_| {
+        format!(
+            "{}: 文件不是 UTF-8 编码（可能是 GBK/Big5 等旧编码），无法打开",
+            READ_ERROR_ENCODING_UNSUPPORTED
+        )
+    })
 }
 
 /// 读取文件的最后修改时间（Unix 毫秒，浮点）
@@ -792,7 +935,88 @@ fn rename_path_sync(from: String, to: String) -> Result<(), String> {
     if to_path.exists() {
         return Err(format!("目标已存在: {}", to));
     }
-    fs::rename(from_path, to_path).map_err(|e| format!("重命名失败: {}", e))
+
+    // issue #161：文件移动优先用「硬链接 + 删源」原子占用目标名——
+    // 目标已存在时硬链接以 AlreadyExists 原子失败，闭合 exists() 检查与
+    // 替换式 fs::rename 之间「目标被并发创建后静默覆盖」的 TOCTOU 窗口。
+    // 硬链接跨卷/部分文件系统不可用，失败则落到下方通用移动流程。
+    if from_path.is_file() {
+        match fs::hard_link(from_path, to_path) {
+            Ok(()) => {
+                // 目标已就位；即使删源失败数据也同时存在于两处，不丢数据
+                return fs::remove_file(from_path)
+                    .map_err(|e| format!("移动失败（目标已就位但源文件删除失败）: {e}"));
+            }
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                return Err(format!("目标已存在: {}", to));
+            }
+            Err(_) => { /* 跨卷或不支持硬链接：继续走下方流程 */ }
+        }
+    }
+
+    match fs::rename(from_path, to_path) {
+        Ok(()) => Ok(()),
+        // issue #161：跨卷移动回退为复制+删除，不再把裸 OS 错误
+        // （Windows ERROR_NOT_SAME_DEVICE）抛给用户
+        Err(e) if is_cross_device_error(&e) => move_cross_device(from_path, to_path),
+        Err(e) => Err(format!("重命名失败: {e}")),
+    }
+}
+
+/// issue #161：判定跨卷移动失败（Windows ERROR_NOT_SAME_DEVICE = 17，Unix EXDEV = 18）
+fn is_cross_device_error(e: &io::Error) -> bool {
+    #[cfg(windows)]
+    {
+        e.raw_os_error() == Some(17)
+    }
+    #[cfg(unix)]
+    {
+        e.raw_os_error() == Some(18)
+    }
+}
+
+/// issue #161：跨卷移动回退——复制 + 删除源。
+/// 复制失败时源原件保持完整（不丢数据）；文件复制半途失败会留下残块，
+/// 尽力清理（此时目标内容已被失败复制污染，清理是安全且必要的）。
+fn move_cross_device(from: &Path, to: &Path) -> Result<(), String> {
+    let copy_result = if from.is_dir() {
+        copy_dir_recursive(from, to)
+    } else {
+        fs::copy(from, to)
+            .map(|_| ())
+            .map_err(|e| format!("跨盘复制失败: {e}"))
+    };
+    if let Err(e) = copy_result {
+        // 仅清理文件残块；目录残块结构不确定，交由用户判断（源原件完整）
+        if to.is_file() {
+            let _ = fs::remove_file(to);
+        }
+        return Err(e);
+    }
+    if from.is_dir() {
+        fs::remove_dir_all(from)
+            .map_err(|e| format!("跨盘移动：目标已复制完成但源目录删除失败: {e}"))
+    } else {
+        fs::remove_file(from)
+            .map_err(|e| format!("跨盘移动：目标已复制完成但源文件删除失败: {e}"))
+    }
+}
+
+/// 递归复制目录（std 无目录级 copy），任一项失败即返回错误
+fn copy_dir_recursive(from: &Path, to: &Path) -> Result<(), String> {
+    fs::create_dir(to).map_err(|e| format!("创建目标目录失败: {e}"))?;
+    for entry in fs::read_dir(from).map_err(|e| format!("读取源目录失败: {e}"))? {
+        let entry = entry.map_err(|e| format!("读取目录项失败: {e}"))?;
+        let src = entry.path();
+        let dst = to.join(entry.file_name());
+        if src.is_dir() {
+            copy_dir_recursive(&src, &dst)?;
+        } else {
+            fs::copy(&src, &dst)
+                .map_err(|e| format!("跨盘复制失败 {}: {e}", src.display()))?;
+        }
+    }
+    Ok(())
 }
 
 /// 删除文件或目录（目录时递归删除）
