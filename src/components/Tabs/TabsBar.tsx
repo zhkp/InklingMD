@@ -99,6 +99,8 @@ export function TabsBar() {
 
   // 横向滚动条已隐藏，改用滚轮滚动 tab 条（垂直滚轮转横向，触控板横向滑动原生生效）
   const barRef = useRef<HTMLDivElement | null>(null);
+  // issue #187：按 path 登记 tab 元素，激活变化时把目标 tab 滚入视野
+  const tabElements = useRef(new Map<string, HTMLDivElement>());
   const empty = openTabs.length === 0;
   useEffect(() => {
     const el = barRef.current;
@@ -119,6 +121,16 @@ export function TabsBar() {
     el.addEventListener("wheel", onWheel, { passive: false });
     return () => el.removeEventListener("wheel", onWheel);
   }, [empty]);
+
+  // issue #187：新激活的 tab 可能在横向滚动区之外（滚动条还被隐藏），
+  // 用户看不到当前激活的是哪个文件。激活变化时滚入视野；
+  // inline: "nearest" 保证已在视野内时不发生多余滚动
+  useEffect(() => {
+    if (!activeTabPath) return;
+    tabElements.current
+      .get(activeTabPath)
+      ?.scrollIntoView({ inline: "nearest", block: "nearest" });
+  }, [activeTabPath]);
 
   if (openTabs.length === 0) return null;
 
@@ -153,6 +165,10 @@ export function TabsBar() {
             return (
               <div
                 key={tab.path}
+                ref={(el) => {
+                  if (el) tabElements.current.set(tab.path, el);
+                  else tabElements.current.delete(tab.path);
+                }}
                 className={`tab${active ? " tab-active" : ""}${isDragOver ? " tab-drag-over" : ""}${pathDescription ? " tab-disambiguated" : ""}${tab.deletedOnDisk ? " tab-deleted-on-disk" : ""}`}
                 title={title}
               draggable

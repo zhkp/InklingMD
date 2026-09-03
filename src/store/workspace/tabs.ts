@@ -792,6 +792,87 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
           }
         }
 
+        // issue #150：目标路径已在其他 tab 打开时走合并路径——
+        // 不能把草稿 tab 直接改名为已存在的 path（两个同 path tab 会导致
+        // TabsBar key 重复、按 path find/filter 的编辑写错项、关闭删双份）。
+        // 语义：草稿内容写入目标文件，并入已有 tab 并关闭草稿、激活目标。
+        // 排除正在保存的 tab 自身：普通文件保存时 savePath === activeTabPath，
+        // 只有「另一个」同 path tab 才构成需要合并的重复
+        const mergeTarget = get().openTabs.find(
+          (t) => t.path === savePath && t.path !== activeTabPath,
+        );
+        if (mergeTarget) {
+          if (mergeTarget.dirty) {
+            // 目标 tab 有未保存内容，覆盖将丢失这些编辑，需用户确认
+            try {
+              const { ask } = await import("@tauri-apps/plugin-dialog");
+              const confirmed = await ask(
+                `文件「${savePath.split(/[\\/]/).pop()}」已打开且有未保存的内容，保存将覆盖这些内容。是否继续？`,
+                { title: "另存为覆盖确认", kind: "warning" },
+              );
+              if (!confirmed) {
+                applyTabSaving(activeTabPath, false);
+                return;
+              }
+            } catch {
+              // 弹窗异常视为放弃覆盖，安全退出
+              applyTabSaving(activeTabPath, false);
+              return;
+            }
+          }
+
+          await writeTextFile(savePath, contentToSave);
+          const mergedAt = Date.now();
+          let mergedMtime: number | undefined;
+          try {
+            mergedMtime = await fileMtime(savePath);
+          } catch {
+            // 忽略 mtime 失败
+          }
+          const latestState = get();
+          // 写盘窗口期草稿若又有新编辑（内容不一致）则保留草稿，
+          // 只合并已写盘内容，不丢弃新编辑
+          const draft = latestState.openTabs.find((t) => t.path === activeTabPath);
+          const closeDraft = !draft || draft.content === contentToSave;
+          const nextTabs = latestState.openTabs
+            .filter((t) => (closeDraft ? t.path !== activeTabPath : true))
+            .map((t) => {
+              if (t.path === savePath) {
+                return {
+                  ...t,
+                  content: contentToSave,
+                  dirty: false,
+                  conflictPending: false,
+                  saving: false,
+                  lastSavedAt: mergedAt,
+                  diskContent: contentToSave,
+                  diskMtime: mergedMtime,
+                };
+              }
+              if (!closeDraft && t.path === activeTabPath) {
+                return { ...t, saving: false };
+              }
+              return t;
+            });
+          const nextRecent = pushRecent(latestState.recentFiles, savePath);
+          persistRecentFiles(nextRecent);
+          const splitsDraft = latestState.splitFile === activeTabPath;
+          set({
+            openTabs: nextTabs,
+            activeTabPath: savePath,
+            currentFile: savePath,
+            currentContent: contentToSave,
+            dirty: false,
+            saving: false,
+            saveError: null,
+            conflictPending: false,
+            lastSavedAt: mergedAt,
+            recentFiles: nextRecent,
+            ...(splitsDraft ? { splitFile: null, splitContent: "" } : {}),
+          });
+          return;
+        }
+
         await writeTextFile(savePath, contentToSave);
         const now = Date.now();
         let savedMtime: number | undefined;
