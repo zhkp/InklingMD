@@ -309,6 +309,35 @@ describe("saveCurrent 另存为到已打开路径的合并 (#150)", () => {
     });
   });
 
+  it("写盘窗口期目标 tab 有新编辑：保留编辑并保持 dirty，只更新磁盘基线", async () => {
+    resetWithExisting(false);
+    let release!: () => void;
+    writeTextFileMock.mockImplementationOnce(
+      () => new Promise<void>((resolve) => { release = resolve; }),
+    );
+
+    const saving = useWorkspace.getState().saveCurrent();
+    await vi.waitFor(() => expect(writeTextFileMock).toHaveBeenCalled());
+    // 窗口期用户切到目标 tab 输入了新内容（setContentFor 会标记 dirty）
+    useWorkspace.getState().setContentFor("/docs/saved.md", "# 窗口期新编辑");
+    release();
+    await saving;
+
+    const state = useWorkspace.getState();
+    const target = state.openTabs.find((t) => t.path === "/docs/saved.md")!;
+    // 关键断言：用户在编辑器里的新内容没有被草稿内容覆盖
+    expect(target.content).toBe("# 窗口期新编辑");
+    // 保持 dirty：后续自动保存会把这份编辑落盘，不静默丢失
+    expect(target.dirty).toBe(true);
+    // 磁盘基线如实更新为已写入的草稿内容
+    expect(target.diskContent).toBe("draft");
+    expect(target.diskMtime).toBe(1_234);
+    expect(target.conflictPending).toBe(false);
+    // 合并本身完成：草稿已关闭
+    expect(state.openTabs.some((t) => t.path === untitledPath)).toBe(false);
+    expect(state.openTabs).toHaveLength(1);
+  });
+
   it("分屏正展示合并目标：合并后关闭分屏（对照已无意义，避免主/分屏同文件）", async () => {
     resetWithExisting(false);
     useWorkspace.setState({

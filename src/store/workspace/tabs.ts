@@ -802,6 +802,11 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
           (t) => t.path === savePath && t.path !== activeTabPath,
         );
         if (mergeTarget) {
+          // 复审修复：入口快照目标内容。异步窗口（冲突检测/写盘 await）期间
+          // 用户可能切到目标 tab 继续输入——若完成时目标内容与快照不一致，
+          // 说明窗口期有新编辑，合并 set 不得用草稿内容覆盖、不得清掉 dirty，
+          // 与草稿侧 closeDraft 的保护对称（否则用户编辑被静默丢弃）
+          const targetContentAtEntry = mergeTarget.content;
           if (mergeTarget.dirty) {
             // 目标 tab 有未保存内容，覆盖将丢失这些编辑，需用户确认
             try {
@@ -906,6 +911,21 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
               .filter((t) => (closeDraft ? t.path !== activeTabPath : true))
               .map((t) => {
                 if (t.path === savePath) {
+                  // 复审修复：窗口期目标有新编辑（内容相对入口快照变化）时，
+                  // 保留用户的在编辑器内容并保持 dirty（后续自动保存会落盘），
+                  // 只同步确实已变的磁盘基线；脏确认弹窗只授权「确认那一刻」
+                  // 的内容覆盖，不覆盖确认之后窗口期产生的新编辑
+                  if (t.content !== targetContentAtEntry) {
+                    return {
+                      ...t,
+                      dirty: true,
+                      conflictPending: false,
+                      saving: false,
+                      lastSavedAt: mergedAt,
+                      diskContent: contentToSave,
+                      diskMtime: mergedMtime,
+                    };
+                  }
                   return {
                     ...t,
                     content: contentToSave,
