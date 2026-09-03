@@ -36,10 +36,32 @@ export async function listDir(dirPath: string): Promise<FileNode> {
   };
 }
 
+/** issue #159：Rust 后端读取错误的结构化标记（与 src-tauri commands 常量保持契约一致） */
+const READ_ERROR_ENCODING_UNSUPPORTED = "ENCODING_UNSUPPORTED";
+const READ_ERROR_FILE_TOO_LARGE = "FILE_TOO_LARGE";
+
+/** 把后端结构化错误标记映射为用户可读提示；其他错误原样抛出。
+ * review 修复：用 startsWith 而非 includes——Rust 侧真实错误永远以标记开头，
+ * includes 会把「消息里含标记串路径」的普通错误（如文件不存在）误映射 */
+function mapReadError(error: unknown): Error {
+  const raw = error instanceof Error ? error.message : String(error);
+  if (raw.startsWith(READ_ERROR_ENCODING_UNSUPPORTED)) {
+    return new Error("无法打开：文件不是 UTF-8 编码（可能是 GBK/Big5 等旧编码），请转换编码后重试");
+  }
+  if (raw.startsWith(READ_ERROR_FILE_TOO_LARGE)) {
+    return new Error("无法打开：文件过大，超过打开大小上限");
+  }
+  return error instanceof Error ? error : new Error(raw);
+}
+
 /** 读取文本文件 */
 export async function readTextFile(filePath: string): Promise<string> {
   if (isTauri()) {
-    return invoke<string>("read_text_file", { filePath });
+    try {
+      return await invoke<string>("read_text_file", { filePath });
+    } catch (e) {
+      throw mapReadError(e);
+    }
   }
   const { MOCK_FILE_CONTENT } = await import("./mockFs");
   await new Promise((r) => setTimeout(r, 50));
