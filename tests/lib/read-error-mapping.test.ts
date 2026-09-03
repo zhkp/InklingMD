@@ -58,6 +58,20 @@ describe("#159 readTextFile 结构化错误映射", () => {
     );
   });
 
+  it("路径含标记串的普通错误不被误映射（startsWith 而非 includes）", async () => {
+    invokeMock.mockRejectedValue(
+      new Error("文件不存在: /notes/ENCODING_UNSUPPORTED.md"),
+    );
+
+    // 若误用 includes，该消息会命中编码分支；startsWith 保证原样透传
+    await expect(readTextFile("/notes/ENCODING_UNSUPPORTED.md")).rejects.toThrow(
+      "文件不存在: /notes/ENCODING_UNSUPPORTED.md",
+    );
+    await expect(
+      readTextFile("/notes/ENCODING_UNSUPPORTED.md"),
+    ).rejects.not.toThrow("无法打开");
+  });
+
   it("非 Error 形式的错误也能映射（按字符串内容识别标记）", async () => {
     invokeMock.mockRejectedValue("ENCODING_UNSUPPORTED: raw string rejection");
 

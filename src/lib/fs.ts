@@ -40,13 +40,15 @@ export async function listDir(dirPath: string): Promise<FileNode> {
 const READ_ERROR_ENCODING_UNSUPPORTED = "ENCODING_UNSUPPORTED";
 const READ_ERROR_FILE_TOO_LARGE = "FILE_TOO_LARGE";
 
-/** 把后端结构化错误标记映射为用户可读提示；其他错误原样抛出 */
+/** 把后端结构化错误标记映射为用户可读提示；其他错误原样抛出。
+ * review 修复：用 startsWith 而非 includes——Rust 侧真实错误永远以标记开头，
+ * includes 会把「消息里含标记串路径」的普通错误（如文件不存在）误映射 */
 function mapReadError(error: unknown): Error {
   const raw = error instanceof Error ? error.message : String(error);
-  if (raw.includes(READ_ERROR_ENCODING_UNSUPPORTED)) {
+  if (raw.startsWith(READ_ERROR_ENCODING_UNSUPPORTED)) {
     return new Error("无法打开：文件不是 UTF-8 编码（可能是 GBK/Big5 等旧编码），请转换编码后重试");
   }
-  if (raw.includes(READ_ERROR_FILE_TOO_LARGE)) {
+  if (raw.startsWith(READ_ERROR_FILE_TOO_LARGE)) {
     return new Error("无法打开：文件过大，超过打开大小上限");
   }
   return error instanceof Error ? error : new Error(raw);
