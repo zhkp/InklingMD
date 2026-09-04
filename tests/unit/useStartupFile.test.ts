@@ -81,4 +81,28 @@ describe("useStartupFile hook", () => {
     expect(tauriCore.invoke).not.toHaveBeenCalled();
     expect(useWorkspace.getState().openTabs.length).toBe(0);
   });
+
+  it("take_pending_file 失败时降级：不产生未处理 rejection，不打开任何 tab（#171）", async () => {
+    vi.mocked(tauriCore.isTauri).mockReturnValue(true);
+    vi.mocked(tauriCore.invoke).mockImplementation(async () => {
+      throw new Error("command take_pending_file not found");
+    });
+
+    // 捕获本用例窗口内泄漏的未处理 rejection：无 .catch 时这里的 invoke 链
+    // rejection 会逃逸成 unhandledRejection（issue #171 的启动即崩溃根因）。
+    const leaked: unknown[] = [];
+    const onUnhandled = (reason: unknown) => {
+      leaked.push(reason);
+    };
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      renderHook(() => useStartupFile());
+      await new Promise((r) => setTimeout(r, 30));
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+
+    expect(leaked).toHaveLength(0);
+    expect(useWorkspace.getState().openTabs.length).toBe(0);
+  });
 });
