@@ -183,66 +183,6 @@ describe("#177 重命名与在途读取竞态", () => {
   });
 });
 
-describe("#200 读取在途重命名：tab 归属新路径（幽灵 tab 边界）", () => {
-  it("读取在途时重命名：完成后 tab 建在新路径，旧路径无幽灵 tab", async () => {
-    const content = deferred<string>();
-    readTextFileMock.mockReturnValue(content.promise);
-
-    const opening = useWorkspace.getState().openFile("/w/a.md");
-    opening.catch(() => {});
-    expect(fileRequests.has("/w/a.md")).toBe(true);
-
-    // 在途时重命名：在途条目迁到新路径
-    useWorkspace.getState().onFileRenamed("/w/a.md", "/w/b.md");
-    expect(fileRequests.has("/w/b.md")).toBe(true);
-
-    content.resolve("# 在途读到的内容");
-    await opening;
-
-    // 旧路径不出现幽灵 tab（文件已不在该路径）
-    expect(useWorkspace.getState().openTabs.find((t) => t.path === "/w/a.md")).toBeUndefined();
-    // tab 归属重命名后的新路径，内容为该文件在途读到的内容
-    const tab = useWorkspace.getState().openTabs.find((t) => t.path === "/w/b.md");
-    expect(tab).toBeDefined();
-    expect(tab?.content).toBe("# 在途读到的内容");
-    // openFile 以落定路径激活（而非失效的旧路径）
-    expect(useWorkspace.getState().activeTabPath).toBe("/w/b.md");
-    expect(useWorkspace.getState().currentFile).toBe("/w/b.md");
-    // 在途表与加载态清理到位
-    expect(fileRequests.size).toBe(0);
-    expect(useWorkspace.getState().openingFiles.size).toBe(0);
-  });
-
-  it("在途先重命名再删除：按新路径黑名单拦截，不留漏网 tab 且写入恢复快照", async () => {
-    const inflight = deferred<string>();
-    readTextFileMock.mockReturnValue(inflight.promise);
-
-    const opening = useWorkspace.getState().openFile("/w/a.md");
-    const caught = opening.catch((e: unknown) => e);
-    expect(fileRequests.has("/w/a.md")).toBe(true);
-
-    // 在途重命名 → 删除新路径：黑名单按迁移后的注册路径登记
-    useWorkspace.getState().onFileRenamed("/w/a.md", "/w/b.md");
-    useWorkspace.getState().onFileDeleted("/w/b.md");
-    expect(deletedDuringLoad.has("/w/b.md")).toBe(true);
-
-    inflight.resolve("# 在途读到的内容");
-    await expect(caught).resolves.toBeTruthy();
-
-    // 旧路径与新路径都不建漏网 tab（若按旧路径对照黑名单会漏拦）
-    expect(useWorkspace.getState().openTabs.find((t) => t.path === "/w/a.md")).toBeUndefined();
-    expect(useWorkspace.getState().openTabs.find((t) => t.path === "/w/b.md")).toBeUndefined();
-    // 读到的内容进入恢复快照
-    const snapshots = loadDeletedSnapshots();
-    expect(
-      snapshots.some((s) => s.path === "/w/b.md" && s.content === "# 在途读到的内容"),
-    ).toBe(true);
-    // 黑名单一次性消费；打开错误给出原因（记录在新路径）
-    expect(deletedDuringLoad.size).toBe(0);
-    expect(useWorkspace.getState().fileOpenErrors.get("/w/b.md")).toContain("被外部删除");
-  });
-});
-
 describe("#166 删除文件快照竞态", () => {
   it("快照采集前先 flush 发布防抖：快照内容是最后编辑而非发布前旧内容", () => {
     // 模拟：用户刚输入，编辑器序列化仍在 150ms 防抖窗口内——

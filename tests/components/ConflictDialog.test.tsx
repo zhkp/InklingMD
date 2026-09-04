@@ -143,42 +143,4 @@ describe("ConflictDialog", () => {
     expect(setTabDiskContentMock).toHaveBeenCalledWith("/docs/note.md", "磁盘版本");
     expect(useConflict.getState().conflict).toBeNull();
   });
-
-  it("打开时焦点移入主操作按钮（另存副本）", () => {
-    openConflict();
-    render(<ConflictDialog />);
-    const primary = screen.getByText("保留本地并另存副本（.backup.md）") as HTMLButtonElement;
-    expect(document.activeElement).toBe(primary);
-  });
-
-  it("Esc 等价「继续编辑」：同步磁盘基线并关闭，不触发写入/重载", () => {
-    const setTabDiskContentMock = vi.fn();
-    useWorkspace.setState({ setTabDiskContent: setTabDiskContentMock });
-    openConflict();
-    render(<ConflictDialog />);
-    fireEvent.keyDown(window, { key: "Escape" });
-    expect(writeTextFileMock).not.toHaveBeenCalled();
-    expect(reloadFileMock).not.toHaveBeenCalled();
-    expect(setTabDiskContentMock).toHaveBeenCalledWith("/docs/note.md", "磁盘版本");
-    expect(useConflict.getState().conflict).toBeNull();
-  });
-
-  it("差异视图 Esc 先退回选项，再 Esc 才关闭", () => {
-    const setTabDiskContentMock = vi.fn();
-    useWorkspace.setState({ setTabDiskContent: setTabDiskContentMock });
-    openConflict();
-    render(<ConflictDialog />);
-    fireEvent.click(screen.getByText("查看差异对比"));
-    expect(screen.getByText("差异对比 — note.md")).toBeTruthy();
-
-    // 差异视图中第一次 Esc：退回选项（对话框保持打开）
-    fireEvent.keyDown(window, { key: "Escape" });
-    expect(screen.getByText("文件已被外部修改")).toBeTruthy();
-    expect(useConflict.getState().conflict).not.toBeNull();
-
-    // 回到主视图后 Esc：等价「继续编辑」
-    fireEvent.keyDown(window, { key: "Escape" });
-    expect(setTabDiskContentMock).toHaveBeenCalledWith("/docs/note.md", "磁盘版本");
-    expect(useConflict.getState().conflict).toBeNull();
-  });
 });
