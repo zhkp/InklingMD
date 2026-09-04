@@ -160,6 +160,12 @@ export const forcedDirectoryRequests = new Map<string, Promise<void>>();
 /** 同一文件的并发读取复用一个 Promise，避免重复读取和重复创建 tab */
 export const fileRequests = new Map<string, Promise<string>>();
 
+/** 请求落定时的最终注册路径（issue #200 评审修复）：
+ *  创建方在 .finally 内、删条目前写入；命中 existing 分支的并发加入方在各自
+ *  追加的 .finally 里读取——Promise 反应按注册顺序执行，加入方必然晚于创建方，
+ *  读取时必已填充。Weak 语义：请求被回收即自动消失，无需手动清理。 */
+export const settledPathOfRequest = new WeakMap<Promise<string>, string>();
+
 /**
  * 删除时仍在途读取的文件路径黑名单（issue #166）：
  * 文件读取在途时被删除，读取完成后 ensureTab 会照常创建「已删除文件」的

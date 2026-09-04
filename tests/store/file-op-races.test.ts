@@ -241,6 +241,72 @@ describe("#200 读取在途重命名：tab 归属新路径（幽灵 tab 边界�
     expect(deletedDuringLoad.size).toBe(0);
     expect(useWorkspace.getState().fileOpenErrors.get("/w/b.md")).toContain("被外部删除");
   });
+
+  it("同路径并发共享在途请求：加入方也拿到落定路径，旧路径无幽灵 tab（评审）", async () => {
+    // 复现：树中快速双击（或主面板与分屏同开一个文件）触发两个并发
+    // ensureTab("/w/a.md")，后者命中 existing 分支；修复前其 onSettledPath
+    // 被丢弃，重命名落定后仍按旧路径建出幽灵 tab。
+    const content = deferred<string>();
+    readTextFileMock.mockReturnValue(content.promise);
+
+    const first = useWorkspace.getState().openFile("/w/a.md");
+    const second = useWorkspace.getState().openFile("/w/a.md");
+    first.catch(() => {});
+    second.catch(() => {});
+    // 共享同一在途请求：只登记一个在途条目（readTextFile 在微任务中才发起）
+    expect(fileRequests.has("/w/a.md")).toBe(true);
+
+    // 在途重命名：在途条目迁到新路径
+    useWorkspace.getState().onFileRenamed("/w/a.md", "/w/b.md");
+    expect(fileRequests.has("/w/b.md")).toBe(true);
+
+    content.resolve("# 在途读到的内容");
+    await Promise.all([first, second]);
+    // 两个调用方只触发一次磁盘读取（真正复用同一请求）
+    expect(readTextFileMock).toHaveBeenCalledTimes(1);
+
+    // 两个调用方都不建旧路径幽灵 tab，且新路径只有一个 tab
+    expect(useWorkspace.getState().openTabs.find((t) => t.path === "/w/a.md")).toBeUndefined();
+    const tabs = useWorkspace.getState().openTabs.filter((t) => t.path === "/w/b.md");
+    expect(tabs).toHaveLength(1);
+    expect(tabs[0].content).toBe("# 在途读到的内容");
+    // 活跃 tab 归新路径（后到的 openFile 意图最新，修复前会把用户拽到幽灵 tab）
+    expect(useWorkspace.getState().activeTabPath).toBe("/w/b.md");
+    expect(fileRequests.size).toBe(0);
+  });
+
+  it("同路径并发 + 在途先重命名再删除：双方共享同一拒绝，均不建漏网 tab（评审复合变体）", async () => {
+    // 修复前更糟的变体：黑名单在请求级只应被消费一次——若删除拦截仍放在
+    // 各 ensureTab 续体里，创建方先消费后加入方失配，为已删除文件建漏网 tab。
+    const inflight = deferred<string>();
+    readTextFileMock.mockReturnValue(inflight.promise);
+
+    const first = useWorkspace.getState().openFile("/w/a.md");
+    const second = useWorkspace.getState().openFile("/w/a.md");
+    const caught1 = first.catch((e: unknown) => e);
+    const caught2 = second.catch((e: unknown) => e);
+
+    // 在途先重命名再删除：黑名单按迁移后的注册路径登记
+    useWorkspace.getState().onFileRenamed("/w/a.md", "/w/b.md");
+    useWorkspace.getState().onFileDeleted("/w/b.md");
+    expect(deletedDuringLoad.has("/w/b.md")).toBe(true);
+
+    inflight.resolve("# 在途读到的内容");
+    await Promise.all([caught1, caught2]);
+    // 两个调用方只触发一次磁盘读取（真正复用同一请求）
+    expect(readTextFileMock).toHaveBeenCalledTimes(1);
+
+    // 两个调用方都不建漏网 tab（删除拦截在请求体单点执行，双方拿到同一拒绝）
+    expect(useWorkspace.getState().openTabs).toHaveLength(0);
+    // 读到的内容写入恢复快照（只写一次）
+    const snapshots = loadDeletedSnapshots();
+    expect(
+      snapshots.filter((s) => s.path === "/w/b.md" && s.content === "# 在途读到的内容"),
+    ).toHaveLength(1);
+    // 黑名单一次性消费；错误记录在落定路径
+    expect(deletedDuringLoad.size).toBe(0);
+    expect(useWorkspace.getState().fileOpenErrors.get("/w/b.md")).toContain("被外部删除");
+  });
 });
 
 describe("#166 删除文件快照竞态", () => {

@@ -16,6 +16,7 @@ import {
   persistDeletedSnapshot,
   persistRecentFiles,
   pushRecent,
+  settledPathOfRequest,
   wasDeletedDuringLoad,
 } from "./shared";
 import type { OpenTab, WorkspaceState } from "./types";
@@ -147,7 +148,16 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
     onSettledPath?: (registeredPath: string) => void,
   ): Promise<string> => {
     const existing = fileRequests.get(filePath);
-    if (existing) return existing;
+    if (existing) {
+      // issue #200 评审修复：同路径并发（树中快速双击、主面板与分屏同开）
+      // 命中共享请求时，加入方的 onSettledPath 不得被静默丢弃——在途重命名
+      // 后加入方同样需要落定路径，否则仍按旧路径建幽灵 tab、删除黑名单对照
+      // 失配。落定路径由创建方在删条目前写入 settledPathOfRequest，此处读取
+      // 必然已填充；未命中（理论不可达）时回退到发起路径，等价旧行为。
+      return existing.finally(() => {
+        onSettledPath?.(settledPathOfRequest.get(existing) ?? filePath);
+      });
+    }
 
     set((current) => {
       const openingFiles = new Set(current.openingFiles);
@@ -159,7 +169,20 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
 
     let request: Promise<string>;
     request = Promise.resolve()
-      .then(() => readTextFile(filePath))
+      .then(async () => {
+        const content = await readTextFile(filePath);
+        // issue #166 复合（#200 评审）：「读取在途被删除」（含先重命名再删除）
+        // 的拦截统一放在请求体内——按身份查当前注册路径，命中即恢复快照并
+        // 拒绝。所有并发等待方共享同一次拒绝，不会出现黑名单被创建方消费后、
+        // 加入方仍为已删除文件建出漏网 tab 的窗口。
+        const registeredPath = findRequestPath(request);
+        if (registeredPath !== null && wasDeletedDuringLoad(registeredPath)) {
+          consumeDeletedDuringLoad(registeredPath);
+          persistDeletedSnapshot(registeredPath, content);
+          throw new Error(`文件在加载期间被外部删除，已创建恢复备份：${registeredPath}`);
+        }
+        return content;
+      })
       .catch((error) => {
         const registeredPath = findRequestPath(request);
         if (registeredPath !== null) {
@@ -180,8 +203,10 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
         // 否则重开会命中陈旧（或已拒绝）的缓存 Promise
         const registeredPath = findRequestPath(request);
         if (registeredPath === null) return;
-        // issue #200：删除条目前先把最终注册路径回传（迁移后 ≠ 发起路径）。
-        // .finally 先于 await 方的续体执行，settle 后读取必能拿到迁移结果。
+        // issue #200：删除条目前先把最终注册路径写入请求级 WeakMap 并回传
+        // （迁移后 ≠ 发起路径）。.finally 先于 await 方与加入方反应执行，
+        // settle 后读取必能拿到迁移结果。
+        settledPathOfRequest.set(request, registeredPath);
         onSettledPath?.(registeredPath);
         fileRequests.delete(registeredPath);
         set((current) => {
@@ -210,8 +235,10 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
     });
 
     // issue #166：读取在途期间文件被外部删除时，不得为「已删除文件」
-    // 照常创建干净 tab（后续编辑将游离在快照保护之外）——
-    // 把刚读到的内容写入恢复快照并拒绝建 tab。
+    // 照常创建干净 tab（后续编辑将游离在快照保护之外）——把刚读到的
+    // 内容写入恢复快照并拒绝建 tab。
+    // 主拦截在 readFileOnce 请求体内（见上，所有并发等待方共享同一拒绝）；
+    // 黑名单登记落在请求级检查之后、本续体之前的极窄窗口内时，此守卫兜底。
     // 黑名单按删除瞬间 fileRequests 的注册路径登记：若先重命名后删除，
     // 黑名单在新路径下，故须用 tabPath 对照（#200 场景 3）。
     if (wasDeletedDuringLoad(tabPath)) {
