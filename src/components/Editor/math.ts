@@ -8,11 +8,27 @@ import type { NodeView, NodeViewConstructor } from "@milkdown/kit/prose/view";
 import type { EditorView as PMView } from "@milkdown/kit/prose/view";
 import type { Node } from "@milkdown/kit/prose/model";
 import remarkMath from "remark-math";
-import katex from "katex";
-import "katex/dist/katex.min.css";
-// mhchem 扩展：让 KaTeX 支持 \ce{} \cee{} 等化学方程式语法（仅副作用引入）
-// @ts-ignore - contrib 模块无类型声明
-import "katex/dist/contrib/mhchem.js";
+
+// issue #168：KaTeX 懒加载——首次遇到公式节点才动态导入（JS + 样式 + mhchem），
+// 复用 code-block-view 语言的既有范式；~822KB vendor_katex 不再进入启动加载图。
+// Promise 缓存，后续渲染复用。
+type KatexModule = typeof import("katex").default;
+let katexPromise: Promise<KatexModule> | null = null;
+function loadKatex(): Promise<KatexModule> {
+  if (!katexPromise) {
+    katexPromise = (async () => {
+      const [katexMod] = await Promise.all([
+        import("katex"),
+        import("katex/dist/katex.min.css"),
+        // mhchem 扩展：支持 \ce{} 等化学方程式（副作用模块，须在渲染前加载）
+        // @ts-ignore - contrib 模块无类型声明
+        import("katex/dist/contrib/mhchem.js"),
+      ]);
+      return katexMod.default;
+    })();
+  }
+  return katexPromise;
+}
 
 /**
  * 行内数学节点 math_inline
@@ -110,8 +126,9 @@ export const mathDisplaySchema = $nodeSchema("math_display", () => ({
 /** 注册 remark-math：产生 inlineMath / math mdast 节点 */
 export const remarkMathPlugin = $remark("remarkMath", () => remarkMath);
 
-/** 用 KaTeX 渲染数学节点的 NodeView 工厂。双击节点可内联编辑 LaTeX 源码。 */
-function createMathView(displayMode: boolean): NodeViewConstructor {
+/** 用 KaTeX 渲染数学节点的 NodeView 工厂。双击节点可内联编辑 LaTeX 源码。
+ * 导出供单测直接构造（issue #168 懒加载行为验证） */
+export function createMathView(displayMode: boolean): NodeViewConstructor {
   return (node: Node, view: PMView, getPos: () => number | undefined): NodeView => {
     const dom = document.createElement(displayMode ? "div" : "span");
     dom.className = displayMode ? "math-display" : "math-inline";
@@ -122,7 +139,11 @@ function createMathView(displayMode: boolean): NodeViewConstructor {
     let editing = false;
     let editor: HTMLTextAreaElement | null = null;
 
+    // issue #168：katex 改为异步加载，render 以 seq 守卫发射——
+    // 加载返回时若已有更新的 render（节点值快速变化），丢弃旧结果
+    let renderSeq = 0;
     const render = (value: string, number: number | null) => {
+      const seq = ++renderSeq;
       dom.setAttribute("data-value", value);
       // 空公式：显示占位提示，避免 KaTeX 渲染空字符串导致节点不可见
       if (!value) {
@@ -133,20 +154,23 @@ function createMathView(displayMode: boolean): NodeViewConstructor {
         return;
       }
       dom.classList.remove("math-empty");
-      // display 公式启用自动编号时追加 \tag{n}（用户手写 \tag 时不覆盖）
-      let expr = value;
-      if (displayMode && number != null && !/\\tag\b/.test(value)) {
-        expr = `${value} \\tag{${number}}`;
-      }
-      try {
-        dom.innerHTML = katex.renderToString(expr, {
-          displayMode,
-          throwOnError: false,
-          output: "html",
-        });
-      } catch {
-        dom.textContent = value;
-      }
+      void loadKatex().then((katex) => {
+        if (seq !== renderSeq) return; // 已被后续渲染取代
+        // display 公式启用自动编号时追加 \tag{n}（用户手写 \tag 时不覆盖）
+        let expr = value;
+        if (displayMode && number != null && !/\\tag\b/.test(value)) {
+          expr = `${value} \\tag{${number}}`;
+        }
+        try {
+          dom.innerHTML = katex.renderToString(expr, {
+            displayMode,
+            throwOnError: false,
+            output: "html",
+          });
+        } catch {
+          dom.textContent = value;
+        }
+      });
     };
     render(current.attrs.value as string, displayMode ? (current.attrs.number as number | null) : null);
 
