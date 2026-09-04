@@ -6,7 +6,7 @@
 // 1. 保留本地并另存副本 → 本地内容写入 *.backup.md，编辑器重载磁盘最新
 // 2. 丢弃本地修改 → 直接重载磁盘最新
 // 3. 查看差异 → 行级 Diff 视图，知情后再决定（另存副本/用本地覆盖磁盘/继续编辑）
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useConflict } from "../../store/conflict";
 import { useWorkspace } from "../../store/workspace";
 import { writeTextFile, listDir } from "../../lib/fs";
@@ -49,8 +49,45 @@ export function ConflictDialog() {
     return diffLines(conflict.localContent, conflict.diskContent);
   }, [conflict, showDiff]);
 
+  const overlayRef = useRef<HTMLDivElement>(null);
+
+  /** 继续编辑：仅同步磁盘基线后关闭对话框（有意不清 conflictPending，见 handleDismiss 注释） */
+  const dismissKeepEditing = () => {
+    const c = useConflict.getState().conflict;
+    if (!c) return;
+    setTabDiskContent(c.filePath, c.diskContent);
+    dismiss();
+  };
+
+  // issue #186：Esc 关闭。主视图 Esc 等价「继续编辑」（与主按钮共用 dismissKeepEditing）；
+  // 差异视图 Esc 先退回选项（同顶部返回按钮）。busy 期间忽略，避免打断异步动作。
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape" || busy) return;
+      const c = useConflict.getState().conflict;
+      if (!c) return;
+      e.preventDefault();
+      e.stopPropagation();
+      if (showDiff) {
+        setShowDiff(false);
+        return;
+      }
+      dismissKeepEditing();
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [showDiff, busy, dismiss, setTabDiskContent]);
+
+  // issue #186：打开对话框/切换视图时把焦点移入主操作按钮
+  useEffect(() => {
+    const primary = overlayRef.current?.querySelector<HTMLButtonElement>(
+      ".conflict-btn-primary:not(:disabled)",
+    );
+    primary?.focus();
+  }, [conflict, showDiff]);
+
   if (!conflict) return null;
-  const { filePath, localContent, diskContent } = conflict;
+  const { filePath, localContent } = conflict;
 
   const handleDismiss = () => {
     // 用户选择「继续编辑（稍后自行保存会覆盖磁盘）」，只同步磁盘基线：
@@ -60,8 +97,7 @@ export function ConflictDialog() {
     // 清除标志会让自动保存 2s 后自动覆盖磁盘，与用户选择直接矛盾；保留标志 =
     // 自动保存持续暂停 + 状态栏可见 + 指示器可点击触发手动保存（issue #149）。
     // 该语义由 tests/unit/conflict-dismiss-autosave.test.tsx 锁定。
-    setTabDiskContent(filePath, diskContent);
-    dismiss();
+    dismissKeepEditing();
   };
 
   const wrap = (fn: () => Promise<void>) => async () => {
@@ -97,7 +133,7 @@ export function ConflictDialog() {
   if (showDiff && diff) {
     const changed = diff.filter((l) => l.op !== "equal");
     return (
-      <div className="conflict-overlay" role="dialog" aria-modal="true" aria-label="文件冲突差异对比">
+      <div className="conflict-overlay" ref={overlayRef} role="dialog" aria-modal="true" aria-label="文件冲突差异对比">
         <div className="conflict-dialog conflict-dialog-diff">
           <div className="conflict-header">
             <span className="conflict-title">
@@ -147,7 +183,7 @@ export function ConflictDialog() {
   }
 
   return (
-    <div className="conflict-overlay" role="dialog" aria-modal="true" aria-label="文件冲突">
+    <div className="conflict-overlay" ref={overlayRef} role="dialog" aria-modal="true" aria-label="文件冲突">
       <div className="conflict-dialog">
         <div className="conflict-header">
           <span className="conflict-title">

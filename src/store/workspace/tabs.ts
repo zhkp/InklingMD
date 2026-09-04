@@ -139,8 +139,13 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
     return null;
   };
 
-  /** 读取文件并维护逐文件加载状态；同一路径的并发调用共享同一请求 */
-  const readFileOnce = (filePath: string): Promise<string> => {
+  /** 读取文件并维护逐文件加载状态；同一路径的并发调用共享同一请求。
+   *  onSettledPath：settle 时回传请求当前注册路径（issue #200）——读取在途
+   *  发生重命名会把条目迁到新路径，调用方据此把 tab 建到新路径而非旧路径。 */
+  const readFileOnce = (
+    filePath: string,
+    onSettledPath?: (registeredPath: string) => void,
+  ): Promise<string> => {
     const existing = fileRequests.get(filePath);
     if (existing) return existing;
 
@@ -175,6 +180,9 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
         // 否则重开会命中陈旧（或已拒绝）的缓存 Promise
         const registeredPath = findRequestPath(request);
         if (registeredPath === null) return;
+        // issue #200：删除条目前先把最终注册路径回传（迁移后 ≠ 发起路径）。
+        // .finally 先于 await 方的续体执行，settle 后读取必能拿到迁移结果。
+        onSettledPath?.(registeredPath);
         fileRequests.delete(registeredPath);
         set((current) => {
           if (!current.openingFiles.has(registeredPath)) return {};
@@ -188,21 +196,30 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
   };
 
   /** 确保文件已加入标签页，但不改变主面板或分屏的活跃文件 */
-  const ensureTab = async (filePath: string): Promise<OpenTab> => {
-    const existing = get().openTabs.find((tab) => tab.path === filePath);
+  const ensureTab = async (requestedPath: string): Promise<OpenTab> => {
+    const existing = get().openTabs.find((tab) => tab.path === requestedPath);
     if (existing) return existing;
 
-    const content = await readFileOnce(filePath);
+    // issue #200：读取在途时路径被重命名，onFileRenamed 会把在途条目迁到
+    // 新路径。完成后以 settle 时的注册路径建 tab（tabPath），否则按闭包捕获
+    // 的旧路径建 tab 会出现「幽灵 tab」（文件已不在旧路径，后续保存会在
+    // 旧路径重建文件造成数据分叉）。未重命名时 tabPath === requestedPath。
+    let tabPath = requestedPath;
+    const content = await readFileOnce(requestedPath, (settled) => {
+      tabPath = settled;
+    });
 
     // issue #166：读取在途期间文件被外部删除时，不得为「已删除文件」
     // 照常创建干净 tab（后续编辑将游离在快照保护之外）——
-    // 把刚读到的内容写入恢复快照并拒绝建 tab
-    if (wasDeletedDuringLoad(filePath)) {
-      consumeDeletedDuringLoad(filePath);
-      persistDeletedSnapshot(filePath, content);
+    // 把刚读到的内容写入恢复快照并拒绝建 tab。
+    // 黑名单按删除瞬间 fileRequests 的注册路径登记：若先重命名后删除，
+    // 黑名单在新路径下，故须用 tabPath 对照（#200 场景 3）。
+    if (wasDeletedDuringLoad(tabPath)) {
+      consumeDeletedDuringLoad(tabPath);
+      persistDeletedSnapshot(tabPath, content);
       set((current) => {
         const fileOpenErrors = new Map(current.fileOpenErrors);
-        fileOpenErrors.set(filePath, "文件在加载期间被外部删除，已创建恢复备份");
+        fileOpenErrors.set(tabPath, "文件在加载期间被外部删除，已创建恢复备份");
         return { fileOpenErrors };
       });
       throw new Error("文件在加载期间被外部删除");
@@ -210,20 +227,21 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
 
     let mtime: number | undefined;
     try {
-      mtime = await fileMtime(filePath);
+      mtime = await fileMtime(tabPath);
     } catch {
       // 忽略 mtime 获取失败，降级为 undefined
     }
     let resolvedTab: OpenTab | undefined;
     set((current) => {
-      const currentTab = current.openTabs.find((tab) => tab.path === filePath);
+      // 按最终路径复查：并发请求（旧路径与迁移后新路径）可能已先建 tab
+      const currentTab = current.openTabs.find((tab) => tab.path === tabPath);
       if (currentTab) {
         resolvedTab = currentTab;
         return {};
       }
 
       resolvedTab = {
-        path: filePath,
+        path: tabPath,
         content,
         dirty: false,
         lastSavedAt: null,
@@ -314,8 +332,9 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
 
     openFile: async (filePath) => {
       const intent = ++intents.mainFile;
-      await ensureTab(filePath);
-      activateMainTab(filePath, intent);
+      const tab = await ensureTab(filePath);
+      // 以实际落定的 tab 路径激活（issue #200：在途重命名后 tab 建在新路径）
+      activateMainTab(tab.path, intent);
     },
 
     reloadFile: async (filePath) => {
@@ -430,9 +449,9 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
       const intent = ++intents.splitFile;
       const tab = await ensureTab(filePath);
       if (intent !== intents.splitFile) return;
-      // 不让分屏文件与主文件相同（无对照意义）
-      if (filePath === get().currentFile) return;
-      set({ splitFile: filePath, splitContent: tab.content });
+      // 不让分屏文件与主文件相同（无对照意义）——用落定路径判断
+      if (tab.path === get().currentFile) return;
+      set({ splitFile: tab.path, splitContent: tab.content });
     },
 
     splitClose: () => {

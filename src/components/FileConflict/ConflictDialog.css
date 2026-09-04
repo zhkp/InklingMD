@@ -8,7 +8,9 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  z-index: 110; /* 高于设置面板等普通模态 */
+  /* issue #186：数据安全级模态——自动保存已暂停，提示必须可见。
+     高于全局搜索(150)/快捷键(120)等面板及瞬态菜单（现有最高 1000）。 */
+  z-index: 2000;
   animation: conflict-backdrop-in 0.15s var(--ease, ease);
 }
 
