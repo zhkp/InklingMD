@@ -85,7 +85,18 @@ export function sanitizeMermaidSvg(svgHtml: string): globalThis.Node {
 
   return document.importNode(root, true);
 }
-import mermaid from "mermaid";
+
+// issue #168：mermaid 懒加载——首次遇到图表节点才动态导入（复用
+// code-block-view 语言的既有范式），~3.1MB vendor_mermaid 不再进入启动
+// 加载图；Promise 缓存，后续渲染复用。缓存命中的渲染无需加载模块。
+type MermaidModule = typeof import("mermaid").default;
+let mermaidModulePromise: Promise<MermaidModule> | null = null;
+function loadMermaid(): Promise<MermaidModule> {
+  if (!mermaidModulePromise) {
+    mermaidModulePromise = import("mermaid").then((m) => m.default);
+  }
+  return mermaidModulePromise;
+}
 
 // 初始化一次 Mermaid 运行时
 //
@@ -111,10 +122,14 @@ export const MERMAID_CONFIG = {
 } as const;
 
 let initialized = false;
-function ensureInit() {
-  if (initialized) return;
-  mermaid.initialize(MERMAID_CONFIG);
-  initialized = true;
+/** issue #168：加载模块并确保已初始化，返回 mermaid 实例 */
+async function ensureMermaid(): Promise<MermaidModule> {
+  const mermaid = await loadMermaid();
+  if (!initialized) {
+    mermaid.initialize(MERMAID_CONFIG);
+    initialized = true;
+  }
+  return mermaid;
 }
 
 /**
@@ -248,12 +263,14 @@ export async function renderMermaidWithSeq(
   seq: number,
   getCurrentSeq: () => number,
 ): Promise<string | null> {
-  ensureInit();
+  // 缓存命中无需加载 mermaid 模块（issue #168）
   const cached = cacheGet(code)?.svg;
   if (cached) {
     if (seq !== getCurrentSeq()) return null;
     return cached;
   }
+  const mermaid = await ensureMermaid();
+  if (seq !== getCurrentSeq()) return null;
   try {
     const id = `mermaid-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
     const result = await mermaid.render(id, code);
@@ -278,7 +295,7 @@ export function createMermaidView(
   view: PMView,
   getPos: () => number | undefined,
 ): NodeView {
-  ensureInit();
+  // issue #168：mermaid 模块延迟到首次渲染时加载，构造仅搭建占位 DOM
 
   const container = document.createElement("div");
   container.className = "mermaid-block";
