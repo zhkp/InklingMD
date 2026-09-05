@@ -4,23 +4,23 @@
 
 ## [3.0.0] - 2026-09-05
 
-> **主版本发布**：自 v2.8.1 以来最大规模的一次质量攻坚，共关闭 **33 个 GitHub Issues**、合入 **7 个 PR**，涉及 61 个提交、113 个文件（+8486 / −722 行）。本版本不含新功能，全部投入于**数据安全、竞态治理、崩溃兜底、性能优化、安全加固与可访问性**六个方向，使应用的可靠性基线整体抬升一个层级。
+> **主版本发布**：自 v2.8.1 以来最大规模的一次质量攻坚，共关闭 **45 个 GitHub Issues**（#146–#188、#192、#200）、合入 **19 个 PR**（#189–#211），涉及 61 个代码提交、113 个文件（+8486 / −722 行，不含发版文档提交）。本版本不含新功能，全部投入于**数据安全、竞态治理、崩溃兜底、性能优化、安全加固与可访问性**六个方向，使应用的可靠性基线整体抬升一个层级。
 
 ### 数据安全与文件操作（Rust 侧加固）
 
-- **Windows 写入回退路径非原子（#146）**：原子替换失败后的回退分支原本「先删目标再 rename」，中间存在进程被杀即永久丢失文件的数据窗口。改为最多 4 次 × 50ms 退避的原子替换重试，全部失败则**保留原文件并报错**，绝不留下已删未建的中间态。新增 `replace_with_retry` 3 例 Rust 单测（可替换 / 独占占用保留原件 / 临时文件缺失保留原件）。
+- **Windows 写入回退路径非原子（#146）**：原子替换失败后的回退分支原本「先删目标再 rename」，中间存在进程被杀即永久丢失文件的数据窗口。改为最多 4 次 × 50ms 退避的原子替换重试，全部失败则**保留原文件并报错**，绝不留下已删未建的中间态。新增 `replace_file_with_retry` 3 例 Rust 单测（可替换 / 独占占用保留原件 / 临时文件缺失保留原件）。
 - **跨盘移动失败 + 目标存在性检查 TOCTOU（#161）**：`rename_path` 不支持跨卷移动，且 `exists()` 检查与替换式 `fs::rename` 之间存在「目标被并发创建后静默覆盖」的窗口。改为文件移动优先走**「硬链接 + 删源」原子占用目标名**（目标已存在时以 `AlreadyExists` 原子失败，闭合 TOCTOU 窗口；硬链接跨卷不支持时回落）；`fs::rename` 跨卷失败（`ERROR_NOT_SAME_DEVICE`/`EXDEV`）回退为**递归复制 + 删源**，复制失败时源原件保持完整、文件残块尽力清理，不再把裸 OS 错误抛给用户。
 - **读取编码错误生硬 + 无大小上限（#159）**：`read_text_file` 增加 **10MB 大小护栏**（先元数据判断，防止数百 MB 文件整体读入内存并经 JSON IPC 传输）；非 UTF-8 与超限场景返回**结构化错误标记**（`ENCODING_UNSUPPORTED` / `FILE_TOO_LARGE`），前端可据此给出可读提示而非原始 `FromUtf8Error`。
 - **删除文件快照的两处竞态（#166）**：快照早于序列化防抖发布采集、在途读取在删除后生成漏网 tab，两处时序缺陷一并修复。
 - **重命名与在途文件读取竞态（#177）**：重开文件可能拿到陈旧内容、加载状态永久卡死。修复后重命名期间的在途读取能正确收敛。
-- **读取在途重命名产生幽灵 tab（#200，PR #200/#199）**：#177 修复后的已知边界——读取在途时重命名，完成后 `ensureTab` 仍按旧路径创建幽灵 tab。改为读取完成后按**当前路径**归属 tab；共享在途请求的「加入方」也能拿到落定路径（PR #200 评审项），堵住并发幽灵 tab 与黑名单漏拦。
+- **读取在途重命名产生幽灵 tab（#200，PR #199/#207）**：#177 修复后的已知边界——读取在途时重命名，完成后 `ensureTab` 仍按旧路径创建幽灵 tab。改为读取完成后按**当前路径**归属 tab；共享在途请求的「加入方」也能拿到落定路径（PR #207 评审项），堵住并发幽灵 tab 与黑名单漏拦。
 
 ### 保存与冲突链路
 
 - **全局 saving 标志按整个工作区生效（#148）**：任一保存挂在对话框期间，其他标签页的保存被静默吞掉。改为 `OpenTab` 各自持有 `saving` 标志，`saveCurrent` 只拦本 tab 重入；`switchTab` / 写盘完成 / 异常路径的顶层 `saving` 镜像统一从活跃 tab 派生。
 - **自动保存遇非交互冲突后无限 2s 重试（#149）**：无退避、无错误态、每轮全量读盘。`conflictPending` 期间**暂停自动保存**，消除空转；失败退避计数 `failCount` **按文件隔离**，A 文件的失败不再拖慢 B 文件。
 - **conflictPending 冲突解决后不清除（#164）**：`reloadFile` 统一清除 tab 与镜像的 `conflictPending`，冲突经重载 / 另存副本解决后状态栏不再误报、指示器点击恢复有效。
-- **文件监听重载决策竞态（#170）**：`useFileWatcher` 重载决策前 flush 发布防抖、弹窗后复核 dirty，消除「丢编辑」与「重载失效」两类竞态（PR #170 评审项：冲突流读盘往返后再次 flush，把 `localContent` 收进尾部输入）。
+- **文件监听重载决策竞态（#170）**：`useFileWatcher` 重载决策前 flush 发布防抖、弹窗后复核 dirty，消除「丢编辑」与「重载失效」两类竞态（PR #208 评审项：冲突流读盘往返后再次 flush，把 `localContent` 收进尾部输入）。
 - **冲突对话框层级与键盘可达性（#186）**：层级低于全局搜索 / 快捷键面板导致被遮挡，补 Esc 关闭与打开时的焦点管理。
 
 ### 编辑器与查找替换
@@ -76,7 +76,7 @@
 
 ### 社区贡献（@TomGoh）
 
-本版本的重要一部分由社区贡献者 **Haoze Wu（[@TomGoh](https://github.com/TomGoh)）** 完成，共 9 个提交：
+本版本的重要一部分由社区贡献者 **Haoze Wu（[@TomGoh](https://github.com/TomGoh)）** 完成（PR #194/#195/#196/#201，关闭 #154–#157、#169、#175、#179–#183 共 11 个 issue），共 9 个提交：
 
 - **大纲（TOC）实时性与性能**：标题扫描防抖（debounce heading scans）、标题变化时刷新大纲（refresh toc when headings change），并新增「大纲节点身份保持稳定」单测与 TOC E2E——`src/components/Editor/toc.ts`。
 - **链接对话框主题一致性**：恢复链接对话框主题样式（restore link dialog theme styles）、让自定义链接配色真正生效（honor custom link dialog colors），配套 `Issue180ThemeTokens` 主题令牌单测与 `link-dialog-theme` 浏览器端 E2E。
@@ -87,11 +87,11 @@
 
 - **Vitest**：115 个单测文件、**745 个用例**全部通过（较 v2.8.1 的 82 文件 / 542 用例大幅增长）。
 - **Playwright E2E**：**169 个用例**全部通过，零 flaky。
-- **Rust**：`cargo test` **59 个用例**全部通过（较 v2.8.1 的 27 个翻倍）。
+- **Rust**：`cargo test` **Windows 59 / ubuntu 55 个用例**全部通过（ubuntu 少的 4 个为 `#[cfg(windows)]` 专属用例，在 Linux 不参与编译；较 v2.8.1 的 27 个翻倍）。
 - **构建门禁**：`tsc --noEmit` 零错误、`vite build` 通过、CI（windows-latest + ubuntu-latest 双平台矩阵）全绿。
 - **变异验证**：本批次每个修复均按项目规范做反向改动验证——确认新测试会失败、还原后恢复，杜绝恒真断言（如 #188 关闭菜单聚焦首项 / 禁用 Enter-Space / 移除 `aria-level` / 指示器回退 `<span>` / `gs-toggle` 改回 `display:none` 均验证到对应用例失败）。
 
-> **已知环境限制（非代码缺陷）**：`cross_device_copy_rejects_directory_containing_symlink`、`cross_device_copy_rejects_symlink_source`、`same_volume_rename_moves_symlink_itself_not_its_target` 三个 Rust 用例需要操作系统支持创建符号链接。在未开启「Windows 开发者模式」的机器上会因权限不足而失败；CI（windows-latest / ubuntu-latest）环境具备该能力，**59/59 全绿**。
+> **符号链接用例的环境依赖（非代码缺陷）**：`cross_device_copy_rejects_directory_containing_symlink`、`cross_device_copy_rejects_symlink_source`、`same_volume_rename_moves_symlink_itself_not_its_target` 三个 Rust 用例需要操作系统支持创建符号链接。三个用例均带 `try_make_symlink_in` 守卫：无符号链接权限（如 Windows 未开启开发者模式且非管理员）时创建调用返回 `Err`，守卫据此跳过用例，不会误报失败。CI windows-latest 与本机 Windows 实测均 **59/59 全绿**；ubuntu-latest 为 **55/59**，差异来自 4 个 `#[cfg(windows)]` 专属用例（`replace_file_with_retry` 系列 3 例 + 搜索侧符号链接用例的 Windows 变体 1 例）在 Linux 不参与编译，属预期行为。
 
 ## [2.8.1] - 2026-08-30
 
