@@ -20,6 +20,7 @@ import { useConflict } from "../store/conflict";
 import { askConfirmation } from "./dialogs";
 import { fileMtime, readTextFile } from "./fs";
 import { baseName } from "./path-utils";
+import { flushAllMarkdownPublishers } from "../components/Editor/markdown-publisher";
 
 const POLL_INTERVAL = 3000;
 const SAVE_IGNORE_WINDOW = 2000;
@@ -39,7 +40,7 @@ export function useFileWatcher(): void {
 
     const check = async () => {
       if (cancelled) return;
-      const { openTabs, currentFile, dirty, reloadFile } = useWorkspace.getState();
+      const { openTabs, currentFile, reloadFile } = useWorkspace.getState();
       if (openTabs.length === 0) return;
       // C：保存忽略窗内不弹窗，但检查继续跑——窗内的轮询会把自家写盘后的
       // mtime 刷成新基线，窗口一过就不会因为基线陈旧而补一次误报。
@@ -47,6 +48,81 @@ export function useFileWatcher(): void {
 
       const tabsToCheck = openTabs.filter((t) => !t.isUntitled);
       const isConflictOpen = Boolean(useConflict.getState().conflict);
+
+      /**
+       * 冲突流：本地有未保存修改（或复核后变脏）时，读磁盘最新内容并弹
+       * ConflictDialog（三选项 + Diff）；磁盘读取失败（文件被删除等）退化为
+       * 统一的确认框（丢弃当前修改并重载）。
+       */
+      const openConflictFlow = async (filePath: string) => {
+        try {
+          const diskContent = await readTextFile(filePath);
+          if (cancelled) return;
+          if (useWorkspace.getState().currentFile !== filePath) return;
+          // issue #170 评审：readTextFile 往返期间 overlay 未渲染、编辑器仍可
+          // 交互，用户这段尾部输入处于 150ms 防抖内未发布——openConflict 的
+          // localContent 取自 currentContent，不 flush 会漏掉尾部输入（备份与
+          // Diff 都基于陈旧快照，用户可能据此做出丢编辑决策）。此处再 flush：
+          // 无新输入时 timer 为空，序列化函数零成本（markdown-publisher.ts）。
+          flushAllMarkdownPublishers();
+          useConflict.getState().openConflict({
+            filePath,
+            localContent: useWorkspace.getState().currentContent,
+            diskContent,
+            detectedAt: Date.now(),
+          });
+        } catch {
+          // 磁盘读取失败（文件被删除等）：使用统一 dialog 提示
+          const shouldReload = await askConfirmation(
+            `「${baseName(filePath)}」已被外部修改或删除，且当前有未保存的修改。\n是否丢弃当前修改并重新加载？`,
+            { title: "文件冲突", kind: "warning" },
+          );
+          if (shouldReload) {
+            try {
+              await reloadFile(filePath);
+            } catch (err) {
+              console.warn("reloadFile failed", err);
+            }
+            knownMtimesRef.current.delete(filePath);
+          }
+        }
+      };
+
+      /**
+       * 活跃文件的外部修改决策（issue #170）：
+       * 编辑器序列化有 150ms 防抖，store 的 dirty 镜像可能落后于「用户刚输入
+       * 但尚未发布」的内容——直接按镜像判定会走「干净→询问重载」，重载会把
+       * 这些编辑静默丢弃。决策前统一 flush（与 switchTab 入口一致），让 dirty
+       * 反映真实状态；确认框停留期间防抖发布同样可能使内容变脏，重载前须
+       * 复核，变脏改走冲突对话框而不是无条件覆盖。
+       */
+      const handleActiveFileChange = async (filePath: string) => {
+        flushAllMarkdownPublishers();
+        const latest = useWorkspace.getState();
+        if (latest.currentFile === filePath && latest.dirty) {
+          await openConflictFlow(filePath);
+          return;
+        }
+        // 本地无修改：询问重载
+        const shouldReload = await askConfirmation(
+          `「${baseName(filePath)}」已被外部修改，是否重新加载？`,
+          { title: "文件已被外部修改", kind: "info" },
+        );
+        if (!shouldReload) return;
+        // 弹窗期间防抖发布可能已把编辑写进 store：重载前复核 dirty
+        flushAllMarkdownPublishers();
+        const now = useWorkspace.getState();
+        if (now.currentFile === filePath && now.dirty) {
+          await openConflictFlow(filePath);
+          return;
+        }
+        try {
+          await reloadFile(filePath);
+        } catch (err) {
+          console.warn("reloadFile failed", err);
+        }
+        knownMtimesRef.current.delete(filePath);
+      };
 
       for (const tab of tabsToCheck) {
         if (cancelled) return;
@@ -96,48 +172,7 @@ export function useFileWatcher(): void {
 
         // 如果是当前活跃文件且未打开冲突对话框，则触发相应处理
         if (isActive && !isConflictOpen) {
-          if (dirty) {
-            // 本地有未保存修改：读取磁盘最新内容，弹冲突对话框（三选项 + Diff）
-            try {
-              const diskContent = await readTextFile(filePath);
-              if (cancelled) return;
-              if (useWorkspace.getState().currentFile !== filePath) return;
-              useConflict.getState().openConflict({
-                filePath,
-                localContent: useWorkspace.getState().currentContent,
-                diskContent,
-                detectedAt: Date.now(),
-              });
-            } catch {
-              // 磁盘读取失败（文件被删除等）：使用统一 dialog 提示
-              const shouldReload = await askConfirmation(
-                `「${baseName(filePath)}」已被外部修改或删除，且当前有未保存的修改。\n是否丢弃当前修改并重新加载？`,
-                { title: "文件冲突", kind: "warning" },
-              );
-              if (shouldReload) {
-                try {
-                  await reloadFile(filePath);
-                } catch (err) {
-                  console.warn("reloadFile failed", err);
-                }
-                knownMtimesRef.current.delete(filePath);
-              }
-            }
-          } else {
-            // 本地无修改：询问重载
-            const shouldReload = await askConfirmation(
-              `「${baseName(filePath)}」已被外部修改，是否重新加载？`,
-              { title: "文件已被外部修改", kind: "info" },
-            );
-            if (shouldReload) {
-              try {
-                await reloadFile(filePath);
-              } catch (err) {
-                console.warn("reloadFile failed", err);
-              }
-              knownMtimesRef.current.delete(filePath);
-            }
-          }
+          await handleActiveFileChange(filePath);
         }
       }
     };

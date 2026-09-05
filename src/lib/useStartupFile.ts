@@ -22,9 +22,15 @@ export function useStartupFile() {
 
     // 主窗口：拉取首次启动的待打开文件
     let cancelled = false;
-    invoke<string | null>("take_pending_file").then((p) => {
-      if (!cancelled && p) void open(p).catch(() => {});
-    });
+    invoke<string | null>("take_pending_file")
+      .then((p) => {
+        if (!cancelled && p) void open(p).catch(() => {});
+      })
+      .catch(() => {
+        // issue #171：take_pending_file 失败（Rust 命令异常等）不应放大成启动即
+        // 崩溃——记日志降级，用户照常进入编辑器、可手动打开文件。
+        console.warn("[useStartupFile] take_pending_file 失败，跳过待打开文件");
+      });
 
     // 主窗口：监听单实例转发的双击打开事件
     const unlisten = listen<string>("open-file", (e) => {
