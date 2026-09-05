@@ -62,6 +62,7 @@ import {
 import { slashMenuPlugin } from "./slash-menu";
 import { autoPairPlugin } from "./auto-pair";
 import { SourceModeEditor } from "./SourceModeEditor";
+import { useEditorFallback } from "./useEditorFallback";
 import type { EditorView } from "@milkdown/kit/prose/view";
 
 interface EditorProps {
@@ -140,12 +141,17 @@ function EditorInner({
   const saveCursorStateRef = useRef(saveCursorState);
   saveCursorStateRef.current = saveCursorState;
 
+  // #172 加载降级：区分「create 慢启动（终会就绪）」与「真失败（永不就绪）」
+  const [loading, getEditor] = useInstance();
+  const { fallback, slowStart, markFactoryFailed } = useEditorFallback(loading, getEditor);
+
   useEditor(
     (container) => {
       // 整个工厂包 try/catch：任何插件初始化抛错时返回 undefined，
       // 避免异常冒泡导致 React 卸载整棵树白屏。
-      // 返回 undefined 后 useInstance 的 loading 不会结束，
-      // 下方的降级检测会在超时后切换到只读 textarea 显示原始内容。
+      // 工厂返回 undefined 后 @milkdown/react 的 loading 永不结束（它只在
+      // create() 的 finally 里翻 false），由 markFactoryFailed() 显式上报，
+      // 降级检测立即切到只读 textarea（issue #172，原实现靠 3 秒超时误判）。
       try {
         return Editor.make()
           .config((ctx) => {
@@ -232,30 +238,13 @@ function EditorInner({
           .use(history);
       } catch (e) {
         console.error("Milkdown 编辑器初始化失败：", e);
+        markFactoryFailed();
         return undefined;
       }
     },
     // 依赖数组为空，编辑器只在挂载时创建一次；filePath 变化由外层 key 触发重建
     [],
   );
-
-  const [loading, getEditor] = useInstance();
-
-  // 降级检测：
-  // 1) loading 持续超过 3 秒仍未就绪 → 工厂抛错返回 undefined
-  // 2) loading 切到 false 后 getEditor() 仍为空 → editor.create() 异步阶段抛错
-  //    （Milkdown React 集成层会 .catch(console.error) 吞掉错误，editorRef 不会赋值）
-  // 两种情况都切换到只读 textarea 模式显示原始 markdown，避免白屏。
-  const [fallback, setFallback] = useState(false);
-  useEffect(() => {
-    if (loading) {
-      const timer = setTimeout(() => setFallback(true), 3000);
-      return () => clearTimeout(timer);
-    }
-    // loading=false 后必须验证 editor 实例真的存在
-    const editor = getEditor();
-    setFallback(!editor);
-  }, [loading, getEditor]);
 
   // 在浏览器绘制可点击的大纲前发布实例；卸载时同步清除旧 getter。
   useLayoutEffect(() => {
@@ -507,6 +496,11 @@ function EditorInner({
         className="md-editor-wysiwyg"
         style={{ display: sourceMode ? "none" : undefined }}
       >
+        {slowStart && (
+          <div className="md-editor-slow-hint" role="status">
+            正在加载编辑器…（内容较大或设备较慢时首次渲染需要几秒）
+          </div>
+        )}
         <Milkdown />
       </div>
       {sourceMode && enterSnapshot && (
