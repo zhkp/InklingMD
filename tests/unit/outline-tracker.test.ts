@@ -150,20 +150,23 @@ describe("outlineTrackerPlugin 视口跟踪（缓存位置 + 二分）", () => {
     );
     onChange.mockClear();
 
-    // 顶部滚动：scrollTop=0，probe=12 ≥ 第一个标题位置 0 → 仍是 0，不发布
+    // #212：几何刷新（失效检测 + 批量重建）不在滚动帧上，而在滚动停歇
+    // 200ms 后。首次滚动排定停歇刷新，期间缓存尚未建立、不发布高亮。
     harness.scroller.dispatchEvent(new Event("scroll"));
-    (pendingFrame as ((time: number) => void) | null)?.(0);
+    await new Promise((r) => setTimeout(r, 260));
+    // 顶部滚动：scrollTop=0，probe=12 ≥ 第一个标题位置 0 → 仍是 0，不发布
     expect(onChange).not.toHaveBeenCalled();
     // 核心契约：绝不进入 posAtCoords 路径
     expect(posAtCoords).not.toHaveBeenCalled();
-    // 缓存重建批量读取标题元素位置
+    // 停歇刷新批量重建读取标题元素位置（单次）
     expect(nodeDOM).toHaveBeenCalledTimes(3);
 
     // 滚到 650：probe=662 ≥ 第三个标题位置 600 → 当前章节为标题 3。
-    // 第二次采样落在 120ms 节流窗口内，由尾随定时器在窗口结束后执行
+    // 缓存已就绪，滚动路径纯二分；第二次采样落在 120ms 节流窗口内，
+    // 由尾随定时器在窗口结束后执行
     harness.setScrollTop(650);
     harness.scroller.dispatchEvent(new Event("scroll"));
-    (pendingFrame as ((time: number) => void) | null)?.(1);
+    (pendingFrame as ((time: number) => void) | null)?.(0);
     await new Promise((r) => setTimeout(r, 160));
     expect(posAtCoords).not.toHaveBeenCalled();
     expect(onChange).toHaveBeenLastCalledWith(
@@ -175,37 +178,30 @@ describe("outlineTrackerPlugin 视口跟踪（缓存位置 + 二分）", () => {
     harness.scroller.remove();
   });
 
-  it("滚动总高变化（图表渲染等）触发缓存重建并按新位置定位", async () => {
+  it("滚动总高变化（图表渲染等）触发停歇重建并按新位置定位", async () => {
     const harness = makeHarness();
     const { view, nodeDOM } = makeView(harness);
     const onChange = vi.fn();
     const plugin = outlineTrackerPlugin(onChange);
 
-    let pendingFrame: ((time: number) => void) | null = null;
-    vi.spyOn(window, "requestAnimationFrame").mockImplementation(((callback: (time: number) => void) => {
-      pendingFrame = callback;
-      return 17;
-    }) as unknown as typeof window.requestAnimationFrame);
-    vi.spyOn(window, "requestAnimationFrame").mockImplementation(((callback: (time: number) => void) => {
-      pendingFrame = callback;
-      return 17;
-    }) as unknown as typeof window.requestAnimationFrame);
     plugin.spec.view?.(view);
     onChange.mockClear();
 
-    // 等待节流窗口过去，保证本次滚动立即采样
+    // 等待节流窗口过去，保证后续滚动立即采样
     await new Promise((r) => setTimeout(r, 150));
     // 第三个标题位置下移到 900（上方内容长高），文档总高变化
     harness.setHeadingPos(2, 900);
     harness.setScrollHeight(1200);
     harness.setScrollTop(650);
     harness.scroller.dispatchEvent(new Event("scroll"));
-    (pendingFrame as ((time: number) => void) | null)?.(0);
+    // #212：滚动路径不现场重建（不读 scrollHeight / 不批量读 rect——
+    // 那会在滚动帧上强制布局）；停歇 200ms 后几何刷新批量重建并定位
+    await new Promise((r) => setTimeout(r, 260));
     // probe=662：重建后位置 0/300/900 中最后一个 ≤662 的是第二个标题
     expect(onChange).toHaveBeenLastCalledWith(
       expect.objectContaining({ activeIndex: 1 }),
     );
-    // 首次采样触发一次批量重建（读取全部 3 个标题位置）
+    // 停歇重建批量读取全部 3 个标题位置（单次强制布局）
     expect(nodeDOM).toHaveBeenCalledTimes(3);
 
     vi.restoreAllMocks();
@@ -267,10 +263,11 @@ describe("outlineTrackerPlugin 视口跟踪（缓存位置 + 二分）", () => {
     // 首标题位于滚动坐标 56（模拟 .milkdown 2.5rem 顶部 padding +
     // h2 margin-top），未挂载占位/前言段落都在它之上
     harness.setHeadingPos(0, 56);
-    // 滚到深处：probe=662 落在第三个标题（600）→ activeIndex 2
+    // #212：先滚动一次并等待停歇几何刷新建立缓存（位置 56/300/600）
     harness.setScrollTop(650);
     harness.scroller.dispatchEvent(new Event("scroll"));
-    (pendingFrame as ((time: number) => void) | null)?.(0);
+    await new Promise((r) => setTimeout(r, 260));
+    // 滚到深处：probe=662 落在第三个标题（600）→ activeIndex 2
     expect(onChange).toHaveBeenLastCalledWith(
       expect.objectContaining({ activeIndex: 2 }),
     );
