@@ -48,6 +48,12 @@
 .tab:hover {
   background: var(--row-hover-bg, rgba(0, 0, 0, 0.04));
 }
+/* #188：tab 可被键盘聚焦（role=tab + tabIndex），给出可见焦点环 */
+.tab:focus-visible {
+  outline: 2px solid var(--accent, #0969da);
+  outline-offset: -2px;
+  border-radius: var(--radius-md, 6px) var(--radius-md, 6px) 0 0;
+}
 /* 活跃 tab：上浮卡片样式，与编辑区背景融为一体 */
 .tab-active {
   background: var(--editor-bg, #ffffff);
@@ -143,7 +149,9 @@
     color 0.12s var(--ease, ease);
 }
 .tab:hover .tab-close,
-.tab-active .tab-close {
+.tab-active .tab-close,
+.tab:focus-within .tab-close,
+.tab-close:focus-visible {
   opacity: 1;
 }
 /* 有未保存标记时不隐藏关闭按钮（防止误关未保存文件） */

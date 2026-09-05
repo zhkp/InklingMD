@@ -1,6 +1,8 @@
 // 导出下拉菜单：复制富文本/Markdown、导出 HTML/Word/PDF/PNG/大纲。
 // 富文本类导出依赖 ProseMirror DOM，源代码模式下不可用。
+import { useRef } from "react";
 import type { Editor } from "@milkdown/kit/core";
+import { useMenuA11y } from "../../hooks/useMenuA11y";
 import {
   exportHTML,
   exportPDF,
@@ -22,6 +24,10 @@ interface ExportMenuProps {
 }
 
 export function ExportMenu({ open, onOpenChange, getEditor, sourceMode }: ExportMenuProps) {
+  const menuRef = useRef<HTMLDivElement | null>(null);
+  // #188：打开聚焦首项 + 方向键导航（Esc 关闭由 EditorTopbar 统一处理）
+  useMenuA11y({ ref: menuRef, enabled: open, focusFirstOnOpen: true });
+
   /** 富文本类导出的源码模式守卫；被拦截时返回 true */
   const blockedBySourceMode = () => {
     if (sourceMode) {
@@ -37,6 +43,8 @@ export function ExportMenu({ open, onOpenChange, getEditor, sourceMode }: Export
         className="topbar-btn topbar-btn-label"
         onClick={() => onOpenChange(!open)}
         title="导出"
+        aria-haspopup="menu"
+        aria-expanded={open}
       >
         <IconDownload size={15} />
         导出
@@ -45,9 +53,9 @@ export function ExportMenu({ open, onOpenChange, getEditor, sourceMode }: Export
       {open && (
         <>
           <div className="export-backdrop" onClick={() => onOpenChange(false)} />
-          <div className="export-dropdown">
+          <div className="export-dropdown" role="menu" ref={menuRef}>
             <button
-              className="export-item"
+              className="export-item" role="menuitem"
               onClick={() => {
                 onOpenChange(false);
                 if (blockedBySourceMode()) return;
@@ -59,7 +67,7 @@ export function ExportMenu({ open, onOpenChange, getEditor, sourceMode }: Export
               复制为富文本
             </button>
             <button
-              className="export-item"
+              className="export-item" role="menuitem"
               onClick={() => {
                 onOpenChange(false);
                 void copyMarkdown().then((ok) => {
@@ -71,7 +79,7 @@ export function ExportMenu({ open, onOpenChange, getEditor, sourceMode }: Export
             </button>
             <div className="export-sep" />
             <button
-              className="export-item"
+              className="export-item" role="menuitem"
               onClick={() => {
                 onOpenChange(false);
                 if (blockedBySourceMode()) return;
@@ -81,7 +89,7 @@ export function ExportMenu({ open, onOpenChange, getEditor, sourceMode }: Export
               导出 HTML
             </button>
             <button
-              className="export-item"
+              className="export-item" role="menuitem"
               onClick={() => {
                 onOpenChange(false);
                 void exportDocx().then((r) => {
@@ -92,7 +100,7 @@ export function ExportMenu({ open, onOpenChange, getEditor, sourceMode }: Export
               导出 Word（.docx，Pandoc）
             </button>
             <button
-              className="export-item"
+              className="export-item" role="menuitem"
               onClick={() => {
                 onOpenChange(false);
                 if (blockedBySourceMode()) return;
@@ -102,7 +110,7 @@ export function ExportMenu({ open, onOpenChange, getEditor, sourceMode }: Export
               导出 PDF（打印）
             </button>
             <button
-              className="export-item"
+              className="export-item" role="menuitem"
               onClick={() => {
                 onOpenChange(false);
                 if (blockedBySourceMode()) return;
@@ -112,7 +120,7 @@ export function ExportMenu({ open, onOpenChange, getEditor, sourceMode }: Export
               导出长图（PNG）
             </button>
             <button
-              className="export-item"
+              className="export-item" role="menuitem"
               onClick={() => {
                 onOpenChange(false);
                 void exportOutline();

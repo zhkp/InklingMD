@@ -152,9 +152,37 @@ export function TabsBar() {
     closeTab(fresh.path);
   };
 
+  /** 激活 tab（点击 / Enter / Space 共用同一入口） */
+  const activatePath = (path: string) => {
+    flushAllMarkdownPublishers();
+    switchTab(path);
+  };
+
+  /** #188：tablist 键盘导航——左右切换 / Home/End 首尾（自动激活并移动焦点） */
+  const onTabListKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    const key = e.key;
+    if (key !== "ArrowRight" && key !== "ArrowLeft" && key !== "Home" && key !== "End") {
+      return;
+    }
+    const paths = useWorkspace.getState().openTabs.map((t) => t.path);
+    if (paths.length === 0) return;
+    const currentIdx = paths.indexOf(useWorkspace.getState().activeTabPath ?? "");
+    e.preventDefault();
+    let next: number;
+    if (key === "Home") next = 0;
+    else if (key === "End") next = paths.length - 1;
+    else if (key === "ArrowRight") next = currentIdx < 0 ? 0 : (currentIdx + 1) % paths.length;
+    else next = currentIdx <= 0 ? paths.length - 1 : currentIdx - 1;
+    const target = paths[next];
+    activatePath(target);
+    // 激活后把焦点移到对应 tab 元素（tabIndex 已随之转移到激活 tab）
+    tabElements.current.get(target)?.focus();
+  };
+
   return (
     <div className="tabs-bar" ref={barRef}>
-      <div className="tabs-list">
+      <div className="tabs-list" role="tablist" aria-label="打开的标签页" onKeyDown={onTabListKeyDown}>
         {openTabs.map((tab) => {
             const active = tab.path === activeTabPath;
             const isDragOver = dragOverPath === tab.path && dragPath !== null;
@@ -169,6 +197,9 @@ export function TabsBar() {
                   if (el) tabElements.current.set(tab.path, el);
                   else tabElements.current.delete(tab.path);
                 }}
+                role="tab"
+                aria-selected={active}
+                tabIndex={active ? 0 : -1}
                 className={`tab${active ? " tab-active" : ""}${isDragOver ? " tab-drag-over" : ""}${pathDescription ? " tab-disambiguated" : ""}${tab.deletedOnDisk ? " tab-deleted-on-disk" : ""}`}
                 title={title}
               draggable
@@ -199,9 +230,15 @@ export function TabsBar() {
                 setDragPath(null);
                 setDragOverPath(null);
               }}
-              onClick={() => {
-                flushAllMarkdownPublishers();
-                switchTab(tab.path);
+              onClick={() => activatePath(tab.path)}
+              onKeyDown={(e) => {
+                // #188：Enter/Space 键盘激活（焦点在内部按钮上时不劫持，
+                // 由按钮自身的原生键盘行为处理，如关闭按钮 Enter 触发关闭）
+                if (e.target !== e.currentTarget) return;
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  activatePath(tab.path);
+                }
               }}
               onContextMenu={(e) => {
                 e.preventDefault();

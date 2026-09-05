@@ -189,6 +189,20 @@ button svg,
 .save-indicator.save-error {
   color: var(--danger, #cf222e);
 }
+/* #188：冲突态指示器是真实 <button>，重置默认按钮样式并给出焦点环 */
+button.save-indicator {
+  border: none;
+  background: transparent;
+  padding: 0;
+  font-family: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+button.save-indicator:focus-visible {
+  outline: 2px solid var(--accent, #0969da);
+  outline-offset: 2px;
+  border-radius: 3px;
+}
 
 .topbar-actions {
   display: flex;

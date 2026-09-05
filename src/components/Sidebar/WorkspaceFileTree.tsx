@@ -217,6 +217,7 @@ export function WorkspaceFileTree({ tree }: { tree: FileNode }) {
               className="workspace-tree-virtual-row"
               style={rowStyle}
               role="treeitem"
+              aria-level={depth + 1}
             >
               <FileTreeNode
                 node={node}

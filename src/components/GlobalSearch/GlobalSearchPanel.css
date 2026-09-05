@@ -70,6 +70,7 @@
 }
 
 .gs-toggle {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 0.2rem;
@@ -87,8 +88,25 @@
 .gs-toggle:hover {
   background: var(--row-hover-bg, rgba(0, 0, 0, 0.05));
 }
+/* #188：原 display:none 使 checkbox 无法聚焦，键盘用户无法切换；
+   visually-hidden 保留焦点可达性，视觉上等效隐藏。 */
 .gs-toggle input {
-  display: none;
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+/* 键盘聚焦到隐藏 checkbox 时给出可见焦点环 */
+.gs-toggle input:focus-visible + span {
+  outline: 2px solid var(--accent, #0969da);
+  outline-offset: 3px;
+  border-radius: 3px;
 }
 .gs-toggle:has(input:checked) {
   background: var(--accent-subtle, rgba(47, 129, 247, 0.12));

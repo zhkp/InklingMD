@@ -90,6 +90,8 @@ export class ImageNodeView implements NodeView {
     this.img = document.createElement("img");
     this.img.className = "milkdown-image";
     this.img.loading = "lazy";
+    // #162：远程图片不携带 Referer，避免文档 URL/打开上下文泄露给外部图床
+    this.img.setAttribute("referrerpolicy", "no-referrer");
     this.dom.appendChild(this.img);
 
     // 缩放手柄
