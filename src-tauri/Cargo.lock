@@ -1703,7 +1703,7 @@ dependencies = [
 
 [[package]]
 name = "inklingmd"
-version = "2.8.1"
+version = "3.0.0"
 dependencies = [
  "base64 0.22.1",
  "regex",

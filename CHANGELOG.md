@@ -2,6 +2,97 @@
 
 本项目所有值得记录的变更都汇入本文件，格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本语义遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [3.0.0] - 2026-09-05
+
+> **主版本发布**：自 v2.8.1 以来最大规模的一次质量攻坚，共关闭 **33 个 GitHub Issues**、合入 **7 个 PR**，涉及 61 个提交、113 个文件（+8486 / −722 行）。本版本不含新功能，全部投入于**数据安全、竞态治理、崩溃兜底、性能优化、安全加固与可访问性**六个方向，使应用的可靠性基线整体抬升一个层级。
+
+### 数据安全与文件操作（Rust 侧加固）
+
+- **Windows 写入回退路径非原子（#146）**：原子替换失败后的回退分支原本「先删目标再 rename」，中间存在进程被杀即永久丢失文件的数据窗口。改为最多 4 次 × 50ms 退避的原子替换重试，全部失败则**保留原文件并报错**，绝不留下已删未建的中间态。新增 `replace_with_retry` 3 例 Rust 单测（可替换 / 独占占用保留原件 / 临时文件缺失保留原件）。
+- **跨盘移动失败 + 目标存在性检查 TOCTOU（#161）**：`rename_path` 不支持跨卷移动，且 `exists()` 检查与替换式 `fs::rename` 之间存在「目标被并发创建后静默覆盖」的窗口。改为文件移动优先走**「硬链接 + 删源」原子占用目标名**（目标已存在时以 `AlreadyExists` 原子失败，闭合 TOCTOU 窗口；硬链接跨卷不支持时回落）；`fs::rename` 跨卷失败（`ERROR_NOT_SAME_DEVICE`/`EXDEV`）回退为**递归复制 + 删源**，复制失败时源原件保持完整、文件残块尽力清理，不再把裸 OS 错误抛给用户。
+- **读取编码错误生硬 + 无大小上限（#159）**：`read_text_file` 增加 **10MB 大小护栏**（先元数据判断，防止数百 MB 文件整体读入内存并经 JSON IPC 传输）；非 UTF-8 与超限场景返回**结构化错误标记**（`ENCODING_UNSUPPORTED` / `FILE_TOO_LARGE`），前端可据此给出可读提示而非原始 `FromUtf8Error`。
+- **删除文件快照的两处竞态（#166）**：快照早于序列化防抖发布采集、在途读取在删除后生成漏网 tab，两处时序缺陷一并修复。
+- **重命名与在途文件读取竞态（#177）**：重开文件可能拿到陈旧内容、加载状态永久卡死。修复后重命名期间的在途读取能正确收敛。
+- **读取在途重命名产生幽灵 tab（#200，PR #200/#199）**：#177 修复后的已知边界——读取在途时重命名，完成后 `ensureTab` 仍按旧路径创建幽灵 tab。改为读取完成后按**当前路径**归属 tab；共享在途请求的「加入方」也能拿到落定路径（PR #200 评审项），堵住并发幽灵 tab 与黑名单漏拦。
+
+### 保存与冲突链路
+
+- **全局 saving 标志按整个工作区生效（#148）**：任一保存挂在对话框期间，其他标签页的保存被静默吞掉。改为 `OpenTab` 各自持有 `saving` 标志，`saveCurrent` 只拦本 tab 重入；`switchTab` / 写盘完成 / 异常路径的顶层 `saving` 镜像统一从活跃 tab 派生。
+- **自动保存遇非交互冲突后无限 2s 重试（#149）**：无退避、无错误态、每轮全量读盘。`conflictPending` 期间**暂停自动保存**，消除空转；失败退避计数 `failCount` **按文件隔离**，A 文件的失败不再拖慢 B 文件。
+- **conflictPending 冲突解决后不清除（#164）**：`reloadFile` 统一清除 tab 与镜像的 `conflictPending`，冲突经重载 / 另存副本解决后状态栏不再误报、指示器点击恢复有效。
+- **文件监听重载决策竞态（#170）**：`useFileWatcher` 重载决策前 flush 发布防抖、弹窗后复核 dirty，消除「丢编辑」与「重载失效」两类竞态（PR #170 评审项：冲突流读盘往返后再次 flush，把 `localContent` 收进尾部输入）。
+- **冲突对话框层级与键盘可达性（#186）**：层级低于全局搜索 / 快捷键面板导致被遮挡，补 Esc 关闭与打开时的焦点管理。
+
+### 编辑器与查找替换
+
+- **空替换串点击替换直接崩溃（#178）**：`schema.text("")` 会抛 `RangeError: Empty text nodes are not allowed`。改走 `tr.delete`，`replaceCurrent` / `replaceAll` 显式接收替换串参数。
+- **关闭查找面板后高亮残留（#185）**：`SearchPanel` 卸载时 dispatch `clear`，关闭 / 切源码模式后高亮立即清除（此前需切换文件才消失）。
+- **查找面板打开时编辑性能劣化（#151）**：`replace` 移出搜索 effect 依赖（不再每敲一字符全文重扫并拽动视口）；`SearchOpts` 移除仅面板使用的 `replace` 字段；`DecorationSet` 按 `(matches, current, doc)` 引用缓存，无关 transaction 不再全量重建装饰。
+- **编辑器内查找每键全文重扫（#192）**：`docChanged` 且为单步事务（按键形态）时走增量路径——变更窗口外的旧匹配区间经 `tr.mapping` 平移到新文档位置，仅对变更波及的文本节点窗口重扫，装饰集经 `DecorationSet.map` 平移后移除窗内旧装饰、补入新装饰；旧匹配整体被删除坍缩为空区间时直接丢弃（防 `{n,n}` 幽灵空匹配）。多步事务（如全部替换）回退全量重算。新增 8 例增量单测。
+- **auto-pair 选区非空时输入被吞（#152）**：选区非空时输入右符号不再吞掉输入，选区不再意外塌缩。
+- **编辑器慢启动被误判为失败（#172）**：旧的 3 秒超时一律 `setFallback(true)` 卸载 `<Milkdown/>`，而卸载会对仍在 `create()` 的 editor 调 `destroy()`，create 随后完成又重挂重建，形成加载失败闪烁 + 双倍初始化。重构为 `useEditorFallback` 监督器，区分「工厂同步抛错」（立即降级）与「`create()` 在途慢启动」（超阈值只亮提示、**不卸载**），`loading=false` 后 `getEditor()` 仍为空才判定异步失败降级。
+- **代码块语言异步加载竞态（#173）**：快速切换语言可能应用过期的高亮配置，加竞态守卫使过期结果不覆盖最新语言。
+- **源码模式卸载快照 scrollTop 现场读取（#174）**：直接读 `view.scrollDOM.scrollTop` 依赖元素仍挂 DOM，React 卸载时序下不可靠（`clientHeight` 可能为 0 导致 `scrollTop` 被钳制）。改用 `readDetachSafeScrollMetrics`：`clientHeight > 1` 时取现场读数，否则回退组件内缓存的最近一次有效快照。
+
+### 全局搜索与启动性能
+
+- **命中行整行克隆导致 OOM（#176）**：含内嵌 base64 图片的文档搜索时整行克隆可直接 OOM 崩溃。preview 改为命中点附近**字符级窗口**（前后 120 字符 + 命中片段封顶 200 字符），5000 条命中的预览总量常数级封顶。
+- **5000 条截断对前端不可见（#160/#163）**：返回结构改为 `{ hits, truncated }`，前端状态栏明确提示「已达 5000 条上限，结果已截断」；`scan_files` 返回 `exceeded` 标记，仅在确认存在第 `MAX_TOTAL_HITS+1` 条命中时置 `truncated`，**命中数恰好 5000 不再误报截断**。
+- **全局搜索无取消机制、单线程全量扫描（#163）**：引入搜索代次（generation），代次推进时在途旧任务在检查点提前退出，面板卸载即取消（cleanup 发起空查询 + 新代次让命令入口登记新代次，空查询立即返回）；目录符号链接不跟随后去掉逐目录 `canonicalize`；文件扫描按 CPU 数分片并行，按片序合并保持结果确定性。
+- **Mermaid 与 KaTeX 静态导入（#168）**：应用启动即加载约 1.1MB（gzip）与编辑器无关的大依赖。改为**首次遇到对应节点才动态 `import()`** 并 Promise 缓存复用：`mermaid-view.ts` / `math.ts` 移除模块级静态导入（约 3.1MB vendor 不再进入启动加载图），KaTeX 的 JS + 样式 + mhchem 首次渲染公式节点时一并加载，render 回调以 `seq` 守卫丢弃过期结果。新增 `mermaid-lazy-load` / `math-lazy-load` 单测。
+- **DeletedSnapshots 每 2 秒重写全部快照（#153）**：健康探测改为只写 1 字节哨兵键，不再 `JSON.stringify` 整个快照列表；区块刷新改事件驱动（挂载读一次 + 同窗口变更事件 + 跨窗口 `storage` 事件），删除 2 秒轮询定时器，**空列表时零开销**。
+
+### 多窗口、持久化与工作台
+
+- **多窗口 localStorage 后写覆盖先写（#165）**：新增 `storageSync` 模块，为 `recents` / `bookmarks` / `expandedDirs` 三个持久化 key 注册原生 `storage` 事件，他窗口写入后本窗口立即重读合并，与既有 `settings` / `theme` / `shortcuts` 模式一致；删除快照 key 的跨窗口变更同样经 `storage` 事件刷新。
+- **侧边栏折叠状态不记忆 + 低窗口文件树被挤没（#167）**：区块折叠状态持久化记忆，并修复低窗口高度下三区块把文件树完全挤没的问题。
+- **单实例 open-file 固定发往主窗口（#147）**：主窗口关闭后单实例回调的 `emit` 落到不存在的窗口上静默失效。改为 `pick_open_file_target_label` 从**存活窗口**中选择（主窗口存活优先，否则字典序首个），并对目标窗口 `unminimize` + `set_focus`；emit 失败显式 `eprintln`。前端 `useStartupFile` 同步重构：所有窗口（含派生窗口）都注册 open-file 监听，主窗口负责拉取 pending，派生窗口打开自身路径。
+- **另存为到已打开路径产生重复 tab（#150）**：未命名草稿另存为时，从取到对话框路径到构造 `nextTabs` 之间无重复路径校验，草稿被直接改名为已存在的 path → TabsBar key 重复、按 path `find`/`filter` 的编辑写错项、关闭同时删掉两个。修复：写盘前检测目标路径是否已有「其他」tab（排除正在保存的自身），命中则走合并路径——草稿内容写入目标文件、并入已有 tab 并关闭草稿、激活目标；目标 tab 有未保存内容时先经 `ask` 确认，拒绝则双方原样保留；**写盘窗口期草稿又新增编辑则保留草稿不丢弃新编辑**。
+- **激活的 tab 不滚入视野（#187）**：`TabsBar` 按 path 登记 tab 元素，监听 `activeTabPath` 变化执行 `scrollIntoView({ inline: "nearest", block: "nearest" })`，并让此前被隐藏的滚动条可见。
+
+### 稳定性与崩溃兜底
+
+- **全局崩溃兜底过于激进（#171）**：良性错误 / 未捕获 rejection 会把整个应用替换成永久崩溃页。新增 `src/lib/crash-guard.ts`，`isBenignGlobalError` 纯分类函数过滤 `ResizeObserver loop` 噪音、空 message 与跨域 `Script error`；`main.tsx` 的 window error **仅对致命错误**触发崩溃页；`unhandledrejection` 改为只记日志不替换界面（异步链断裂多可恢复）；`useStartupFile` 的 `take_pending_file` 补 `.catch`，启动不再因单个命令异常直接进崩溃页。
+
+### 安全加固
+
+- **asset 静态 scope 过宽 + 远程跟踪图（#162）**：`tauri.conf.json` 的 `assetProtocol.scope` 原含 `$DATA/**` 与 `$TEMP/**`，而 Tauri v2.11 中 `$DATA` 展开为通用数据目录（Windows 即整个 `%APPDATA%`，覆盖所有应用）、`$TEMP` 为系统临时目录，静态放行面远超图片加载所需。收缩为 `$APPDATA/**` + `$APPLOCALDATA/**`（图片实际存放于文档同目录 `assets/`，经运行时 `allow_asset_dir` 按需放行）。远程图片（http/https）经 `image-node-view` 渲染 `<img>` 时加 `referrerpolicy="no-referrer"`，避免文档被打开时把页面上下文经 Referer 头泄露给外部图床（跟踪像素场景）。CSP `img-src` 保留 `https:` 以维持「文档内远程图片可显示」的功能。
+
+### 可访问性（Accessibility）
+
+- **键盘可操作性与 ARIA 语义系统性缺口（#188）**，共 5 处：
+  1. 全局搜索「区分大小写 / 正则」开关：checkbox 从 `display:none` 改为 `visually-hidden`（保留原生聚焦与切换），补 `:focus-visible` 焦点环。
+  2. 冲突态保存指示器：`role=button` 的 `<span>` 改为真实 `<button>`（Tab 聚焦 + Enter/Space 原生触发），补按钮样式重置与焦点环——该入口是自动保存已暂停状态下的关键操作点。
+  3. 标签页：`tabs-list` 声明 `role=tablist`；每个 tab 带 `role=tab` / `aria-selected` / roving `tabIndex`；Enter/Space 激活、左右方向键与 Home/End 切换并把焦点移到新激活 tab；`.tab-close` 补 `:focus-within` 与 `:focus-visible` 显形（原 `opacity:0` 时键盘聚焦不可见）。
+  4. 菜单系统：新增 `useMenuA11y` hook（打开聚焦首项 + 方向键 / Home/End 导航），接入三个下拉菜单（导出 / 主题 / 更多）与两个右键菜单；菜单项补 `role=menuitem`、下拉容器 `role=menu`；触发器补 `aria-haspopup` / `aria-expanded`；顶栏任一菜单打开时 Esc 统一关闭。
+  5. 文件树：`role=treeitem` 补 `aria-level={depth+1}`（此前运行时实测全为 `null`，屏幕阅读器无法感知层级）。
+
+  新增 4 个组件测试文件 + TabsBar 键盘用例 + 源级静态断言（`aria-a11y-static`，读 CSS/TSX 防止 `display:none` / `opacity` 等纯视觉修复被反向回退）。
+
+### 交互细节
+
+- **文件树非 Markdown 行右键菜单无法唤起（#158）**：原生 `disabled` 表单控件被 Chromium/WebView2 抑制 `contextmenu` 等鼠标事件，txt/png 等文件失去重命名 / 删除 / 复制路径等唯一可用操作。改用 `aria-disabled` 表达禁用态（保留视觉弱化类名），`onClick` 内拦截打开，`contextmenu` 事件恢复可达。
+- **图片右键菜单泄漏与叠加（#184）**：实例持有当前菜单与 document 级 close 监听引用，新增幂等 `closeContextMenu` 统一清理（DOM + 监听 + 单例游标）；模块级单例保证同一时间只有一份菜单，打开新菜单先关旧菜单（含其他图片节点残留）；`destroy()` 清理打开中的菜单；`setTimeout` 注册监听加存活守卫。
+
+### 社区贡献（@TomGoh）
+
+本版本的重要一部分由社区贡献者 **Haoze Wu（[@TomGoh](https://github.com/TomGoh)）** 完成，共 9 个提交：
+
+- **大纲（TOC）实时性与性能**：标题扫描防抖（debounce heading scans）、标题变化时刷新大纲（refresh toc when headings change），并新增「大纲节点身份保持稳定」单测与 TOC E2E——`src/components/Editor/toc.ts`。
+- **链接对话框主题一致性**：恢复链接对话框主题样式（restore link dialog theme styles）、让自定义链接配色真正生效（honor custom link dialog colors），配套 `Issue180ThemeTokens` 主题令牌单测与 `link-dialog-theme` 浏览器端 E2E。
+- **桌面端能力配置**：开启动态图片目录 ACL 权限（`src-tauri/capabilities/default.json` + `permissions/app-commands.toml`），并重构 `capabilities` 测试覆盖新增权限。
+- **关键路径测试补齐**：为桌面端与持久化路径补上真实测试覆盖——二进制编解码 / 二进制写入 / 桌面端图片源 / PNG 导出 / 退出保存（新增 `src/lib/useExitHandler.ts`）/ ACL 能力配置 / 工作区存储，以及 Rust `commands/mod.rs`、`commands/search.rs`、`lib.rs` 的测试用例；并把既有回归测试与运行时真实行为对齐（align regression tests with runtime behavior）。
+
+### 测试与质量
+
+- **Vitest**：115 个单测文件、**745 个用例**全部通过（较 v2.8.1 的 82 文件 / 542 用例大幅增长）。
+- **Playwright E2E**：**169 个用例**全部通过，零 flaky。
+- **Rust**：`cargo test` **59 个用例**全部通过（较 v2.8.1 的 27 个翻倍）。
+- **构建门禁**：`tsc --noEmit` 零错误、`vite build` 通过、CI（windows-latest + ubuntu-latest 双平台矩阵）全绿。
+- **变异验证**：本批次每个修复均按项目规范做反向改动验证——确认新测试会失败、还原后恢复，杜绝恒真断言（如 #188 关闭菜单聚焦首项 / 禁用 Enter-Space / 移除 `aria-level` / 指示器回退 `<span>` / `gs-toggle` 改回 `display:none` 均验证到对应用例失败）。
+
+> **已知环境限制（非代码缺陷）**：`cross_device_copy_rejects_directory_containing_symlink`、`cross_device_copy_rejects_symlink_source`、`same_volume_rename_moves_symlink_itself_not_its_target` 三个 Rust 用例需要操作系统支持创建符号链接。在未开启「Windows 开发者模式」的机器上会因权限不足而失败；CI（windows-latest / ubuntu-latest）环境具备该能力，**59/59 全绿**。
+
 ## [2.8.1] - 2026-08-30
 
 ### 修复与优化
