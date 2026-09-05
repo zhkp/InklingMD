@@ -51,6 +51,17 @@ function loadLanguage(name: string): Promise<LanguageSupport | undefined> {
   return desc.load();
 }
 
+/**
+ * 语言加载器入口。抽成可替换对象是为给测试一个接缝：issue #173 的竞态单测
+ * 需要精确控制不同语言的 resolve 顺序（A 迟到于 B），真实动态 import 无法
+ * 保证顺序。生产路径恒指向 loadLanguage。
+ */
+export const codeLanguageLoader = {
+  load(name: string): Promise<LanguageSupport | undefined> {
+    return loadLanguage(name);
+  },
+};
+
 /** 计算旧/新文本的最小变更区间，用于精准同步 */
 function computeChange(oldVal: string, newVal: string) {
   if (oldVal === newVal) return null;
@@ -83,6 +94,11 @@ export class CodeBlockNodeView implements NodeView {
   private themeConf = new Compartment();
   private updating = false;
   private languageName = "";
+  /**
+   * 语言加载请求序号（issue #173）：updateLanguage 每次发起新请求自增。
+   * resolve 时若序号已不是最新，说明期间又切换过语言，结果过期，直接丢弃。
+   */
+  private langLoadSeq = 0;
   private currentTheme: CodeBlockTheme;
   private unsub: () => void;
   private io: IntersectionObserver | null = null;
@@ -272,7 +288,12 @@ export class CodeBlockNodeView implements NodeView {
   private updateLanguage(language: string) {
     if (language === this.languageName) return;
     this.languageName = language;
-    loadLanguage(language).then((support) => {
+    const seq = ++this.langLoadSeq;
+    codeLanguageLoader.load(language).then((support) => {
+      // issue #173：A→B 快速切换时，若 A 的加载晚于 B 完成（动态 import 时序
+      // 不确定），这里发现 seq 已过期，不得用 A 的高亮覆盖节点当前标注的 B，
+      // 否则高亮语言与节点 language 属性不一致。
+      if (seq !== this.langLoadSeq) return;
       // 实例可能尚未创建（视口外），languageName 已更新，创建时会用最新值
       if (this.cm) {
         this.cm.dispatch({ effects: this.langConf.reconfigure(support ? [support] : []) });

@@ -9,6 +9,7 @@ import { Schema } from "@milkdown/kit/prose/model";
 import { EditorState, TextSelection } from "@milkdown/kit/prose/state";
 import { EditorView } from "@milkdown/kit/prose/view";
 import { EditorView as CMView } from "@codemirror/view";
+import { EditorState as CMState } from "@codemirror/state";
 
 // CodeBlockNodeView 依赖 useSettings store，需要在 import 前初始化 mock
 // vi.mock 会被提升到顶部，确保在 CodeBlockNodeView 导入前生效
@@ -19,7 +20,7 @@ vi.mock("../../src/store/settings", () => ({
   },
 }));
 
-import { CodeBlockNodeView } from "../../src/components/Editor/code-block-view";
+import { CodeBlockNodeView, codeLanguageLoader } from "../../src/components/Editor/code-block-view";
 
 // 构建测试 schema：code_block content 为 text*
 function makeSchema() {
@@ -256,5 +257,121 @@ describe("CodeBlockNodeView forwardUpdate offset 对称性", () => {
     const cmRecovered = pmAbs - codeBlockPos - 1; // 5
 
     expect(cmRecovered).toBe(cmLocal);
+  });
+});
+
+describe("CodeBlockNodeView.updateLanguage 竞态守卫（issue #173）", () => {
+  // 接缝：loader 桩按语言名返回可控 deferred，精确控制不同语言的 resolve 顺序。
+  // 真实动态 import 的完成顺序不确定，无法稳定复现「B 先完成、A 后完成」。
+  // resolve 值用无害的 tabSize Facet 标记代指不同语言的 LanguageSupport——
+  // 只验证「哪个请求的结果被应用」，避免装入两个真实 Lezer 语言包。
+  const realLoaderLoad = codeLanguageLoader.load;
+  type Deferred = {
+    promise: Promise<unknown>;
+    resolve: (v: unknown) => void;
+  };
+  const deferreds = new Map<string, Deferred>();
+  const deferredOf = (name: string): Deferred => {
+    let d = deferreds.get(name);
+    if (!d) {
+      let resolve!: (v: unknown) => void;
+      const promise = new Promise<unknown>((res) => {
+        resolve = res;
+      });
+      d = { promise, resolve };
+      deferreds.set(name, d);
+    }
+    return d;
+  };
+
+  beforeEach(() => {
+    deferreds.clear();
+    codeLanguageLoader.load = ((name: string) => deferredOf(name).promise) as typeof realLoaderLoad;
+  });
+
+  afterEach(() => {
+    codeLanguageLoader.load = realLoaderLoad;
+    deferreds.clear();
+  });
+
+  function buildView(language: string) {
+    const schema = makeSchema();
+    const codeNode = schema.nodes.code_block.create(
+      { language },
+      schema.text("const a = 1"),
+    );
+    const doc = schema.nodes.doc.create(null, [codeNode]);
+    const state = EditorState.create({ doc, selection: TextSelection.create(doc, 1) });
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const view = new EditorView(root, { state });
+    const nv = new CodeBlockNodeView(codeNode, view, () => 0);
+    return { schema, view, nv };
+  }
+
+  it("A→B 快速切换、B 先 resolve：应用 B；迟到的 A 结果被丢弃，不覆盖高亮", async () => {
+    const { schema, view, nv } = buildView("typescript");
+    // initCodeMirror 已发出第一次请求（typescript），尚未 resolve
+    const cm = (nv as { cm: CMView | null }).cm;
+    expect(cm).not.toBeNull();
+    try {
+      // 用户在加载完成前把语言切到 python（第二次请求）
+      const pythonNode = schema.nodes.code_block.create(
+        { language: "python" },
+        schema.text("const a = 1"),
+      );
+      nv.update(pythonNode);
+
+      const deferredTs = deferredOf("typescript");
+      const deferredPy = deferredOf("python");
+      expect(deferredTs).toBeDefined();
+      expect(deferredPy).toBeDefined();
+
+      // B（python，后发请求）先完成 → 应应用 python（tabSize=2 标记）
+      deferredPy.resolve([CMState.tabSize.of(2)]);
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(cm!.state.tabSize).toBe(2);
+
+      // A（typescript，先发请求）后完成 → 过期，不得覆盖 python（issue #173）
+      deferredTs.resolve([CMState.tabSize.of(4)]);
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(cm!.state.tabSize).toBe(2);
+    } finally {
+      nv.destroy();
+      view.destroy();
+    }
+  });
+
+  it("过期请求晚到也不影响后续最新请求的应用", async () => {
+    const { schema, view, nv } = buildView("typescript");
+    const cm = (nv as { cm: CMView | null }).cm;
+    try {
+      const pythonNode = schema.nodes.code_block.create(
+        { language: "python" },
+        schema.text("const a = 1"),
+      );
+      nv.update(pythonNode);
+
+      const deferredTs = deferredOf("typescript");
+      const deferredPy = deferredOf("python");
+
+      // 过期请求 A 先 resolve（此时最新已是 python 的请求）→ 不应用
+      deferredTs.resolve([CMState.tabSize.of(4)]);
+      await Promise.resolve();
+      await Promise.resolve();
+      // compartment 保持初始空配置（tabSize 默认 4）
+      expect(cm!.state.tabSize).toBe(4);
+
+      // 最新请求 B 后 resolve → 正常应用（tabSize=2 标记）
+      deferredPy.resolve([CMState.tabSize.of(2)]);
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(cm!.state.tabSize).toBe(2);
+    } finally {
+      nv.destroy();
+      view.destroy();
+    }
   });
 });
