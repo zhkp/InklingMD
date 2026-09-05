@@ -40,6 +40,10 @@ import { useSettings } from "../../store/settings";
 import { useWorkspace } from "../../store/workspace";
 import type { EditorOutlineSnapshot } from "../../lib/outline";
 import {
+  registerWysiwygAnchorSampler,
+  unregisterWysiwygAnchorSampler,
+} from "../../lib/wysiwyg-anchor-sampler";
+import {
   remarkMathPlugin,
   mathInlineSchema,
   mathDisplaySchema,
@@ -106,13 +110,12 @@ function EditorInner({
   // 同理缓存 scrollHeight：进入源码模式的过渡读取它做比例映射，届时容器已
   // display:none 塌陷，现场读取 ≈ clientHeight，会让映射目标失真（issue #136）
   const wysiwygScrollHeightRef = useRef(0);
-  // 缓存视口顶部内容对应的 PM 位置（内容锚点，#136）：过渡时容器已
-  // display:none，posAtCoords 现场读不可靠，须在滚动监听里持续缓存
+  // 缓存视口顶部内容对应的 PM 位置（内容锚点，#136）：切换进入源码模式的
+  // 过渡读取它。采样时机（#212）：「切换指令触发时」（setTabSourceMode 内、
+  // React 渲染塌陷容器之前，经 lib/wysiwyg-anchor-sampler 注册表触发）为主，
+  // 滚动停歇后（150ms debounce）补采一次作防御性保鲜。滚动路径本身零几何
+  // 读取——每帧 posAtCoords 强制同步布局是万行复杂文档滚动掉帧的根因。
   const wysiwygTopPosRef = useRef(0);
-  // B1：读取锚点前同步 flush 待执行的 rAF 帧引用；滚动路径用 rAF 合帧，
-  // 切换进入源码模式读取锚点时若最后一帧 rAF 尚未执行，立即取消并同步
-  // 跑一次 cacheTopPos，避免锚点滞后一帧（快速滚动后立即切换会漂移）。
-  const flushWysiwygTopPosRef = useRef<(() => void) | null>(null);
   // 标记初始 value 是否已完成同步。publisher 在 view 创建时会把 lastSynced
   // 基线重置为「解析后 doc 的序列化结果」，与原始 value 存在规范化差异，
   // 若不跳过，外部同步 effect 会在每次挂载时把 doc 冗余重灌一遍。
@@ -319,37 +322,40 @@ function EditorInner({
                 // 失败保留上次缓存值
               }
             };
-            cacheTopPos();
-            // B1：滚动路径用 rAF 合帧。cacheTopPos 内部含 getBoundingClientRect +
-            // posAtCoords（depth===0 时还会 O(n) 建 starts + log₂(n) 次 coordsAtPos），
-            // 逐个 scroll 事件同步执行在大文档会掉帧——正是本仓库 outline-tracker
-            // 弃用 posAtCoords 的同一个教训（v2.3.3 实测 55-67ms）。过渡只需要
-            // 「最后一帧」的缓存值，合帧语义不变。与 SourceModeEditor.scrollRaf 一致。
-            let scrollRaf: number | null = null;
-            const onScroll = () => {
+            // #212：锚点采样器——在「几何现场读可靠」的时机执行：
+            // 1) 切换指令触发时（setTabSourceMode 内经注册表调用，编辑器
+            //    仍可见）；2) 滚动停歇后（下方 debounce）；3) 本 effect 挂载时。
+            // 容器已塌陷（源码模式激活中，clientHeight=0）时直接跳过，
+            // 防止把缓存污染成塌陷读数（scrollTop=0/scrollHeight≈0）。
+            const sampleAnchor = () => {
+              if (!scrollEl.isConnected || scrollEl.clientHeight <= 0) return;
               wysiwygScrollTopRef.current = scrollEl.scrollTop;
               wysiwygScrollHeightRef.current = scrollEl.scrollHeight;
-              if (scrollRaf !== null) return;
-              scrollRaf = requestAnimationFrame(() => {
-                scrollRaf = null;
-                cacheTopPos();
-              });
+              cacheTopPos();
+            };
+            sampleAnchor();
+            registerWysiwygAnchorSampler(filePath, sampleAnchor);
+            // #212：滚动路径不再做任何几何读取（旧实现每滚动帧跑一次
+            // cacheTopPos：posAtCoords 内部 elementFromPoint 在懒挂载持续
+            // 脏化布局时每帧强制同步重排整篇文档，万行文档单次 6~32ms，
+            // 120Hz 预算 8.33ms 被吃满——正是本仓库 outline-tracker 在
+            // v2.3.3 弃用 posAtCoords 的同一教训）。锚点正确性由「切换指令
+            // 触发时同步采样」保证；滚动停歇后的补采仅作防御性保鲜——
+            // 停歇时机一次强制布局无掉帧顾虑，也符合「重建安排在滚动停歇
+            // 或 idle」的既定解法。
+            let settleTimer: ReturnType<typeof setTimeout> | null = null;
+            const onScroll = () => {
+              if (settleTimer !== null) clearTimeout(settleTimer);
+              settleTimer = setTimeout(() => {
+                settleTimer = null;
+                sampleAnchor();
+              }, 150);
             };
             scrollEl.addEventListener("scroll", onScroll, { passive: true });
-            // 暴露同步 flush：切换进入源码模式读取锚点时，若最后一帧 rAF 尚未
-            // 执行，立即取消并同步跑一次 cacheTopPos，避免过渡锚点滞后一帧
-            // （文档密集/长卷快速滚动后立即切换会漂移）。
-            flushWysiwygTopPosRef.current = () => {
-              if (scrollRaf !== null) {
-                cancelAnimationFrame(scrollRaf);
-                scrollRaf = null;
-                cacheTopPos();
-              }
-            };
             cleanupScroll = () => {
-              if (scrollRaf !== null) cancelAnimationFrame(scrollRaf);
-              scrollRaf = null;
-              flushWysiwygTopPosRef.current = null;
+              if (settleTimer !== null) clearTimeout(settleTimer);
+              settleTimer = null;
+              unregisterWysiwygAnchorSampler(filePath);
               scrollEl.removeEventListener("scroll", onScroll);
             };
           }
@@ -386,12 +392,10 @@ function EditorInner({
     lastSyncedRef,
     getWysiwygScrollTop: () => wysiwygScrollTopRef.current,
     getWysiwygScrollHeight: () => wysiwygScrollHeightRef.current,
-    // B1：读取锚点前先同步 flush 待执行帧，保证快速滚动后立即切换拿到的是
-    // 最新视口顶部内容，而非滞后一帧的旧锚点
-    getWysiwygTopPos: () => {
-      flushWysiwygTopPosRef.current?.();
-      return wysiwygTopPosRef.current;
-    },
+    // 视口顶部内容锚点（#136/#212）：切换指令触发时 setTabSourceMode 已
+    // 经同步采样过（编辑器仍可见），这里只读缓存值——无需也不应再做任何
+    // 几何计算（此刻容器已 display:none）
+    getWysiwygTopPos: () => wysiwygTopPosRef.current,
   });
 
   // 点击编辑器空白区域时的光标定位（详见 editor-root-click.ts）
