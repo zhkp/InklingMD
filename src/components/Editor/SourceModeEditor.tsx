@@ -19,6 +19,7 @@ import {
   unregisterSourceModeSearch,
 } from "../../lib/source-mode-search";
 import { mapScrollTop } from "../../lib/source-mode-cursor";
+import { readDetachSafeScrollMetrics } from "../../lib/detachSafeScroll";
 import { useSettings } from "../../store/settings";
 
 export interface SourceModeSnapshot {
@@ -117,6 +118,10 @@ export function SourceModeEditor({
     // 视口范围与光标行块求交，不依赖某一帧的容器测量
     let cachedClientHeight = 0;
     let cachedScrollHeight = 0;
+    // 最后一次可信 scrollTop（issue #174）：cleanup 时容器可能已脱链，scrollTop
+    // 现场读为 0；与高度不同它非单调，不能用峰值，只能缓存「最后可信读数」。
+    // 用户若真的滚回顶部，缓存同样是 0，回退不产生错误恢复。
+    let cachedScrollTop = 0;
     let cursorVisibleCache = true;
     const refreshCursorVisible = (v: EditorView) => {
       const el = v.scrollDOM;
@@ -126,6 +131,7 @@ export function SourceModeEditor({
       if (liveCh > 1) {
         cachedClientHeight = Math.max(cachedClientHeight, liveCh);
         cachedScrollHeight = Math.max(cachedScrollHeight, el.scrollHeight);
+        cachedScrollTop = el.scrollTop;
       }
       if (cachedClientHeight <= 1) return;
       const head = v.state.selection.main.head;
@@ -299,15 +305,22 @@ export function SourceModeEditor({
       unregisterSourceModeSearch(filePath);
       view.scrollDOM.removeEventListener("scroll", handleScroll);
       {
-        // 脱链后 clientHeight/scrollHeight 读 0：刷新是幂等的，仅更新缓存
+        // 脱链后 clientHeight/scrollHeight/scrollTop 读 0：刷新是幂等的，仅更新缓存
         refreshCursorVisible(view);
         const head = view.state.selection.main.head;
-        const st = view.scrollDOM.scrollTop;
+        // issue #174：scrollTop/anchorOffset 此前是现场读，cleanup 若在容器已
+        // 脱链或塌缩的帧执行会读到 0，退出源码模式后阅读位置回到文档第一行。
+        // 与高度同判据（clientHeight>1）判定现场是否可信，否则回退最后可信读数。
+        const scroller = view.scrollDOM;
+        const { scrollTop, scrollHeight } = readDetachSafeScrollMetrics(scroller, {
+          scrollTop: cachedScrollTop,
+          scrollHeight: cachedScrollHeight,
+        });
         onUnmountRef.current?.({
           cursor: head,
-          scrollTop: st,
-          scrollHeight: view.scrollDOM.scrollHeight || cachedScrollHeight,
-          anchorOffset: view.lineBlockAtHeight(st).from,
+          scrollTop,
+          scrollHeight,
+          anchorOffset: view.lineBlockAtHeight(scrollTop).from,
           cursorVisible: cursorVisibleCache,
         });
       }
