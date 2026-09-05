@@ -59,6 +59,12 @@ export function useFileWatcher(): void {
           const diskContent = await readTextFile(filePath);
           if (cancelled) return;
           if (useWorkspace.getState().currentFile !== filePath) return;
+          // issue #170 评审：readTextFile 往返期间 overlay 未渲染、编辑器仍可
+          // 交互，用户这段尾部输入处于 150ms 防抖内未发布——openConflict 的
+          // localContent 取自 currentContent，不 flush 会漏掉尾部输入（备份与
+          // Diff 都基于陈旧快照，用户可能据此做出丢编辑决策）。此处再 flush：
+          // 无新输入时 timer 为空，序列化函数零成本（markdown-publisher.ts）。
+          flushAllMarkdownPublishers();
           useConflict.getState().openConflict({
             filePath,
             localContent: useWorkspace.getState().currentContent,

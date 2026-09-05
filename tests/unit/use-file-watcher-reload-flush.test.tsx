@@ -181,4 +181,62 @@ describe("useFileWatcher 重载决策防丢编辑（issue #170）", () => {
     expect(openConflictSpy).not.toHaveBeenCalled();
     unmount();
   });
+
+  it("读盘往返期间用户继续输入（防抖未发布）：冲突框 localContent 收进尾部输入（评审）", async () => {
+    const openConflictSpy = vi.fn();
+    useConflict.setState({ conflict: null, openConflict: openConflictSpy });
+
+    const { unmount } = renderHook(() => useFileWatcher());
+    await pollOnce(); // 注册基线
+
+    vi.mocked(fs.fileMtime).mockResolvedValue(EXTERNAL_MTIME);
+    // 已有未保存修改 → handleActiveFileChange 入口 flush 后直接走冲突流
+    useWorkspace.setState((s) => ({
+      dirty: true,
+      openTabs: s.openTabs.map((t) => (t.path === DOC ? { ...t, dirty: true } : t)),
+    }));
+
+    // readTextFile 挂起，模拟磁盘往返：此期间 overlay 未渲染、编辑器仍可交互
+    let resolveDisk!: (v: string) => void;
+    const disk = new Promise<string>((r) => (resolveDisk = r));
+    vi.mocked(fs.readTextFile).mockReturnValue(disk);
+
+    // flush 语义按调用点区分：入口 flush（#1）无副作用（此刻确无新输入）；
+    // 读盘返回后的 flush（#2）才发布「读盘期间输入、仍处于防抖窗口」的尾部内容
+    const tail = "# 标题\n\n读盘期间输入的尾部";
+    let flushCount = 0;
+    vi.mocked(flushAllMarkdownPublishers).mockImplementation(() => {
+      flushCount += 1;
+      if (flushCount >= 2) {
+        useWorkspace.setState((s) => ({
+          currentContent: tail,
+          openTabs: s.openTabs.map((t) => (t.path === DOC ? { ...t, content: tail } : t)),
+        }));
+      }
+    });
+
+    window.dispatchEvent(new Event("focus"));
+    await flush();
+    await flush();
+    await flush();
+    // 读盘仍在途：冲突框尚未打开
+    expect(openConflictSpy).not.toHaveBeenCalled();
+    expect(flushCount).toBe(1);
+
+    resolveDisk("# 外部磁盘内容");
+    await flush();
+    await flush();
+    await flush();
+
+    // localContent 必须含尾部输入，而非陈旧快照（评审：否则备份与 Diff 漏尾部）
+    expect(openConflictSpy).toHaveBeenCalledTimes(1);
+    expect(openConflictSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        filePath: DOC,
+        diskContent: "# 外部磁盘内容",
+        localContent: tail,
+      }),
+    );
+    unmount();
+  });
 });
