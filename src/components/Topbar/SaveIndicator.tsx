@@ -13,16 +13,17 @@ export function SaveIndicator() {
     return <span className="save-indicator save-error">保存失败：{saveError}</span>;
   }
   if (conflictPending) {
+    // #188：冲突入口是「自动保存已暂停」的关键操作点，改真实 <button>
+    // 以获得原生键盘可达性（Tab 聚焦 + Enter/Space 激活）与无障碍语义
     return (
-      <span
+      <button
+        type="button"
         className="save-indicator save-error"
-        role="button"
         title="文件被外部程序修改，自动保存已暂停。点击进行冲突处理"
-        style={{ cursor: "pointer" }}
         onClick={() => void saveCurrent({ interactive: true })}
       >
         外部冲突（已暂停自动保存）
-      </span>
+      </button>
     );
   }
   if (saving) return <span className="save-indicator">保存中…</span>;

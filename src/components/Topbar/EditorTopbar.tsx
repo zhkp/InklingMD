@@ -1,6 +1,6 @@
 // 编辑器顶栏：文件名、保存指示器、源码/富文本分段开关、
 // 导出与主题下拉菜单、收纳更多操作菜单。
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { Editor } from "@milkdown/kit/core";
 import { SaveIndicator } from "./SaveIndicator";
 import { ExportMenu } from "./ExportMenu";
@@ -35,6 +35,19 @@ export function EditorTopbar({
   const [exportOpen, setExportOpen] = useState(false);
   const [themeOpen, setThemeOpen] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
+
+  // #188：任一顶栏下拉打开时按 Esc 关闭（菜单自身只处理方向键/聚焦）
+  useEffect(() => {
+    if (!exportOpen && !themeOpen && !moreOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      setExportOpen(false);
+      setThemeOpen(false);
+      setMoreOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [exportOpen, themeOpen, moreOpen]);
 
   return (
     <div className="editor-topbar">

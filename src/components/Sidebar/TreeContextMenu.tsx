@@ -8,6 +8,7 @@ import { openInNewWindow } from "../../lib/newWindow";
 import { deletePath } from "../../lib/fs";
 import { askConfirmation, showMessage } from "../../lib/dialogs";
 import { useContextMenuClamping } from "../../hooks/useContextMenuClamping";
+import { useMenuA11y } from "../../hooks/useMenuA11y";
 import { isMarkdown, TREE_ACTION_EVENT, type MenuPayload, type TreeAction } from "./treeShared";
 
 export function TreeContextMenu({
@@ -23,6 +24,8 @@ export function TreeContextMenu({
   const toggleBookmark = useWorkspace((s) => s.toggleBookmark);
   const isBookmarked = useWorkspace((s) => s.isBookmarked);
   const ref = useContextMenuClamping<HTMLDivElement>({ x: payload.x, y: payload.y });
+  // #188：打开即聚焦首项 + 方向键导航（Esc/点击外部由下方现有监听处理）
+  useMenuA11y({ ref, enabled: true, focusFirstOnOpen: true });
 
   // 点击外部或 Esc 关闭
   useEffect(() => {
@@ -136,7 +139,7 @@ export function TreeContextMenu({
         {node.is_dir && (
           <>
             <button
-              className="tree-context-item"
+              className="tree-context-item" role="menuitem"
               onClick={() =>
                 dispatchAction({ type: "new", parentPath: node.path, kind: "file" })
               }
@@ -144,7 +147,7 @@ export function TreeContextMenu({
               新建文件
             </button>
             <button
-              className="tree-context-item"
+              className="tree-context-item" role="menuitem"
               onClick={() =>
                 dispatchAction({ type: "new", parentPath: node.path, kind: "dir" })
               }
@@ -155,7 +158,7 @@ export function TreeContextMenu({
           </>
         )}
         <button
-          className="tree-context-item"
+          className="tree-context-item" role="menuitem"
           onClick={() => dispatchAction({ type: "rename", node })}
           disabled={isRoot}
           title={isRoot ? "工作区根目录不能重命名" : ""}
@@ -163,7 +166,7 @@ export function TreeContextMenu({
           重命名
         </button>
         <button
-          className="tree-context-item tree-context-danger"
+          className="tree-context-item tree-context-danger" role="menuitem"
           onClick={() => void handleDelete()}
           disabled={isRoot}
           title={isRoot ? "工作区根目录不能删除" : ""}
@@ -174,7 +177,7 @@ export function TreeContextMenu({
         {!node.is_dir && (
           <>
             <button
-              className="tree-context-item"
+              className="tree-context-item" role="menuitem"
               onClick={() => {
                 toggleBookmark(node.path);
                 onClose();
@@ -184,7 +187,7 @@ export function TreeContextMenu({
             </button>
             {isMdFile && (
               <button
-                className="tree-context-item"
+                className="tree-context-item" role="menuitem"
                 onClick={() => void handleOpenInNewWindow()}
               >
                 在新窗口打开
@@ -193,7 +196,7 @@ export function TreeContextMenu({
             <div className="tree-context-sep" />
           </>
         )}
-        <button className="tree-context-item" onClick={() => void handleCopyPath()}>
+        <button className="tree-context-item" role="menuitem" onClick={() => void handleCopyPath()}>
           复制路径
         </button>
       </div>

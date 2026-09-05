@@ -8,6 +8,7 @@ import { flushAllMarkdownPublishers } from "../Editor/markdown-publisher";
 import { openInNewWindow } from "../../lib/newWindow";
 import { askConfirmation, showMessage } from "../../lib/dialogs";
 import { useContextMenuClamping } from "../../hooks/useContextMenuClamping";
+import { useMenuA11y } from "../../hooks/useMenuA11y";
 import { baseName } from "../../lib/path-utils";
 import "./TabContextMenu.css";
 
@@ -31,6 +32,8 @@ export function TabContextMenu({ tab, x, y, onClose }: TabContextMenuProps) {
   const currentFile = useWorkspace((s) => s.currentFile);
 
   const ref = useContextMenuClamping<HTMLDivElement>({ x, y });
+  // #188：打开即聚焦首项 + 方向键导航
+  useMenuA11y({ ref, enabled: true, focusFirstOnOpen: true });
 
   // 点击外部或 Esc 关闭
   useEffect(() => {
@@ -169,29 +172,29 @@ export function TabContextMenu({ tab, x, y, onClose }: TabContextMenuProps) {
         style={style}
         role="menu"
       >
-        <button className="tab-context-item" onClick={() => handleClose(tab)}>
+        <button className="tab-context-item" role="menuitem" onClick={() => handleClose(tab)}>
           关闭
         </button>
         <button
-          className="tab-context-item"
+          className="tab-context-item" role="menuitem"
           onClick={handleCloseOthers}
           disabled={openTabs.length <= 1}
         >
           关闭其他
         </button>
         <button
-          className="tab-context-item"
+          className="tab-context-item" role="menuitem"
           onClick={handleCloseToRight}
           disabled={!hasRight}
         >
           关闭右侧
         </button>
-        <button className="tab-context-item" onClick={handleCloseAll}>
+        <button className="tab-context-item" role="menuitem" onClick={handleCloseAll}>
           全部关闭
         </button>
         <div className="tab-context-sep" />
         <button
-          className="tab-context-item"
+          className="tab-context-item" role="menuitem"
           onClick={handleSplitOpen}
           disabled={!canSplit}
           title={canSplit ? "在右侧分屏面板打开此文件作为对照" : "当前主文件或已在分屏中"}
@@ -199,12 +202,12 @@ export function TabContextMenu({ tab, x, y, onClose }: TabContextMenuProps) {
           在分屏打开
         </button>
         <button
-          className="tab-context-item"
+          className="tab-context-item" role="menuitem"
           onClick={() => void handleOpenInNewWindow()}
         >
           在新窗口打开
         </button>
-        <button className="tab-context-item" onClick={handleCopyPath}>
+        <button className="tab-context-item" role="menuitem" onClick={handleCopyPath}>
           复制路径
         </button>
       </div>

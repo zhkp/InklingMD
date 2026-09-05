@@ -271,3 +271,99 @@ describe("TabsBar 激活 tab 滚入视野 (#187)", () => {
     expect(scrollIntoViewMock).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("TabsBar 键盘操作与 ARIA 语义 (#188)", () => {
+  // 模拟真实 switchTab：调用即更新 store 的 activeTabPath，使连续按键可正确推进
+  const switchTab = vi.fn((path: string) => {
+    useWorkspace.setState({ activeTabPath: path });
+  });
+  const tabAt = (name: string): HTMLElement => {
+    const el = screen.getByText(name);
+    return el.closest('[role="tab"]') as HTMLElement;
+  };
+
+  beforeEach(() => {
+    switchTab.mockClear();
+    useWorkspace.setState({
+      openTabs: [makeTab({ path: "/a.md" }), makeTab({ path: "/b.md" })],
+      activeTabPath: "/a.md",
+      switchTab,
+    });
+  });
+
+  it("tablist 内每个 tab 有 role=tab，激活 tab aria-selected=true 且 tabIndex=0", () => {
+    const { container } = render(<TabsBar />);
+    expect(container.querySelector('[role="tablist"]')).not.toBeNull();
+    expect(tabAt("a.md")).toHaveAttribute("aria-selected", "true");
+    expect(tabAt("a.md")).toHaveAttribute("tabindex", "0");
+    expect(tabAt("b.md")).toHaveAttribute("aria-selected", "false");
+    expect(tabAt("b.md")).toHaveAttribute("tabindex", "-1");
+  });
+
+  it("Enter 激活聚焦的 tab", () => {
+    render(<TabsBar />);
+    fireEvent.keyDown(tabAt("b.md"), { key: "Enter" });
+    expect(switchTab).toHaveBeenCalledWith("/b.md");
+  });
+
+  it("Space 激活聚焦的 tab 且不触发页面滚动（preventDefault）", () => {
+    render(<TabsBar />);
+    const prevented = fireEvent.keyDown(tabAt("b.md"), { key: " " });
+    expect(prevented).toBe(false); // preventDefault 被调用 => 返回 false
+    expect(switchTab).toHaveBeenCalledWith("/b.md");
+  });
+
+  it("ArrowRight 激活右侧相邻 tab 并把焦点移过去", () => {
+    render(<TabsBar />);
+    const list = screen.getByRole("tablist");
+    fireEvent.keyDown(list, { key: "ArrowRight" });
+    expect(switchTab).toHaveBeenCalledWith("/b.md");
+    expect(document.activeElement).toBe(tabAt("b.md"));
+  });
+
+  it("ArrowLeft 激活左侧相邻 tab；末位 ArrowRight 环绕回首位", () => {
+    useWorkspace.setState({
+      openTabs: [
+        makeTab({ path: "/a.md" }),
+        makeTab({ path: "/b.md" }),
+        makeTab({ path: "/c.md" }),
+      ],
+      activeTabPath: "/b.md",
+    });
+    render(<TabsBar />);
+
+    const list = screen.getByRole("tablist");
+    fireEvent.keyDown(list, { key: "ArrowLeft" });
+    expect(switchTab).toHaveBeenCalledWith("/a.md");
+
+    useWorkspace.setState({ activeTabPath: "/c.md" });
+    fireEvent.keyDown(list, { key: "ArrowRight" });
+    expect(switchTab).toHaveBeenCalledWith("/a.md"); // 末位右环绕回首位
+  });
+
+  it("Home/End 跳到首/末 tab", () => {
+    useWorkspace.setState({
+      openTabs: [
+        makeTab({ path: "/a.md" }),
+        makeTab({ path: "/b.md" }),
+        makeTab({ path: "/c.md" }),
+      ],
+    });
+    render(<TabsBar />);
+
+    const list = screen.getByRole("tablist");
+    fireEvent.keyDown(list, { key: "End" });
+    expect(switchTab).toHaveBeenCalledWith("/c.md");
+    fireEvent.keyDown(list, { key: "Home" });
+    expect(switchTab).toHaveBeenCalledWith("/a.md");
+  });
+
+  it("焦点落在关闭按钮内时，tab 的 Enter 不劫持按钮原生行为", () => {
+    render(<TabsBar />);
+    // 关闭按钮是 tab 内的 button；在按钮上发 Enter，事件 target 为按钮，
+    // tab 层不应拦截（按钮自身 Enter 关闭在真实浏览器由原生行为触发）
+    const closeBtn = tabAt("a.md").querySelector(".tab-close") as HTMLElement;
+    fireEvent.keyDown(closeBtn, { key: "Enter" });
+    expect(switchTab).not.toHaveBeenCalled();
+  });
+});

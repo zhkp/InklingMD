@@ -1,5 +1,7 @@
 // 主题下拉菜单：浅色/深色切换、加载/清除自定义 CSS
+import { useRef } from "react";
 import { useTheme } from "../../store/theme";
+import { useMenuA11y } from "../../hooks/useMenuA11y";
 import {
   IconSun,
   IconMoon,
@@ -14,6 +16,9 @@ interface ThemeMenuProps {
 }
 
 export function ThemeMenu({ open, onOpenChange }: ThemeMenuProps) {
+  const menuRef = useRef<HTMLDivElement | null>(null);
+  // #188：打开聚焦首项 + 方向键导航
+  useMenuA11y({ ref: menuRef, enabled: open, focusFirstOnOpen: true });
   const themeMode = useTheme((s) => s.mode);
   const setThemeMode = useTheme((s) => s.setMode);
   const loadCustomCSS = useTheme((s) => s.loadCustomCSS);
@@ -26,6 +31,8 @@ export function ThemeMenu({ open, onOpenChange }: ThemeMenuProps) {
         className="topbar-btn topbar-btn-label"
         onClick={() => onOpenChange(!open)}
         title="主题"
+        aria-haspopup="menu"
+        aria-expanded={open}
       >
         {themeMode === "dark" ? (
           <IconMoon size={15} />
@@ -38,7 +45,7 @@ export function ThemeMenu({ open, onOpenChange }: ThemeMenuProps) {
       {open && (
         <>
           <div className="export-backdrop" onClick={() => onOpenChange(false)} />
-          <div className="export-dropdown">
+          <div className="export-dropdown" role="menu" ref={menuRef}>
             <button
               className={`export-item${themeMode === "light" ? " export-item-active" : ""}`}
               onClick={() => {
@@ -61,7 +68,7 @@ export function ThemeMenu({ open, onOpenChange }: ThemeMenuProps) {
             </button>
             <div className="export-sep" />
             <button
-              className="export-item"
+              className="export-item" role="menuitem"
               onClick={() => {
                 onOpenChange(false);
                 void loadCustomCSS();
