@@ -84,15 +84,14 @@ export const outlineTrackerPlugin = (
         if (stale) return;
         lastSampleAt = performance.now();
         if (!view.dom.isConnected || !scroller) return;
-        // 缓存失效检测：文档变更重建后数量不一致，或滚动总高/宽度变化
-        //（图表后台渲染、窗口缩放、布局列切换）令位置整体偏移
-        if (
-          headingTops.length !== headings.length ||
-          scroller.scrollHeight !== builtScrollHeight ||
-          scroller.clientWidth !== builtClientWidth
-        ) {
-          rebuildHeadingTops();
-        }
+        // #212：滚动采样路径零几何读取（scrollTop 是滚动状态属性，不触发
+        // 布局）。失效检测（scrollHeight/clientWidth 读取会强制布局）与
+        // rebuildHeadingTops（425 个标题批量 rect，实测单次 27ms 强制布局）
+        // 一并移到滚动停歇后的 refreshGeometryAndSample——滚动帧里逐次
+        // 强制重排是 p99 尖刺来源；停歇时机一次重排无掉帧顾虑。
+        // 滚动中沿用缓存 headingTops 做纯二分：向下滚动时新挂载内容位于
+        // 视口下方，视口上方块的文档内位置不变，缓存仍然准确；停歇后
+        // 150ms 内完成校正。
         if (headingTops.length === 0) return;
         // 二分找最后一个 top <= scrollTop + offset 的标题（升序保证）
         const probe = scroller.scrollTop + VIEWPORT_HEADING_OFFSET;
@@ -118,10 +117,33 @@ export const outlineTrackerPlugin = (
         onChange({ headings, activeIndex });
       };
 
+      /** 滚动停歇后的几何刷新：失效检测 + 批量重建 + 重新采样定位 */
+      const refreshGeometryAndSample = () => {
+        if (stale) return; // doc 变更防抖窗口内，交由 update 的重建路径
+        if (!view.dom.isConnected || !scroller) return;
+        if (
+          headingTops.length !== headings.length ||
+          scroller.scrollHeight !== builtScrollHeight ||
+          scroller.clientWidth !== builtClientWidth
+        ) {
+          rebuildHeadingTops();
+        }
+        sampleViewport();
+      };
+
       // ProseMirror 不会为纯滚动产生 transaction，因此单独从视口位置
       // 更新阅读章节；按动画帧合并 + 时间节流，采样本身只做数值比较。
+      // #212：几何刷新（失效检测 + 批量重建，含强制布局）安排在滚动
+      // 停歇后（trailing 200ms），不占滚动帧。
+      let restTimer: ReturnType<typeof setTimeout> | null = null;
       const handleScroll = () => {
-        if (!scroller || scrollFrame != null) return;
+        if (!scroller) return;
+        if (restTimer !== null) clearTimeout(restTimer);
+        restTimer = setTimeout(() => {
+          restTimer = null;
+          refreshGeometryAndSample();
+        }, 200);
+        if (scrollFrame != null) return;
         scrollFrame = requestAnimationFrame(() => {
           scrollFrame = null;
           const elapsed = performance.now() - lastSampleAt;
@@ -143,7 +165,8 @@ export const outlineTrackerPlugin = (
       };
       scroller?.addEventListener("scroll", handleScroll, { passive: true });
       // 初始按当前滚动位置采样一次（打开文件恢复 scrollTop=0 时无
-      // scroll 事件可触发，靠这里兜底首帧高亮）
+      // scroll 事件可触发，靠这里兜底首帧高亮）；初始布局未稳定时由
+      // 停歇路径的 refreshGeometryAndSample 校正
       requestAnimationFrame(() => sampleViewport());
 
       return {
@@ -197,6 +220,7 @@ export const outlineTrackerPlugin = (
           if (scrollFrame != null) cancelAnimationFrame(scrollFrame);
           if (sampleTimer) clearTimeout(sampleTimer);
           if (extractTimer) clearTimeout(extractTimer);
+          if (restTimer) clearTimeout(restTimer);
         },
       };
     },

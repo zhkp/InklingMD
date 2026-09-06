@@ -64,6 +64,7 @@ function setupIntersectionObserver() {
 beforeEach(() => {
   vi.useFakeTimers();
   setupIntersectionObserver();
+  CodeBlockNodeView.resetMountQueueForTests();
 });
 
 afterEach(() => {
@@ -96,6 +97,8 @@ describe("CodeBlockNodeView.setSelection 位置翻译（v1.2.9 修复）", () =>
     const view = new EditorView(root, { state });
 
     const nv = new CodeBlockNodeView(codeNode, view, () => codeBlockPos);
+    // #212：IO 回调只入队，测试里同步清空挂载队列（生产走 rAF 批次调度）
+    CodeBlockNodeView.flushMountQueueForTests();
 
     // PM 调 setSelection，传入绝对位置 codeBlockPos+1（= 代码块第一行起始）
     // 修复前：直接把 203 当 CM 本地位置 → 跳到约第 10 行
@@ -133,6 +136,8 @@ describe("CodeBlockNodeView.setSelection 位置翻译（v1.2.9 修复）", () =>
     const view = new EditorView(root, { state });
 
     const nv = new CodeBlockNodeView(codeNode, view, () => codeBlockPos);
+    // #212：IO 回调只入队，测试里同步清空挂载队列（生产走 rAF 批次调度）
+    CodeBlockNodeView.flushMountQueueForTests();
 
     // PM 位置 codeBlockPos+1+7 = 12 → CM 本地位置 7（"hello\nworld" 的 'w' 位置）
     const targetPM = codeBlockPos + 1 + 7; // 指向 "world" 的 w
@@ -167,6 +172,8 @@ describe("CodeBlockNodeView.setSelection 位置翻译（v1.2.9 修复）", () =>
     const view = new EditorView(root, { state });
 
     const nv = new CodeBlockNodeView(codeNode, view, () => codeBlockPos);
+    // #212：IO 回调只入队，测试里同步清空挂载队列（生产走 rAF 批次调度）
+    CodeBlockNodeView.flushMountQueueForTests();
 
     // 传入一个远超 codeText 长度的 PM 位置
     // 修复前：localAnchor = 99999 → CM 可能行为异常
@@ -200,6 +207,7 @@ describe("CodeBlockNodeView.setSelection 位置翻译（v1.2.9 修复）", () =>
     const view = new EditorView(root, { state });
 
     const nv = new CodeBlockNodeView(codeNode, view, () => undefined);
+    CodeBlockNodeView.flushMountQueueForTests();
 
     expect(() => nv.setSelection(5, 5)).not.toThrow();
 
@@ -227,6 +235,7 @@ describe("CodeBlockNodeView.selectNode（v1.2.9 加固）", () => {
     const view = new EditorView(root, { state });
 
     const nv = new CodeBlockNodeView(codeNode, view, () => 0);
+    CodeBlockNodeView.flushMountQueueForTests();
 
     // 先把 CM 光标移到中间位置
     const cm = (nv as any).cm as CMView | null;
@@ -306,6 +315,7 @@ describe("CodeBlockNodeView.updateLanguage 竞态守卫（issue #173）", () => 
     document.body.appendChild(root);
     const view = new EditorView(root, { state });
     const nv = new CodeBlockNodeView(codeNode, view, () => 0);
+    CodeBlockNodeView.flushMountQueueForTests();
     return { schema, view, nv };
   }
 
@@ -373,5 +383,109 @@ describe("CodeBlockNodeView.updateLanguage 竞态守卫（issue #173）", () => 
       nv.destroy();
       view.destroy();
     }
+  });
+});
+
+describe("CodeBlockNodeView 懒挂载批次化（#212）", () => {
+  // 可控 IO：记录回调，由用例手动触发「进入视口」（真实浏览器中 IO 常在
+  // 快速滚动中成批触发，同帧连续 initCodeMirror 是滚动帧尖刺来源）
+  let ioCallbacks: Array<
+    (entries: { isIntersecting: boolean; target: Element }[]) => void
+  >;
+  let observed: Element[];
+
+  beforeEach(() => {
+    CodeBlockNodeView.resetMountQueueForTests();
+    ioCallbacks = [];
+    observed = [];
+    // 注意：必须用 function（可被 new），箭头函数不是 constructor
+    (globalThis as unknown as { IntersectionObserver: unknown }).IntersectionObserver =
+      function (cb: (entries: unknown[]) => void) {
+        return {
+          observe: (target: Element) => {
+            ioCallbacks.push(cb as never);
+            observed.push(target);
+          },
+          disconnect: vi.fn(),
+          unobserve: vi.fn(),
+        };
+      };
+  });
+
+  function buildNodeView() {
+    const schema = makeSchema();
+    const codeNode = schema.nodes.code_block.create(
+      { language: "text" },
+      schema.text("queued line"),
+    );
+    const doc = schema.nodes.doc.create(null, [codeNode]);
+    const state = EditorState.create({
+      doc,
+      selection: TextSelection.create(doc, 1),
+    });
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const view = new EditorView(root, { state });
+    const nv = new CodeBlockNodeView(codeNode, view, () => 0);
+    return { nv, view };
+  }
+
+  it("IO 进入视口只入队：CM 不立即创建，占位 <pre> 保留", () => {
+    const { nv, view } = buildNodeView();
+    expect(observed).toHaveLength(1);
+    ioCallbacks[0]!([{ isIntersecting: true, target: nv.dom }]);
+    // 入队但未被 drainer 消费（生产走 rAF 批次 + 滚动停歇让位调度）
+    expect((nv as { cm: unknown }).cm).toBeNull();
+    expect(nv.dom.querySelector(".code-block-placeholder")).not.toBeNull();
+    // IO 已断开（一次性挂载语义保留）
+    expect((nv as unknown as { io: unknown }).io).toBeNull();
+
+    CodeBlockNodeView.flushMountQueueForTests();
+    expect((nv as { cm: unknown }).cm).not.toBeNull();
+    expect(nv.dom.querySelector(".code-block-placeholder")).toBeNull();
+
+    nv.destroy();
+    view.destroy();
+  });
+
+  it("多个代码块同帧批量进入视口：全部入队，flush 逐个挂载", () => {
+    const first = buildNodeView();
+    const second = buildNodeView();
+    ioCallbacks[0]!([{ isIntersecting: true, target: first.nv.dom }]);
+    ioCallbacks[1]!([{ isIntersecting: true, target: second.nv.dom }]);
+
+    expect((first.nv as { cm: unknown }).cm).toBeNull();
+    expect((second.nv as { cm: unknown }).cm).toBeNull();
+
+    CodeBlockNodeView.flushMountQueueForTests();
+    expect((first.nv as { cm: unknown }).cm).not.toBeNull();
+    expect((second.nv as { cm: unknown }).cm).not.toBeNull();
+
+    first.nv.destroy();
+    first.view.destroy();
+    second.nv.destroy();
+    second.view.destroy();
+  });
+
+  it("destroy 从队列移除：已销毁实例不再被挂载", () => {
+    const { nv, view } = buildNodeView();
+    ioCallbacks[0]!([{ isIntersecting: true, target: nv.dom }]);
+    // 尚在队列中即被销毁（编辑删除节点/切换文档场景）
+    nv.destroy();
+    view.destroy();
+
+    CodeBlockNodeView.flushMountQueueForTests();
+    // 队列中的实例已被移除，destroy 后 cm 保持 null（不再创建新实例）
+    expect((nv as { cm: unknown }).cm).toBeNull();
+  });
+
+  it("未进入视口的代码块不入队，flush 无副作用", () => {
+    const { nv, view } = buildNodeView();
+    CodeBlockNodeView.flushMountQueueForTests();
+    // IO 未触发（视口外），占位保留、CM 未创建
+    expect((nv as { cm: unknown }).cm).toBeNull();
+    expect(nv.dom.querySelector(".code-block-placeholder")).not.toBeNull();
+    nv.destroy();
+    view.destroy();
   });
 });

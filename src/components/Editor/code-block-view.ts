@@ -110,6 +110,81 @@ export class CodeBlockNodeView implements NodeView {
   // 挂载后撑开数百 px，打开大文档时首屏逐块挂载产生连续布局跳变（窗口抖动）
   private placeholder: HTMLPreElement;
 
+  // ---- #212 懒挂载批次化（静态共享） ----
+  // IO 回调常在快速滚动中成批触发（rootMargin 200px 预载窗口一帧内进入
+  // 多个代码块），同帧连续 initCodeMirror（每个 10~20ms，trace 实测 6 批
+  // 共 119ms）造成 25~75ms 滚动帧尖刺。改为入队 + drainer：滚动进行中
+  //（250ms 内有 scroll 事件）让位，停歇后每帧最多挂载 1 个实例，把批量
+  // 挂载成本摊到停歇后的多帧（占位 <pre> 等高，视觉无跳变）。
+  /** 待挂载队列 */
+  private static mountQueue: CodeBlockNodeView[] = [];
+  /** 消费循环是否在途（一个循环逐帧消化整个队列） */
+  private static drainScheduled = false;
+  /** 最近一次滚动时间（document capture 监听，所有滚动容器可见） */
+  private static lastScrollAt = 0;
+  private static scrollMarkInstalled = false;
+
+  private static ensureScrollMark(): void {
+    if (CodeBlockNodeView.scrollMarkInstalled) return;
+    CodeBlockNodeView.scrollMarkInstalled = true;
+    // scroll 不冒泡但可被捕获：capture 监听接住任意容器的滚动事件
+    document.addEventListener(
+      "scroll",
+      () => {
+        CodeBlockNodeView.lastScrollAt = performance.now();
+      },
+      { passive: true, capture: true },
+    );
+  }
+
+  /** 启动（或复用在途的）队列消费循环 */
+  private static scheduleMountDrain(): void {
+    if (CodeBlockNodeView.drainScheduled) return;
+    CodeBlockNodeView.drainScheduled = true;
+    CodeBlockNodeView.pumpMountQueue();
+  }
+
+  private static pumpMountQueue(): void {
+    const queue = CodeBlockNodeView.mountQueue;
+    if (queue.length === 0) {
+      CodeBlockNodeView.drainScheduled = false;
+      return;
+    }
+    // 滚动进行中让位（同 mermaid-view 空闲预渲染的让位策略）
+    if (performance.now() - CodeBlockNodeView.lastScrollAt < 250) {
+      setTimeout(() => CodeBlockNodeView.pumpMountQueue(), 100);
+      return;
+    }
+    const item = queue.shift();
+    // 队列等待期间节点可能已被移除（编辑/切文档）： isConnected 守卫跳过
+    if (item && item.dom.isConnected && !item.cm) item.initCodeMirror();
+    if (queue.length > 0) {
+      requestAnimationFrame(() => CodeBlockNodeView.pumpMountQueue());
+    } else {
+      CodeBlockNodeView.drainScheduled = false;
+    }
+  }
+
+  /**
+   * @internal 测试接缝：同步清空挂载队列（绕过 rAF/滚动让位调度，也不做
+   * isConnected 守卫——单测直接构造 NodeView 时 dom 未经过 PM 挂载流程）。
+   * 生产代码不得调用——真实挂载必须走 scheduleMountDrain 的批次调度，
+   * 其 isConnected 守卫用于跳过等待期间已被移除的节点。
+   */
+  static flushMountQueueForTests(): void {
+    const queue = CodeBlockNodeView.mountQueue;
+    while (queue.length > 0) {
+      const item = queue.shift()!;
+      if (!item.cm) item.initCodeMirror();
+    }
+  }
+
+  /** @internal 测试接缝：清空队列并复位调度状态（用例间隔离） */
+  static resetMountQueueForTests(): void {
+    CodeBlockNodeView.mountQueue.length = 0;
+    CodeBlockNodeView.drainScheduled = false;
+  }
+
   constructor(node: Node, view: PMView, getPos: () => number | undefined) {
     this.node = node;
     this.view = view;
@@ -144,7 +219,7 @@ export class CodeBlockNodeView implements NodeView {
     this.cmHost.appendChild(this.placeholder);
 
     // 视口懒挂载：先尝试同步创建（若已在视口或 IO 不可用），
-    // 否则注册 IntersectionObserver，进入视口时再创建。
+    // 否则注册 IntersectionObserver，进入视口时入队由 drainer 批次挂载。
     if (typeof IntersectionObserver === "undefined") {
       this.initCodeMirror();
     } else {
@@ -152,9 +227,12 @@ export class CodeBlockNodeView implements NodeView {
         (entries) => {
           for (const e of entries) {
             if (e.isIntersecting && !this.cm) {
-              this.initCodeMirror();
               this.io?.disconnect();
               this.io = null;
+              // #212：只入队不立即挂载，见类头「懒挂载批次化」注释
+              CodeBlockNodeView.ensureScrollMark();
+              CodeBlockNodeView.mountQueue.push(this);
+              CodeBlockNodeView.scheduleMountDrain();
             }
           }
         },
@@ -369,6 +447,10 @@ export class CodeBlockNodeView implements NodeView {
   }
 
   destroy() {
+    // #212：从挂载队列移除（视口已进入但尚未被 drainer 消费就被销毁）
+    const queue = CodeBlockNodeView.mountQueue;
+    const idx = queue.indexOf(this);
+    if (idx >= 0) queue.splice(idx, 1);
     this.unsub();
     this.io?.disconnect();
     this.io = null;

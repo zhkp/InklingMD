@@ -7,6 +7,7 @@ import type { StateCreator } from "zustand";
 import { isTauri } from "@tauri-apps/api/core";
 import { fileMtime, readTextFile, writeTextFile } from "../../lib/fs";
 import { flushAllMarkdownPublishers } from "../../components/Editor/markdown-publisher";
+import { runWysiwygAnchorSampler } from "../../lib/wysiwyg-anchor-sampler";
 import { useConflict } from "../conflict";
 import {
   consumeDeletedDuringLoad,
@@ -1132,6 +1133,15 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
     setTabSourceMode: (enabled, path) => {
       const target = path ?? get().activeTabPath;
       if (!target) return;
+      // #212：从 WYSIWYG 进入源码方向的这一次翻转，须在状态更新（React
+      // 重渲染把 .md-editor-wysiwyg 置 display:none）之前同步采样视口锚点
+      // ——此刻几何现场读（posAtCoords/scrollHeight）全部可靠。切换由
+      // click/keydown 离散事件触发，React 同步 flush：采样与切换 effect
+      // 消费之间无滚动事件可插入，锚点必然新鲜（滚动进行中立即切换的竞争
+      // 场景同样成立）。已处于源码模式（如解析失败回退的重复置位）则跳过。
+      if (enabled && !get().openTabs.find((t) => t.path === target)?.sourceMode) {
+        runWysiwygAnchorSampler(target);
+      }
       const nextTabs = get().openTabs.map((t) =>
         t.path === target ? { ...t, sourceMode: enabled } : t,
       );
