@@ -53,17 +53,14 @@ async function buildLongDocInWysiwyg(page: Page) {
   await expect(page.locator(".ProseMirror")).toContainText("第 300 节", {
     timeout: 10_000,
   });
-  // 等 WYSIWYG 长文档完成布局：慢 CI（Windows）上 DOM 已挂载但尚未 layout 时，
-  // 设置 scrollTop 会被钳 0（scrollHeight 还很小），导致后续比例前置断言 flaky。
-  // 读取 scrollHeight 会强制 layout，轮询直至撑起足够高度即可视为布局完成。
-  await page.waitForFunction(
-    () => {
-      const el = document.querySelector(".editor-scroll");
-      return !!el && el.scrollHeight >= 10_000;
-    },
-    undefined,
-    { timeout: 15_000 },
-  );
+  // #214：退出源码模式的过渡恢复（settle 收敛循环，最长 30 帧）会按「进入
+  // 前的锚点」持续校正 WYSIWYG 滚动——本 fixture 在文档顶部进入源码模式，
+  // 退出时 settle 会把视口校正回顶部。旧实现只等 scrollHeight 撑起
+  //（waitForFunction 布局轮询）不等过渡收敛：若调用方紧接着 scrollTop=…
+  // 赋值且 settle 尚未结束，赋值会被后续收敛帧拽回，表现为前置断言 flaky。
+  // 与用例 A 一致，改为等 scrollTop + scrollHeight 双重收敛（waitScrollConverged
+  // 连续 3 次稳定 ≈ 300-500ms，同时覆盖布局撑起与过渡结束）再返回。
+  await waitScrollConverged(page, ".editor-scroll", 15_000);
 }
 
 /** 滚动 CM 到底部并点击底部文本行放置光标（模拟真实用户位置） */
