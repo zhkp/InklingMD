@@ -2,7 +2,30 @@
 
 本项目所有值得记录的变更都汇入本文件，格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本语义遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
-## [3.0.0] - 2026-09-05
+## [3.1.0] - 2026-09-07
+
+> **性能与测试可靠性修复**：关闭 2 个 GitHub Issues（#212、#214），合入 2 个 PR（#213、#215），3 个代码提交、10 个文件（+747 / −82，不含发版文档提交）。v3.0.0 大版本质量攻坚后收到的两份实测反馈——高刷屏大文档滚动掉帧，以及 #136 门禁用例的首跑 flaky——一并收敛。
+
+### 万行复杂文档滚动流畅性（#212，PR #213）
+
+- **根因**：#136（v2.8.0 引入，PR #139 落地）的模式切换锚点缓存 `cacheTopPos` 在滚动路径上每帧执行 `view.posAtCoords`——其内部 `elementFromPoint` 在代码块懒挂载 / 图片 / Mermaid 持续脏化布局时，每帧强制同步重排整篇文档（实测单次 6~32ms，120Hz 帧预算 8.33ms 被吃满），万行复杂文档滚动帧率跌至 ~60-68fps。自 v2.8.0 起影响所有含大量代码块 / 图表 / 表格 / 图片的大文档用户。
+- **修复（机制换血而非降频）**：把锚点采样从「滚动路径每帧」改为「切换指令触发时同步采样」——`setTabSourceMode` 翻转 `sourceMode`（React 将 `.md-editor-wysiwyg` 置 `display:none`）之前，经新增注册表 `lib/wysiwyg-anchor-sampler.ts` 同步采样视口顶部内容锚点（此刻编辑器仍可见，`posAtCoords` / `scrollHeight` 几何现场读可靠）。切换由 click/keydown 离散事件触发，React 同步 flush，采样与切换消费之间无滚动事件可插入，锚点必然新鲜——比旧 B1「切换时 flush 待执行 rAF」更稳，覆盖「滚动进行中不等停稳立即切换」的竞争场景。滚动路径几何读取归零，仅保留停歇 150ms 后的防御性保鲜补采。锚点缓存语义（含代码块不透明 nodeview 的 `blockStartAtTop` 吸附）与 #139 完全一致。
+- **p99 尖刺治理（次要项）**：①outline-tracker 的失效检测与 `rebuildHeadingTops`（425 标题批量 rect，单次 27ms 强制布局）从滚动采样路径移到滚动停歇 200ms 后，滚动帧保持纯二分；②CM6 代码块懒挂载由「IO 回调即挂载」改为「入队 + 滚动让位（250ms 无滚动）后每帧最多挂载 1 个」，消除同帧批量挂载的 25~75ms 帧尖刺（占位 `<pre>` 等高，无视觉跳变）。
+- **实测**（本机 headless 60Hz，万行 1200 代码块文档，rAF 25px/帧 × 360 帧）：median **16.7ms（满 vsync）**、p90 16.7ms、max 33.4ms（个别 vsync 漏帧量化值）、超过 2×median 的帧数 **0**。对照 issue 基线：v3.0.0 @120Hz median 16.6ms（掉帧一半）。120Hz 精确复测建议在 120Hz 开发机按 issue 方法学复核。
+- **新增回归用例**：`tests/e2e/source-mode-scroll-race.spec.ts` C1/C2——万行级 + 1200 代码块文档，rAF 连续滚动 30 帧**不停稳**、最后一帧内同步切换，断言源码侧视口顶部内容与切换瞬间 WYSIWYG 视口顶部内容一致（内容锚点级断言）。现有 #136 门禁均「停稳后切换」，此用例补齐滚动在途切换的竞争窗口。
+
+### #136 门禁用例 B 首跑 flaky（#214，PR #215）
+
+- **根因**：`source-mode-scroll.spec.ts` 用例 B 前置断言存在高失败率 flaky（main 33%、被 CI retries:2 掩盖）。`buildLongDocInWysiwyg` fixture 在文档顶部进入源码模式灌长文，退出时 #136 过渡恢复的 settle 收敛循环（最长 30 帧）按「进入前锚点」持续校正滚动回顶部；fixture 退出后仅 `waitForFunction(scrollHeight)` 等布局撑起、不等过渡收敛，调用方紧接着的 `scrollTop = scrollHeight` 滚底赋值与 settle 剩余帧竞争被拽回。
+- **修复**：fixture 退出源码模式后改用 `waitScrollConverged`（scrollTop + scrollHeight 连续 3 次稳定，同时覆盖布局撑起与过渡收敛）再返回，与用例 A 既定路径对齐。产品代码不改动——settle 有 30 帧上限与 <1px 收敛即止，覆盖窗口属模式切换过渡的既定行为。
+- **验证**：用例 B `repeat-each=20` → 20/20（修复前 1/10 失败）；全量 E2E 无 retries 下无 flaky。
+
+### 统计口径与测试
+
+- 版本范围：`git diff --stat v3.0.0..main` 10 个文件（+747 / −82），全部为 src / src-tauri / tests。
+- 质量门禁：Vitest 116 文件 / 760 用例、Playwright E2E 171 用例（新增 scroll-race C1/C2）、Rust `cargo test` 59 用例（Windows；ubuntu 55，4 个 `#[cfg(windows)]` 用例不参与编译）、`tsc --noEmit` 零错误、CI 双平台全绿。
+
+
 
 > **主版本发布**：自 v2.8.1 以来最大规模的一次质量攻坚，共关闭 **45 个 GitHub Issues**（#146–#188、#192、#200）、合入 **19 个 PR**（#189–#211），涉及 61 个代码提交、113 个文件（+8486 / −722 行，不含发版文档提交）。本版本不含新功能，全部投入于**数据安全、竞态治理、崩溃兜底、性能优化、安全加固与可访问性**六个方向，使应用的可靠性基线整体抬升一个层级。
 
