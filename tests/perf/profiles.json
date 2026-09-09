@@ -1,0 +1,15 @@
+{
+  "tiers": {
+    "S": 1000,
+    "M": 5000,
+    "L": 20000,
+    "XL": 50000
+  },
+  "profiles": {
+    "quick": ["S", "M"],
+    "full": ["S", "M", "L"],
+    "xl": ["S", "M", "L", "XL"]
+  },
+  "scenarios": ["open", "input", "scroll", "search", "tab-switch", "save"],
+  "plainScenarios": ["open", "scroll"]
+}

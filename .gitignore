@@ -29,3 +29,7 @@ playwright-report/
 test-results/
 coverage/
 .codegraph/
+
+# 性能 Benchmark 产物与本地基线（.perf-baseline/<profile>/ 为提交进仓库的基线，不在此列）
+.perf-output/
+.perf-baseline/local/

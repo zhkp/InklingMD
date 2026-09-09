@@ -1,0 +1,116 @@
+name: Benchmark
+
+# 独立工作流，刻意不改 build.yml：
+# on: pull_request 作用于整个 workflow，在 build.yml 上加会让每个 PR 触发
+# build-windows / build-linux 的完整 Tauri 双平台打包（每 PR 十几分钟成本），
+# 而仓库现状「PR 不跑 CI」很可能是刻意的成本控制。独立工作流零副作用。
+#
+# 测量声明（防「CI 说没回归、用户说卡」的扯皮）：
+# - 运行时 = Playwright chromium + vite dev server（未压缩、含 HMR），绝对值不代表生产构建
+# - CI 无 GPU、仅 ubuntu-latest，测量值只用于同环境纵向对比
+# - 真机 WebView2 / WKWebView 表现仍是发版前人工验证项
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: "档位（quick = 1k/5k 行；full = 含 2 万行）"
+        required: false
+        default: "quick"
+        type: choice
+        options:
+          - quick
+          - full
+      update_baseline:
+        description: "用本次结果重建 baseline（CI 首次启用、或 fixture/环境变更后需要）"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    # 不阻断合并（issue #216 硬要求）：Benchmark 只做相对回归的提示，不做门禁
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v5
+        with:
+          version: 10
+
+      - name: Setup Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install frontend deps
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Playwright browsers
+        run: pnpm exec playwright install chromium
+
+      - name: Install Playwright system deps
+        shell: bash
+        # sudo 会重置 PATH 导致找不到 pnpm，用 sudo env 透传（与 build.yml 一致）
+        run: sudo env "PATH=$PATH" pnpm exec playwright install-deps chromium
+
+      - name: 决定档位
+        id: profile
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "value=${{ github.event.inputs.profile }}" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.ref_type }}" = "tag" ]; then
+            echo "value=full" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=quick" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run benchmark
+        env:
+          PERF_PROFILE: ${{ steps.profile.outputs.value }}
+          CI: "true"
+        run: |
+          if [ "${{ github.event.inputs.update_baseline }}" = "true" ]; then
+            pnpm run benchmark -- --update-baseline=1
+          else
+            pnpm run benchmark
+          fi
+
+      # 退出码 1 = 回归复现，2 = infra 故障；两者都不阻断合并，但要留下产物供排查
+      # 重建 baseline 时把 .perf-baseline/ 一并上传：CI 上的 baseline 需要人工取回并提交，
+      # workflow 不自动 commit（避免给 CI 写仓库权限）
+      - name: Upload benchmark artifact
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: perf-benchmark-${{ steps.profile.outputs.value }}
+          # 一并上传 .perf-baseline/：CI 的 baseline 落在 .perf-baseline/<profile>/，
+          # 重建后需人工取回并提交（本地基线在 local/ 下且已 gitignore，CI 上不存在）
+          path: |
+            .perf-output/
+            .perf-baseline/
+          retention-days: 7
+          if-no-files-found: warn
+
+      - name: 写入 Job Summary
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          if [ -f .perf-output/report.md ]; then
+            cat .perf-output/report.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "⚠️ 未生成 .perf-output/report.md（benchmark 未跑完，属 infra 故障）" >> "$GITHUB_STEP_SUMMARY"
+          fi

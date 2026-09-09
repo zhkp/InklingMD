@@ -13,7 +13,8 @@ export default defineConfig({
     globals: true,
     setupFiles: ["./tests/setup.ts"],
     include: ["tests/**/*.{test,spec}.{ts,tsx}"],
-    exclude: ["tests/e2e/**", "node_modules/**"],
+    // tests/perf 走独立 Playwright 配置与 npm run benchmark，不能被 Vitest 收走
+    exclude: ["tests/e2e/**", "tests/perf/**", "node_modules/**"],
     coverage: {
       provider: "v8",
       reporter: ["text", "html"],
