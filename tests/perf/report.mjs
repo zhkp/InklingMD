@@ -459,6 +459,10 @@ function main() {
     lines.push(
       `- 绝对阈值已启用：帧间隔 p95 ≤ ${P95_BUDGET_FACTOR}× 帧预算、掉帧率 ≤ ${JANK_RATE_LIMIT_PCT}%（带环境属性，无 GPU 的 CI 上大档位掉帧属真实结论；可用 PERF_ABSOLUTE=0 关闭）`,
     );
+  } else {
+    lines.push(
+      "- 绝对阈值已关闭（PERF_ABSOLUTE=0）：本次只做相对回归判定。绝对结论请在本地用 PERF_HEADED=1 或 PERF_UNCAPPED=1 获取",
+    );
   }
   lines.push("");
   lines.push("| 场景 | 指标 | baseline | 本次 | 复测 | 变化 | 判定 |");

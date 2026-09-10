@@ -31,6 +31,11 @@ on:
         required: false
         default: false
         type: boolean
+      absolute:
+        description: "启用绝对阈值判定（默认关闭：CI 无 GPU 且 vsync 锁 60Hz，绝对结论反映 runner 而非代码）"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -82,6 +87,11 @@ jobs:
         env:
           PERF_PROFILE: ${{ steps.profile.outputs.value }}
           CI: "true"
+          # CI 默认关闭绝对阈值：headless 被锁 60Hz 且 runner 无 GPU、负载波动大，
+          # 同一份代码两轮实测 jankRate 21.7% 与 <10%，绝对结论衡量的是 runner 而不是代码。
+          # 相对回归判定（median / p95 / jank 指标对 baseline）在 CI 全量保留。
+          # 需要绝对结论时：本地用 PERF_HEADED=1 或 PERF_UNCAPPED=1 跑，或手动触发时打开 absolute 勾选。
+          PERF_ABSOLUTE: ${{ github.event.inputs.absolute == 'true' && '1' || '0' }}
         run: |
           if [ "${{ github.event.inputs.update_baseline }}" = "true" ]; then
             pnpm run benchmark -- --update-baseline=1
