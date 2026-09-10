@@ -92,18 +92,20 @@ jobs:
       # 退出码 1 = 回归复现，2 = infra 故障；两者都不阻断合并，但要留下产物供排查
       # 重建 baseline 时把 .perf-baseline/ 一并上传：CI 上的 baseline 需要人工取回并提交，
       # workflow 不自动 commit（避免给 CI 写仓库权限）
+      #
+      # include-hidden-files 必须为 true：.perf-output/ 与 .perf-baseline/ 都是点开头的隐藏目录，
+      # upload-artifact v4+ 默认跳过隐藏文件——实测踩过「步骤显示 success 但零产物」的假绿灯。
       - name: Upload benchmark artifact
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v7
         with:
           name: perf-benchmark-${{ steps.profile.outputs.value }}
-          # 一并上传 .perf-baseline/：CI 的 baseline 落在 .perf-baseline/<profile>/，
-          # 重建后需人工取回并提交（本地基线在 local/ 下且已 gitignore，CI 上不存在）
           path: |
             .perf-output/
             .perf-baseline/
+          include-hidden-files: true
           retention-days: 7
-          if-no-files-found: warn
+          if-no-files-found: error
 
       - name: 写入 Job Summary
         if: ${{ !cancelled() }}
