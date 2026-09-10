@@ -257,28 +257,59 @@ export function waitRenderStable(opts: {
  * 逐帧驱动滚动并采集帧间隔。
  * 复用 tests/e2e/source-mode-scroll-race.spec.ts 的 rAF 范式（frames++ + rAF(step)），
  * 这里补齐了每帧时间戳采集。
+ *
+ * 步长自适应（评审 P2-4）：固定 240px × 120 帧 = 28,800px，短文档会中途触底，
+ * 之后所有帧测的是静止页面的 vsync，既稀释样本又掩盖下半篇的滚动开销。
+ * 因此按文档实际可滚动距离反推步长，并额外回报最终位置与是否触底，交由调用方断言。
  */
 export function runScrollFrames(opts: {
   frames: number;
+  maxStep: number;
+}): Promise<{
+  intervals: number[];
+  maxScroll: number;
+  finalScrollTop: number;
+  saturated: boolean;
   step: number;
-}): Promise<number[]> {
+}> {
   const el = document.querySelector(".editor-scroll") as HTMLElement | null;
   if (!el) throw new Error("perf: 未找到 .editor-scroll");
+
+  const maxScroll = Math.max(0, el.scrollHeight - el.clientHeight);
+  // 预留 10% 余量，避免最后一帧正好压到底部边界
+  const step = Math.max(
+    24,
+    Math.min(opts.maxStep, Math.floor((maxScroll * 0.9) / opts.frames)),
+  );
+
   const intervals: number[] = [];
   let frames = 0;
   let last = performance.now();
-  return new Promise<number[]>((resolve) => {
+  return new Promise<{
+    intervals: number[];
+    maxScroll: number;
+    finalScrollTop: number;
+    saturated: boolean;
+    step: number;
+  }>((resolve) => {
     const stepFn = (): void => {
       frames += 1;
-      el.scrollTop += opts.step;
+      el.scrollTop += step;
       const now = performance.now();
       intervals.push(now - last);
       last = now;
       if (frames < opts.frames) {
         requestAnimationFrame(stepFn);
-      } else {
-        resolve(intervals);
+        return;
       }
+      const finalScrollTop = el.scrollTop;
+      resolve({
+        intervals,
+        maxScroll,
+        finalScrollTop,
+        saturated: finalScrollTop >= maxScroll - 1,
+        step,
+      });
     };
     requestAnimationFrame(stepFn);
   });

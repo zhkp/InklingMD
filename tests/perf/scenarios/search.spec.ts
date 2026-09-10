@@ -23,15 +23,13 @@ import {
   detectEnv,
   fixtureFor,
   kindsFor,
+  pickSearchKeyword,
   readRunContext,
   shouldRun,
   writeRawFile,
 } from "../runner";
 
 const ctx = readRunContext();
-
-/** fixture 里每节都带唯一编号，这个关键词必然命中且命中数可观 */
-const KEYWORD = "bench-";
 
 for (const tier of ctx.tiers) {
   for (const kind of kindsFor("search")) {
@@ -41,6 +39,8 @@ for (const tier of ctx.tiers) {
       test.skip(!shouldRun(id, ctx), "不在本次运行范围（复测过滤）");
 
       const fixture = fixtureFor(tier, kind);
+      // 关键词必须从文档本身推导：用户自带文档里不会有生成 fixture 的 "bench-" 编号
+      const keyword = pickSearchKeyword(fixture.content);
       const searchSamples: number[] = [];
       const matchCounts: number[] = [];
       const longTaskCount: number[] = [];
@@ -64,7 +64,7 @@ for (const tier of ctx.tiers) {
         const input = page.locator(".search-panel .search-input").first();
         await expect(input).toBeVisible({ timeout: 10_000 });
         // 用 fill 而不是逐字符 type：逐字符 CDP 往返噪声会淹没搜索本身的耗时
-        await input.fill(KEYWORD);
+        await input.fill(keyword);
 
         await expect
           .poll(async () => (await page.evaluate(readSearchDone)) !== null, {
@@ -112,6 +112,7 @@ for (const tier of ctx.tiers) {
           version: fixture.version,
           hash: fixture.hash,
           lines: fixture.lines,
+          source: fixture.source,
         },
         samples: { searchMs: searchSamples },
         scalars: {

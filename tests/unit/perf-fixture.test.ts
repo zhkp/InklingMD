@@ -12,6 +12,7 @@ import {
   fixtureHash,
   FIXTURE_VERSION,
 } from "../perf/fixtures";
+import { pickSearchKeyword } from "../perf/runner";
 
 describe("perf fixture 生成器", () => {
   it("同参数两次生成字节级一致（baseline 比较成立的前提）", () => {
@@ -39,7 +40,7 @@ describe("perf fixture 生成器", () => {
     }
   });
 
-  it("rich 档覆盖设计要求的 9 类结构标记", () => {
+  it("rich 档覆盖设计要求的结构标记（含 mermaid 与真实图片）", () => {
     const doc = buildFixture({ lines: 2000, kind: "rich" });
     const required: Array<[string, string]> = [
       ["标题", "## 基准章节"],
@@ -54,13 +55,33 @@ describe("perf fixture 生成器", () => {
       ["引用", "> 引用块"],
       ["表格", "| --- | --- |"],
       ["代码块", "```ts"],
-      ["图片占位", "![图片占位]("],
       ["行内公式", "$E = mc^2$"],
       ["块级公式", "$$"],
     ];
     for (const [name, needle] of required) {
       expect(doc.includes(needle), `rich 档缺少${name}`).toBe(true);
     }
+    // 评审 P1-2：mermaid 是本项目最重的渲染元素，缺失会导致压测负载失真
+    expect(doc.includes("```mermaid"), "rich 档缺少 mermaid 块").toBe(true);
+    expect(doc.includes("flowchart TD"), "mermaid 块缺少图形定义").toBe(true);
+  });
+
+  it("rich 档图片必须是可解码的 data URI，而不是必然 404 的相对路径", () => {
+    const doc = buildFixture({ lines: 2000, kind: "rich" });
+    const match = /\]\((data:image\/png;base64,[A-Za-z0-9+/=]+)\)/.exec(doc);
+    expect(match, "未找到 data URI 图片").not.toBeNull();
+
+    // 真实解码校验：base64 还原后必须是合法 PNG 签名，
+    // 否则"图片进入了测量"这件事只是字符串层面的假象
+    const bytes = Buffer.from(match![1].split(",")[1], "base64");
+    expect([...bytes.subarray(0, 8)]).toEqual([137, 80, 78, 71, 13, 10, 26, 10]);
+    expect(bytes.length).toBeGreaterThan(100);
+    // PNG 的 IHDR 里应能读出真实尺寸（256x192），证明确实有可布局的图片
+    expect(bytes.readUInt32BE(16)).toBe(256);
+    expect(bytes.readUInt32BE(20)).toBe(192);
+
+    // v1 的相对路径已废弃：mock 环境必然 404，等于没测图片
+    expect(doc.includes("](assets/bench-"), "仍在使用必然 404 的相对路径").toBe(false);
   });
 
   it("plain 档不含结构标记，保证「长度 vs 复杂度」对照有效", () => {
@@ -75,8 +96,43 @@ describe("perf fixture 生成器", () => {
     expect(hash).toMatch(/^[0-9a-f]{12}$/);
   });
 
-  it("FIXTURE_VERSION 为正整数（baseline 失效判定依赖它）", () => {
+  it("FIXTURE_VERSION 已升到 v2（内容变更必须作废旧 baseline）", () => {
     expect(Number.isInteger(FIXTURE_VERSION)).toBe(true);
-    expect(FIXTURE_VERSION).toBeGreaterThan(0);
+    expect(FIXTURE_VERSION).toBeGreaterThanOrEqual(2);
+  });
+});
+
+describe("search 场景关键词推导（自定义文档支持）", () => {
+  it("生成 fixture 一律用 bench- 编号（命中数可观，可量测）", () => {
+    const doc = buildFixture({ lines: 1000, kind: "rich" });
+    expect(pickSearchKeyword(doc)).toBe("bench-");
+  });
+
+  it("自定义文档：不取 YAML frontmatter 里的词（渲染后不参与搜索）", () => {
+    const doc = [
+      "---",
+      "title: Markdown编辑器性能测试文档",
+      "author: 测试工程师",
+      "---",
+      "",
+      "# 正文标题在这里",
+      "正文内容。",
+    ].join("\n");
+    const keyword = pickSearchKeyword(doc);
+    expect(keyword).not.toContain("title");
+    expect(doc.includes(keyword)).toBe(true);
+    // 且必须来自 frontmatter 之后的正文
+    expect(doc.indexOf(keyword)).toBeGreaterThan(doc.lastIndexOf("---"));
+  });
+
+  it("自定义文档：关键词必须真实存在于文档中（否则搜索场景会 0 命中超时）", () => {
+    const doc = "# 性能压测\n\n普通段落，没有编号也没有特殊标记。\n";
+    const keyword = pickSearchKeyword(doc);
+    expect(keyword.length).toBeGreaterThanOrEqual(4);
+    expect(doc.includes(keyword)).toBe(true);
+  });
+
+  it("极端文档：无长文本行时仍有可用关键词", () => {
+    expect(pickSearchKeyword("a\nb\nc\n").length).toBeGreaterThan(0);
   });
 });

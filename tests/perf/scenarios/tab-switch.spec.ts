@@ -121,6 +121,7 @@ for (const tier of ctx.tiers) {
           version: fixture.version,
           hash: fixture.hash,
           lines: fixture.lines,
+          source: fixture.source,
         },
         samples: { switchMs: switchSamples },
         scalars: {

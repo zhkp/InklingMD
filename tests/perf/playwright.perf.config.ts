@@ -8,11 +8,18 @@
 //
 // 端口：默认 1420（CI 正常）。本机 Windows 把 1350–2149 划入动态保留端口段，
 // 需 PERF_PORT=3000 覆盖（vite.config.ts 的 HMR 已跟随 server 端口，无需另改）。
-
+//
+// 两种运行模式（评审 P1-1：headless 的 BeginFrame 被锁 60Hz，高刷场景测不了）：
+// - 默认 headless：vsync 地板 ~16.7ms，**只适合做相对回归比较**（同环境纵向对比）
+// - PERF_HEADED=1：有头运行，vsync 跟随显示器刷新率，本机高刷屏可参与测量
+// - PERF_UNCAPPED=1：额外解除 vsync 上限（--disable-gpu-vsync --disable-frame-rate-limit），
+//   在任意显示器上都能看出「单帧真实工作耗时是否还在 8.3ms 预算内」
 import { defineConfig, devices } from "@playwright/test";
 
 const PORT = Number(process.env.PERF_PORT ?? 1420);
 const BASE_URL = `http://localhost:${PORT}`;
+const HEADED = process.env.PERF_HEADED === "1";
+const UNCAPPED = process.env.PERF_UNCAPPED === "1";
 
 export default defineConfig({
   testDir: ".",
@@ -27,11 +34,15 @@ export default defineConfig({
     trace: "off",
     screenshot: "off",
     video: "off",
+    headless: !HEADED,
     launchOptions: {
       args: [
         "--disable-background-timer-throttling",
         "--disable-renderer-backgrounding",
         "--disable-backgrounding-occluded-windows",
+        ...(UNCAPPED
+          ? ["--disable-gpu-vsync", "--disable-frame-rate-limit"]
+          : []),
       ],
     },
   },

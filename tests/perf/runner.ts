@@ -5,7 +5,12 @@
 
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { buildFixture, fixtureHash, FIXTURE_VERSION } from "./fixtures";
+import {
+  buildFixture,
+  countLines,
+  fixtureHash,
+  FIXTURE_VERSION,
+} from "./fixtures";
 
 /**
  * 档位配置的唯一数据源是 profiles.json：
@@ -24,7 +29,20 @@ const profiles: ProfilesConfig = JSON.parse(
   readFileSync(resolve("tests/perf/profiles.json"), "utf8"),
 );
 
-export type FixtureKind = "rich" | "plain";
+export type FixtureKind = "rich" | "plain" | "custom";
+
+/** 自定义文档（PERF_DOC_FILE）使用的虚拟档位：不按行数分档，整份文件即一档 */
+export const CUSTOM_TIER = "C";
+
+/**
+ * 用户自带的压测文档路径（评审 P1-2）。
+ * 设置后所有场景只跑这一份文档，不再跑生成档位与纯文本对照——
+ * 用户关心的是"我手上这份压测文件滚起来顺不顺"，而不是合成 fixture。
+ */
+function customDocPath(): string | null {
+  const raw = process.env.PERF_DOC_FILE;
+  return raw && raw.trim() ? raw.trim() : null;
+}
 
 export interface RunContext {
   profile: string;
@@ -42,7 +60,9 @@ export interface RunContext {
 export function readRunContext(): RunContext {
   const profile = process.env.PERF_PROFILE ?? "quick";
   const tierMap = profiles.profiles as Record<string, string[]>;
-  const tiers = tierMap[profile] ?? tierMap.quick;
+  const tiers = customDocPath()
+    ? [CUSTOM_TIER]
+    : (tierMap[profile] ?? tierMap.quick);
 
   const repeat = Number(process.env.PERF_REPEAT ?? "");
   const rounds =
@@ -68,9 +88,20 @@ export function readRunContext(): RunContext {
 
 /** 只有 open / scroll 跑纯文本对照（区分"文档长度"与"结构复杂度"） */
 export function kindsFor(scenario: string): FixtureKind[] {
+  if (customDocPath()) return ["custom"];
   return (profiles.plainScenarios as string[]).includes(scenario)
     ? ["rich", "plain"]
     : ["rich"];
+}
+
+/**
+ * 帧预算（ms）：判定"这一帧有没有掉"的基准。
+ * 60Hz = 16.7，120Hz = 8.3。headless 下 vsync 锁 60Hz，帧间隔中位数恒为 ~16.7ms，
+ * 因此高刷目标必须配合 PERF_HEADED=1（或 PERF_UNCAPPED=1）才有意义。
+ */
+export function frameBudgetMs(): number {
+  const raw = Number(process.env.PERF_FRAME_BUDGET_MS ?? "");
+  return Number.isFinite(raw) && raw > 0 ? raw : 16.7;
 }
 
 export function tierLines(tier: string): number {
@@ -81,15 +112,39 @@ export function tierLines(tier: string): number {
 }
 
 /** 生成指定档位/类型的 fixture 及其指纹 */
-export function fixtureFor(tier: string, kind: FixtureKind): {
+export function fixtureFor(
+  tier: string,
+  kind: FixtureKind,
+): {
   lines: number;
   content: string;
   hash: string;
   version: number;
+  source: string;
 } {
+  const docPath = customDocPath();
+  if (kind === "custom" || tier === CUSTOM_TIER) {
+    if (!docPath) throw new Error("custom 档位需要设置 PERF_DOC_FILE");
+    // 读用户自带文档：行数与指纹都取自真实文件内容，
+    // 于是"换了一份压测文档"会自然触发 baseline 失效（hash 不匹配）
+    const content = readFileSync(resolve(docPath), "utf8");
+    return {
+      lines: countLines(content),
+      content,
+      hash: fixtureHash(content),
+      version: FIXTURE_VERSION,
+      source: docPath,
+    };
+  }
   const lines = tierLines(tier);
   const content = buildFixture({ lines, kind });
-  return { lines, content, hash: fixtureHash(content), version: FIXTURE_VERSION };
+  return {
+    lines,
+    content,
+    hash: fixtureHash(content),
+    version: FIXTURE_VERSION,
+    source: `generated:${kind}`,
+  };
 }
 
 /**
@@ -112,7 +167,7 @@ export interface RawFile {
   profile: string;
   rounds: number;
   warmups: number;
-  fixture: { version: number; hash: string; lines: number };
+  fixture: { version: number; hash: string; lines: number; source: string };
   /** 主指标样本数组（report 负责算 median/p95/max） */
   samples: Record<string, number[]>;
   /** 标量指标（计数、占比等），直接比较 */
@@ -133,6 +188,35 @@ export function writeRawFile(raw: RawFile): void {
     JSON.stringify(raw, null, 2),
     "utf8",
   );
+}
+
+/**
+ * 为 search 场景挑选一个"文档里确实存在"的关键词。
+ *
+ * 不能用硬编码关键词（如 "bench-"）：那只保证在生成 fixture 里命中，
+ * 用户自带压测文档（PERF_DOC_FILE）里没有这个词时会搜索无结果 → 场景超时。
+ * 实测踩过：md_editor_stress_test.md 里没有 "bench-"，search-C-custom 直接跑挂。
+ */
+export function pickSearchKeyword(content: string): string {
+  if (content.includes("bench-")) return "bench-";
+
+  // 跳过 YAML frontmatter：它只存在于源码里，编辑器渲染后不参与文本搜索。
+  // 实测踩过：md_editor_stress_test.md 的 frontmatter 里有 "title:"，
+  // 选中它会导致搜索永远 0 命中。
+  let body = content;
+  const frontmatter = /^---\r?\n[\s\S]*?\r?\n---\r?\n/.exec(body);
+  if (frontmatter) body = body.slice(frontmatter[0].length);
+
+  for (const line of body.split("\n")) {
+    // 去掉 Markdown 前缀（标题/引用/列表/围栏/表格）与可能影响匹配的标记符号
+    const text = line
+      .replace(/^\s*(#{1,6}|>|[-*+]|\d+\.|```|~~~|\|)+\s*/, "")
+      .replace(/[|`*_~[\]()]/g, " ")
+      .trim();
+    if (text.length >= 6) return text.slice(0, 6);
+  }
+  // 兜底：整篇没有 >= 6 字符的文本行时，取前 4 个字符
+  return body.slice(0, 4) || "a";
 }
 
 /** 场景是否应执行（复测阶段只跑清单里的 id） */
