@@ -1,0 +1,73 @@
+{
+  "schemaVersion": 1,
+  "env": "ci-ubuntu",
+  "profile": "quick",
+  "scenario": "scroll",
+  "tier": "S",
+  "kind": "plain",
+  "rounds": 1,
+  "fixture": {
+    "version": 2,
+    "hash": "c80d1f6c26ea",
+    "lines": 1000,
+    "source": "generated:plain"
+  },
+  "metrics": {
+    "frameMs": {
+      "median": 16.7,
+      "p95": 16.9,
+      "max": 17.1,
+      "n": 120
+    },
+    "longTaskCount": {
+      "median": 0,
+      "p95": null,
+      "max": null,
+      "n": null,
+      "scalar": true
+    },
+    "longTaskMs": {
+      "median": 0,
+      "p95": null,
+      "max": null,
+      "n": null,
+      "scalar": true
+    },
+    "longFrameCount": {
+      "median": 0,
+      "p95": null,
+      "max": null,
+      "n": null,
+      "scalar": true
+    },
+    "jankCount": {
+      "median": 0,
+      "p95": null,
+      "max": null,
+      "n": null,
+      "scalar": true
+    },
+    "jankRatePct": {
+      "median": 0,
+      "p95": null,
+      "max": null,
+      "n": null,
+      "scalar": true
+    },
+    "cls": {
+      "median": 0,
+      "p95": null,
+      "max": null,
+      "n": null,
+      "scalar": true
+    },
+    "heapDeltaMB": {
+      "median": 0,
+      "p95": null,
+      "max": null,
+      "n": null,
+      "scalar": true
+    }
+  },
+  "updatedAt": "2026-09-10T14:51:56.252Z"
+}

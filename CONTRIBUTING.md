@@ -120,7 +120,9 @@ PERF_DOC_FILE=md_editor_stress_test.md pnpm run benchmark
 - 相对判定：耗时/帧间隔的 **median 与 p95 都参与比较**（周期性尖刺在 median 上看不出来）；
   掉帧率、long task 数等标量同时比较；默认劣化阈值 15%，p95 放宽 10 个百分点。
 - 绝对判定（不依赖基线，首次运行也生效）：滚动场景的帧间隔 p95 不得超过 `2 × 帧预算`，
-  掉帧率不得超过 10%（可用 `PERF_JANK_RATE_LIMIT` 调整）。
+  掉帧率不得超过 10%（可用 `PERF_JANK_RATE_LIMIT` 调整，`PERF_ABSOLUTE=0` 整体关闭）。
+  注意绝对判定带有**环境属性**：它衡量"这份文档在当前机器上能否跑满帧预算"。无 GPU 的 CI runner
+  上大档位掉帧是真实结论（实测 5k 行档 jankRate 21.7%）——那是 runner 的结论，不是用户机器的。
 - 「连续 2 次复现」：首轮超阈值 → 自动只复测该场景 → 仍超阈值判 FAIL，回落判 WARN（抖动）。
 - 掉帧定义：帧间隔 > `1.5 × 帧预算`（60Hz → >25ms），避免把 vsync 抖动当卡顿。
 

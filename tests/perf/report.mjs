@@ -30,7 +30,13 @@ const P95_EXTRA_PCT = 10;
  * 相对比较只能回答「有没有比上次差」，回答不了「120fps 目标达没达到」。
  * - 帧间隔 p95 不得超过 2 × 帧预算（60Hz → 33.4ms，120Hz → 16.6ms）
  * - 掉帧率不得超过该百分比
+ *
+ * 注意：绝对阈值带有**环境属性**——它衡量的是"这份文档在当前机器上能否跑满帧预算"。
+ * 无 GPU 的共享 CI runner 上，大档位掉帧是真实结论（实测 M 档 jankRate 21.7%），
+ * 但它说的是 runner 而不是用户机器。团队若觉得 CI 上噪声大于价值，可用 PERF_ABSOLUTE=0 关闭
+ * （关闭后仍保留相对回归判定）。
  */
+const ABSOLUTE_ENABLED = process.env.PERF_ABSOLUTE !== "0";
 const JANK_RATE_LIMIT_PCT = Number(process.env.PERF_JANK_RATE_LIMIT ?? 10);
 const P95_BUDGET_FACTOR = 2;
 
@@ -186,6 +192,7 @@ function isOver(metric, current, base) {
  */
 function absoluteRows(raw) {
   const rows = [];
+  if (!ABSOLUTE_ENABLED) return rows;
   const budget = raw.scalars?.frameBudgetMs;
   if (raw.scenario !== "scroll" || typeof budget !== "number") return rows;
 
@@ -448,6 +455,11 @@ function main() {
     );
   }
   lines.push(`- 场景数：${results.length}　FAIL：${failed.length}　WARN：${warned.length}`);
+  if (ABSOLUTE_ENABLED) {
+    lines.push(
+      `- 绝对阈值已启用：帧间隔 p95 ≤ ${P95_BUDGET_FACTOR}× 帧预算、掉帧率 ≤ ${JANK_RATE_LIMIT_PCT}%（带环境属性，无 GPU 的 CI 上大档位掉帧属真实结论；可用 PERF_ABSOLUTE=0 关闭）`,
+    );
+  }
   lines.push("");
   lines.push("| 场景 | 指标 | baseline | 本次 | 复测 | 变化 | 判定 |");
   lines.push("|---|---|---|---|---|---|---|");
