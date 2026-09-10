@@ -104,6 +104,39 @@ export function frameBudgetMs(): number {
   return Number.isFinite(raw) && raw > 0 ? raw : 16.7;
 }
 
+/** 测量运行模式：决定帧间隔到底反映"显示器刷新节拍"还是"单帧真实工作耗时" */
+export type PerfMode = "uncapped" | "headed" | "headless";
+
+export function detectMode(): PerfMode {
+  if (process.env.PERF_UNCAPPED === "1") return "uncapped";
+  if (process.env.PERF_HEADED === "1") return "headed";
+  return "headless";
+}
+
+/**
+ * 本次测量是否允许产出**绝对阈值判定**（帧预算目标是否达标）。
+ *
+ * 为什么不能默认开启（复审发现的问题）：headless 下 vsync 锁 60Hz，帧间隔反映的是
+ * 显示器节拍而非单帧工作耗时——绝对结论衡量的是"这台机器此刻忙不忙"，不是代码质量。
+ * 一旦默认开启，本地/CI 的**首次运行**（无 baseline、无代码变更）就会因为
+ * jankRate 贴线而打印「回归确认」并以 exit 1 结束，与真实回归在退出码层面完全无法区分。
+ *
+ * 策略：
+ * - PERF_ABSOLUTE=1 → 强制开启（含 headless，用于复现/调试）
+ * - PERF_ABSOLUTE=0 → 强制关闭（含 headed）
+ * - 未设置（或空串）→ 仅在 uncapped / headed 下默认开启
+ *
+ * 判定结果随 raw 一起落盘（见 writeRawFile），因此 report.mjs 独立复算时不会因
+ * 环境变量丢失而静默翻转结论。
+ */
+export function absoluteEligible(): boolean {
+  const flag = process.env.PERF_ABSOLUTE;
+  if (flag === "1") return true;
+  if (flag === "0") return false;
+  const mode = detectMode();
+  return mode === "uncapped" || mode === "headed";
+}
+
 export function tierLines(tier: string): number {
   const tiers = profiles.tiers as Record<string, number>;
   const lines = tiers[tier];
@@ -167,6 +200,10 @@ export interface RawFile {
   profile: string;
   rounds: number;
   warmups: number;
+  /** 测量运行模式，由 writeRawFile 自动补齐 */
+  mode?: PerfMode;
+  /** 本次测量是否产出绝对阈值判定，由 writeRawFile 自动补齐 */
+  absoluteEligible?: boolean;
   fixture: { version: number; hash: string; lines: number; source: string };
   /** 主指标样本数组（report 负责算 median/p95/max） */
   samples: Record<string, number[]>;
@@ -179,13 +216,21 @@ export interface RawFile {
  *
  * 目录可通过 PERF_RAW_DIR 覆盖：复测轮（phase 3）必须写到独立目录，
  * 否则会用同名文件覆盖首轮采样，"连续两次复现"就失去了第一次的原始数据。
+ *
+ * mode 与 absoluteEligible 在此统一写入，调用方无需各自传递：
+ * 判定所依赖的环境事实必须随样本落盘，否则 report 换个环境复算就会变结论。
  */
 export function writeRawFile(raw: RawFile): void {
   const dir = resolve(process.env.PERF_RAW_DIR ?? ".perf-output/raw");
   mkdirSync(dir, { recursive: true });
+  const payload: RawFile = {
+    ...raw,
+    mode: raw.mode ?? detectMode(),
+    absoluteEligible: raw.absoluteEligible ?? absoluteEligible(),
+  };
   writeFileSync(
-    resolve(dir, `${raw.id}.json`),
-    JSON.stringify(raw, null, 2),
+    resolve(dir, `${payload.id}.json`),
+    JSON.stringify(payload, null, 2),
     "utf8",
   );
 }

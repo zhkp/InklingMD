@@ -36,7 +36,24 @@ const P95_EXTRA_PCT = 10;
  * 但它说的是 runner 而不是用户机器。团队若觉得 CI 上噪声大于价值，可用 PERF_ABSOLUTE=0 关闭
  * （关闭后仍保留相对回归判定）。
  */
-const ABSOLUTE_ENABLED = process.env.PERF_ABSOLUTE !== "0";
+/**
+ * 绝对判定的启用条件：**以测量时记录的 `absoluteEligible` 为准**。
+ *
+ * 为什么不直接读环境变量（复审发现的缺陷）：绝对结论只在 uncapped / headed 下有意义，
+ * 若按"未设置即开启"处理，headless 的首次运行（无 baseline、无代码变更）也会因 jankRate 贴线
+ * 而打印「回归确认」+ exit 1，与真实回归在退出码层面无法区分。
+ *
+ * 判定随 raw 落盘后，report 无论怎么被单独复算都不会静默翻转结论；
+ * 同时保留双向强制覆盖，便于对既有 raw 复算或调试：
+ * - PERF_ABSOLUTE=1 → 强制开启（含 headless）
+ * - PERF_ABSOLUTE=0 → 强制关闭
+ */
+function absoluteEnabledFor(raw) {
+  const flag = process.env.PERF_ABSOLUTE;
+  if (flag === "1") return true;
+  if (flag === "0") return false;
+  return raw.absoluteEligible === true;
+}
 const JANK_RATE_LIMIT_PCT = Number(process.env.PERF_JANK_RATE_LIMIT ?? 10);
 const P95_BUDGET_FACTOR = 2;
 
@@ -192,7 +209,7 @@ function isOver(metric, current, base) {
  */
 function absoluteRows(raw) {
   const rows = [];
-  if (!ABSOLUTE_ENABLED) return rows;
+  if (!absoluteEnabledFor(raw)) return rows;
   const budget = raw.scalars?.frameBudgetMs;
   if (raw.scenario !== "scroll" || typeof budget !== "number") return rows;
 
@@ -209,6 +226,7 @@ function absoluteRows(raw) {
       n: stats.n,
       over: stats.p95 > limit,
       limit,
+      absolute: true,
     });
   }
 
@@ -223,6 +241,7 @@ function absoluteRows(raw) {
       n: null,
       over: jankRate > JANK_RATE_LIMIT_PCT,
       limit: JANK_RATE_LIMIT_PCT,
+      absolute: true,
     });
   }
   return rows;
@@ -336,9 +355,11 @@ function main() {
     if (phase === "check" && overMetrics.length > 0) retest.push(id);
 
     // 最终判定：首轮超阈值 + 复测仍超阈值 = FAIL；首轮超但复测回落 = WARN
+    // 绝对行与相对行的结论文案必须分开：前者是"帧预算目标未达标"，后者才是"相对基线回归"
     const verdicts = [];
     for (const row of rows1) {
       const second = rows2.find((r) => r.metric === row.metric);
+      const isAbsolute = row.absolute === true;
       if (!row.over) {
         verdicts.push({ ...row, verdict: "PASS" });
         continue;
@@ -348,11 +369,16 @@ function main() {
         verdicts.push({ ...row, verdict: "WARN", note: "未复测" });
         continue;
       }
+      const reproduced = Boolean(second && second.over);
       verdicts.push({
         ...row,
-        verdict: second && second.over ? "FAIL" : "WARN",
+        verdict: reproduced ? "FAIL" : "WARN",
         retest: second ? second.cur : null,
-        note: second && second.over ? "复测仍超阈值" : "复测回落（抖动）",
+        note: reproduced
+          ? isAbsolute
+            ? "复测仍超帧预算"
+            : "复测仍超阈值"
+          : "复测回落（抖动）",
       });
     }
 
@@ -390,6 +416,8 @@ function main() {
       kind: raw.kind,
       env,
       profile,
+      mode: raw.mode ?? "unknown",
+      absoluteEnabled: absoluteEnabledFor(raw),
       baselineState: state.reason,
       metrics: verdicts,
       overMetrics,
@@ -406,7 +434,7 @@ function main() {
     );
     console.log(
       retest.length > 0
-        ? `[perf] check：${retest.length} 个场景疑似回归，需复测 → ${retest.join(", ")}`
+        ? `[perf] check：${retest.length} 个场景疑似超阈值（相对/绝对合计），需复测 → ${retest.join(", ")}`
         : "[perf] check：未发现超阈值场景，无需复测",
     );
     process.exit(0);
@@ -455,13 +483,15 @@ function main() {
     );
   }
   lines.push(`- 场景数：${results.length}　FAIL：${failed.length}　WARN：${warned.length}`);
-  if (ABSOLUTE_ENABLED) {
+  const absoluteCount = results.filter((r) => r.absoluteEnabled).length;
+  if (absoluteCount > 0) {
     lines.push(
-      `- 绝对阈值已启用：帧间隔 p95 ≤ ${P95_BUDGET_FACTOR}× 帧预算、掉帧率 ≤ ${JANK_RATE_LIMIT_PCT}%（带环境属性，无 GPU 的 CI 上大档位掉帧属真实结论；可用 PERF_ABSOLUTE=0 关闭）`,
+      `- 绝对阈值参与判定：${absoluteCount}/${results.length} 个场景（帧间隔 p95 ≤ ${P95_BUDGET_FACTOR}× 帧预算、掉帧率 ≤ ${JANK_RATE_LIMIT_PCT}%）`,
     );
-  } else {
+  }
+  if (absoluteCount < results.length) {
     lines.push(
-      "- 绝对阈值已关闭（PERF_ABSOLUTE=0）：本次只做相对回归判定。绝对结论请在本地用 PERF_HEADED=1 或 PERF_UNCAPPED=1 获取",
+      `- 其余 ${results.length - absoluteCount} 个场景未参与绝对判定：本次为 headless 测量（vsync 锁 60Hz，帧间隔反映显示器节拍而非单帧工作耗时）。要拿绝对结论请用 PERF_HEADED=1 或 PERF_UNCAPPED=1，或用 PERF_ABSOLUTE=1 强制开启`,
     );
   }
   lines.push("");
@@ -489,13 +519,31 @@ function main() {
   console.log(lines.join("\n"));
 
   if (failed.length > 0) {
-    console.error(
-      `\n[perf] 回归确认（连续 2 次超阈值）：${failed.map((f) => f.id).join(", ")}`,
+    // 两类 FAIL 的成因完全不同，必须分开表述，避免"代码回归"与"目标未达标"混为一谈
+    const relativeFailed = failed.filter((f) =>
+      f.metrics.some((m) => m.verdict === "FAIL" && m.absolute !== true),
     );
+    const absoluteFailed = failed.filter(
+      (f) =>
+        !relativeFailed.includes(f) &&
+        f.metrics.some((m) => m.verdict === "FAIL" && m.absolute === true),
+    );
+    if (relativeFailed.length > 0) {
+      console.error(
+        `\n[perf] 相对回归确认（连续 2 次超阈值）：${relativeFailed.map((f) => f.id).join(", ")}`,
+      );
+    }
+    if (absoluteFailed.length > 0) {
+      console.error(
+        `[perf] 绝对目标未达标（非回归，反映当前环境能否跑满帧预算）：${absoluteFailed
+          .map((f) => f.id)
+          .join(", ")}`,
+      );
+    }
     process.exit(1);
   }
   if (warned.length > 0) {
-    console.log(`\n[perf] 疑似回归但复测回落（抖动）：${warned.map((w) => w.id).join(", ")}`);
+    console.log(`\n[perf] 疑似超阈值但复测回落（抖动）：${warned.map((w) => w.id).join(", ")}`);
   }
   process.exit(0);
 }

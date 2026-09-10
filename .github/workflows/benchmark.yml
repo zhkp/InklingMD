@@ -87,11 +87,11 @@ jobs:
         env:
           PERF_PROFILE: ${{ steps.profile.outputs.value }}
           CI: "true"
-          # CI 默认关闭绝对阈值：headless 被锁 60Hz 且 runner 无 GPU、负载波动大，
-          # 同一份代码两轮实测 jankRate 21.7% 与 <10%，绝对结论衡量的是 runner 而不是代码。
-          # 相对回归判定（median / p95 / jank 指标对 baseline）在 CI 全量保留。
-          # 需要绝对结论时：本地用 PERF_HEADED=1 或 PERF_UNCAPPED=1 跑，或手动触发时打开 absolute 勾选。
-          PERF_ABSOLUTE: ${{ github.event.inputs.absolute == 'true' && '1' || '0' }}
+          # 不硬编码 0：留空表示"不覆盖默认策略"。CI 是 headless，默认策略本就不产出绝对判定
+          # （vsync 锁 60Hz，绝对结论衡量 runner 而非代码；实测同代码两轮 jankRate 21.7% vs <10%）。
+          # 相对回归判定（median / p95 / jank 对 baseline）在 CI 全量保留。
+          # 需要绝对结论时勾选 absolute 输入，或本地用 PERF_HEADED=1 / PERF_UNCAPPED=1 跑。
+          PERF_ABSOLUTE: ${{ github.event.inputs.absolute == 'true' && '1' || '' }}
         run: |
           if [ "${{ github.event.inputs.update_baseline }}" = "true" ]; then
             pnpm run benchmark -- --update-baseline=1
