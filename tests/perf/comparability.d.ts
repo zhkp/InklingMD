@@ -1,5 +1,5 @@
 // comparability.js 的类型声明。
-// 有了它，tsc 与 vitest 都能以类型安全的方式引用这份 .mjs 实现，
+// 有了它，tsc 与 vitest 都能以类型安全的方式引用这份 .js 实现，
 // 从而直接对线上代码做断言，而不是测试一份副本。
 
 export const MODE_FALLBACK: string;

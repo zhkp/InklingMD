@@ -21,9 +21,12 @@ import {
   requiresPrimaryCorroboration,
 } from "./judgment.js";
 
-const OUT_DIR = resolve(".perf-output");
+// 三个目录都可用环境变量覆盖。RAW_DIR 原本就支持（复测轮要写到独立目录，
+// 否则同名文件会覆盖首轮采样）；OUT_DIR / RETEST_DIR 一并开放，是为了让端到端测试
+// 能在临时目录里跑完整两阶段流转，不污染真实 .perf-output。
+const OUT_DIR = resolve(process.env.PERF_OUT_DIR ?? ".perf-output");
 const RAW_DIR = resolve(process.env.PERF_RAW_DIR ?? ".perf-output/raw");
-const RETEST_DIR = resolve(".perf-output/raw-retest");
+const RETEST_DIR = resolve(process.env.PERF_RETEST_DIR ?? ".perf-output/raw-retest");
 const BASE_DIR = resolve(".perf-baseline");
 
 /**
@@ -116,7 +119,7 @@ function readBaseline(env, profile, id) {
   return JSON.parse(readFileSync(file, "utf8"));
 }
 
-// 基线可比性策略在 ./comparability.mjs（env / profile / mode / fixture 四维），
+// 基线可比性策略在 ./comparability.js（env / profile / mode / rounds / fixture 五维），
 // 抽成独立模块是为了让单测直接断言线上实现，而不是它的副本。
 
 /**
@@ -287,9 +290,17 @@ function main() {
 
     // 只有"可行动"的超阈值才值得复测：主指标超阈值算，派生指标要有主指标佐证才算。
     // 否则会为一次纯粹的 runner 抖动多跑一轮（实测这类抖动在 CI 上很常见）。
+    //
+    // 绝对行必须无条件进入复测：它的指标名是 `frameMs.p95(绝对)` 这种带后缀的形式，
+    // 不命中 PRIMARY_METRICS，若不豁免就会被"需佐证"规则滤掉 → raw2 缺失 →
+    // final 阶段落成 WARN「未复测」→ 退出码 0，使「绝对目标未达标」成为死代码。
     const primaryOver = rows1.some((r) => r.over && isPrimary(r.metric));
     const actionableOver = rows1.filter(
-      (r) => r.over && (!requiresPrimaryCorroboration(r.metric) || primaryOver),
+      (r) =>
+        r.over &&
+        (r.absolute === true ||
+          !requiresPrimaryCorroboration(r.metric) ||
+          primaryOver),
     );
     const overMetrics = actionableOver.map((r) => r.metric);
     if (phase === "check" && overMetrics.length > 0) retest.push(id);

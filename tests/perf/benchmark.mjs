@@ -140,8 +140,12 @@ async function main() {
     process.exit(2);
   }
 
-  // 显式 --scenario 过滤时不走复测：那是人为指定的子集，不是"疑似回归清单"
-  const retest = scenario ? [] : readRetestList();
+  // 复测清单始终生效，包括显式 --scenario 过滤的运行。
+  // 早先这里写的是「显式过滤时不复测」，理由是被过滤的子集不是"疑似回归清单"——
+  // 但 check 阶段本来就只评估了被过滤的子集，跳过复测只会让过滤运行永远拿不到
+  // raw2 → 落成 WARN「未复测」→ exit 0，即"跑单个场景时永远看不到 FAIL"。
+  // 复测阶段的 PERF_SCENARIO 由下面的调用覆盖为清单内容，用户过滤不会串到复测里。
+  const retest = readRetestList();
   if (retest.length > 0) {
     console.log(`[perf] 复测 ${retest.length} 个场景：${retest.join(", ")}`);
     const retestCode = await runCommand(pwArgs, {

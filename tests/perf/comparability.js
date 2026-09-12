@@ -3,7 +3,8 @@
 // 为什么单独成模块：这段策略决定"当前采样能不能和某份基线比"，一旦判断错误，
 // 产出的不是噪声而是**误导性结论**（实测过 headed 采样与 headless 基线相比得出
 // -49.4% 的"改善"，纯粹是 vsync 地板差 16.7ms vs 8.4ms；反向组合会造 +100% 假回归）。
-// 放在 .mjs 里是为了 report.mjs 能直接 import；同目录的 comparability.d.mts 提供类型，
+// 写成 .js（本包 type: module，即 ESM）是为了 report.mjs 能直接 import；
+// 同目录的 comparability.d.ts 提供类型，
 // 于是 tsc 与 vitest 都能直接测试这份线上实现，而不是测试它的副本。
 
 /**
