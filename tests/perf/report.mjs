@@ -61,17 +61,20 @@ const P95_BUDGET_FACTOR = 2;
 /**
  * 指标阈值覆盖：
  * - longTaskCount 基数常常是 0，纯百分比会无限放大，因此要求「+20% 且绝对值 +5」同时成立
- * - longTaskMs 是**少数 long task 的求和**（实测样本里只有 1~5 段），单个任务的时长波动
- *   就能拉动 ±20%：CI 曾因此产出 4 个假 FAIL——它们的 longTaskCount 全部 0.0% 没变、
- *   主指标仅 +6~11%。故要求「+30% 且绝对增量 ≥50ms」同时成立；真正的恶化
- *   （如 136ms → 250ms，+84%）仍然会被判 FAIL
+ * - longTaskMs 是**少数 long task 的求和**（样本里只有 1~5 段），且 quick 档 rounds=1
+ *   （每个标量只有一个样本、无平均），因此 runner 抖动会直接顶到阈值上。
+ *   同代码实测的 5 个噪声样本：+25.0%/+34ms、+18.9%/+76ms、+16.5%/+69ms、
+ *   +17.5%/+329ms、+35.7%/+81ms——百分比与绝对值都无法单独区分噪声。
+ *   故要求「+50% 且绝对增量 ≥100ms」同时成立：上述 5 例全部落回 PASS，
+ *   而真正的成倍恶化（如 136→250ms，+84%/+114ms）仍判 FAIL。
+ *   注意这是**当前采样深度下的噪声地板**：提升 rounds 后可收紧该阈值。
  * - cls 基数极小（千分位），用绝对增量判定
  * - heapDeltaMB 波动天然大，放宽到 25%
  * - 掉帧相关指标基数通常是 0，用绝对增量门槛
  */
 const METRIC_RULES = {
   longTaskCount: { pct: 20, absMin: 5 },
-  longTaskMs: { pct: 30, absMin: 50 },
+  longTaskMs: { pct: 50, absMin: 100 },
   longFrameCount: { pct: 20, absMin: 3 },
   jankCount: { pct: 50, absMin: 6 },
   jankRatePct: { pct: 50, absMin: 5 },
