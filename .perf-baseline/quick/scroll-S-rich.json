@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "env": "ci-ubuntu",
   "profile": "quick",
   "mode": "headless",
@@ -16,59 +16,122 @@
   "metrics": {
     "frameMs": {
       "median": 16.7,
-      "p95": 17.1,
-      "max": 22.3,
-      "n": 240
+      "p95": 17,
+      "max": 21.6,
+      "n": 240,
+      "history": [
+        16.7,
+        16.7,
+        16.7,
+        16.7,
+        16.7
+      ],
+      "historyP95": [
+        17.1,
+        17,
+        17,
+        17.3,
+        17
+      ]
     },
     "longTaskCount": {
       "median": 0,
       "p95": null,
       "max": null,
       "n": null,
-      "scalar": true
+      "scalar": true,
+      "history": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
     },
     "longTaskMs": {
       "median": 0,
       "p95": null,
       "max": null,
       "n": null,
-      "scalar": true
+      "scalar": true,
+      "history": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
     },
     "longFrameCount": {
       "median": 0,
       "p95": null,
       "max": null,
       "n": null,
-      "scalar": true
+      "scalar": true,
+      "history": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
     },
     "jankCount": {
       "median": 0,
       "p95": null,
       "max": null,
       "n": null,
-      "scalar": true
+      "scalar": true,
+      "history": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
     },
     "jankRatePct": {
       "median": 0,
       "p95": null,
       "max": null,
       "n": null,
-      "scalar": true
+      "scalar": true,
+      "history": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
     },
     "cls": {
       "median": 0,
       "p95": null,
       "max": null,
       "n": null,
-      "scalar": true
+      "scalar": true,
+      "history": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
     },
     "heapDeltaMB": {
       "median": 0,
       "p95": null,
       "max": null,
       "n": null,
-      "scalar": true
+      "scalar": true,
+      "history": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
     }
   },
-  "updatedAt": "2026-09-12T10:15:29.218Z"
+  "updatedAt": "2026-09-12T12:32:43.630Z"
 }

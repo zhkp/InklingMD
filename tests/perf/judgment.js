@@ -5,6 +5,68 @@
 // 被连续判定为 5 次"回归"）。抽出来后单测可以断言**线上实现**本身，
 // 而不是断言它的副本。judgment.d.ts 提供类型。
 
+/** 中位数（与 report 的聚合口径一致；统一在这里定义，避免多处实现漂移） */
+export function median(values) {
+  if (!Array.isArray(values) || values.length === 0) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
+}
+
+/** 样本标准差（n-1）。少于 2 点无法估计，返回 null */
+export function sampleSd(values) {
+  if (!Array.isArray(values) || values.length < 2) return null;
+  const mean = values.reduce((sum, v) => sum + v, 0) / values.length;
+  const variance =
+    values.reduce((sum, v) => sum + (v - mean) ** 2, 0) / (values.length - 1);
+  const sd = Math.sqrt(variance);
+  return Number.isFinite(sd) ? sd : null;
+}
+
+/**
+ * 噪声门槛倍数：变化必须超过 **3σ** 才算可行动。
+ *
+ * 为什么必须有这一层（实测，同一份代码的 5 次 CI 运行）：
+ *   ttiMs        基线 888ms   3σ≈241ms（占 27%）
+ *   longTaskMs   基线 302ms   3σ≈161ms（占 53%）
+ *   inputSyncMs  基线 1.9ms   3σ≈1.25ms（占 66%）
+ *   frameMs.p95  基线 17.1ms  3σ≈0.39ms（占 2.3%，vsync 量化反而极稳）
+ * 也就是"哪个指标能分辨多大差异"是**环境属性**，靠人给常数（15%）必然出错——
+ * 本 PR 前几轮反复出现的假 FAIL 与漏检，根因都在这里。
+ */
+export const NOISE_SIGMA = 3;
+
+/** 估计噪声所需的最少历史点数（少于 3 点不足以谈散布） */
+export const NOISE_MIN_POINTS = 3;
+
+/** 由历史序列估计 3σ 门槛；历史不足或零方差时返回 null（判定退化为百分比 + 绝对地板） */
+export function noiseThreshold(history, sigma = NOISE_SIGMA) {
+  if (!Array.isArray(history) || history.length < NOISE_MIN_POINTS) return null;
+  const sd = sampleSd(history);
+  if (sd === null || sd <= 0) return null;
+  return sigma * sd;
+}
+
+/**
+ * 比较时使用的参考值：历史点数足够时用**历史中位数**（滚动参考），否则用基线记录的点值。
+ *
+ * 为什么不用单点基线：实测 5 次同代码运行的聚合值整体偏移达 -8%~-25%
+ * （基线那次恰好是偏慢的一次），单点参考会把整批指标一起判成"改善"或"恶化"。
+ */
+export function referenceValue(entry, statistic = "median") {
+  if (!entry) return undefined;
+  const key = statistic === "p95" ? "historyP95" : "history";
+  const history = entry[key];
+  if (Array.isArray(history) && history.length >= NOISE_MIN_POINTS) return median(history);
+  return entry[statistic];
+}
+
+/** 取某个统计量对应的噪声门槛（3σ） */
+export function noiseFor(entry, statistic = "median") {
+  const key = statistic === "p95" ? "historyP95" : "history";
+  return noiseThreshold(entry?.[key]);
+}
+
 /** 默认劣化阈值（%）；可按指标覆盖 */
 export const DEFAULT_PCT = 15;
 
@@ -118,7 +180,7 @@ export function ruleFor(metric) {
  * - 基数为 0 时百分比无意义，退化为绝对增量门槛（absMin）
  * - 规则同时带 pct 与 absMin 时要求两者**同时**成立（避免小基数百分比放大）
  */
-export function isOver(metric, current, base) {
+export function isOver(metric, current, base, noise) {
   const rule = ruleFor(metric);
   const delta = current - base;
   if (rule.abs !== undefined) return delta > rule.abs;
@@ -126,6 +188,33 @@ export function isOver(metric, current, base) {
     return delta > (rule.absMin ?? 0.5);
   }
   const pctOk = delta / base > rule.pct / 100;
-  if (rule.absMin !== undefined) return pctOk && delta >= rule.absMin;
-  return pctOk;
+  const minOk = rule.absMin === undefined || delta >= rule.absMin;
+  // 噪声门槛：变化必须超过 3σ（来自基线历史），否则无法与运行间抖动区分
+  const noiseOk = typeof noise !== "number" || delta > noise;
+  return pctOk && minOk && noiseOk;
+}
+
+/** 只按百分比 + 绝对地板判断（不含噪声门槛）：用于区分"超阈值"与"被噪声抑制" */
+export function isOverIgnoringNoise(metric, current, base) {
+  return isOver(metric, current, base, null);
+}
+
+/**
+ * 一行"过了相对阈值、但被抑制"的原因；没有则返回 null。
+ *
+ * 为什么需要它：被抑制不等于"没变化"。若直接落成 PASS，读者会以为指标纹丝不动，
+ * 而实际上它可能涨了 25%（只是幅度在实测噪声/绝对地板之内）。判定要可解释：
+ * - "floor"：幅度低于该指标的绝对地板（如 inputSyncMs Δ<1ms）
+ * - "noise"：幅度在运行噪声内（< 3σ，来自基线历史）
+ */
+export function suppressionReason(metric, current, base, noise) {
+  const rule = ruleFor(metric);
+  const delta = current - base;
+  if (delta <= 0) return null; // 改善或持平不算"被抑制"
+  if (rule.abs !== undefined) return null; // 绝对值型指标没有相对阈值可谈
+  if (base === 0) return null; // 基数为 0 的走绝对增量门槛
+  if (!(delta / base > rule.pct / 100)) return null; // 未过相对阈值 → 正常 PASS
+  if (rule.absMin !== undefined && delta < rule.absMin) return "floor";
+  if (typeof noise === "number" && delta <= noise) return "noise";
+  return null;
 }

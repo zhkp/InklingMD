@@ -155,6 +155,17 @@ PERF_DOC_FILE=md_editor_stress_test.md pnpm run benchmark
   依据：同一份代码在共享 runner 上，派生标量能自然波动 35%，没有主指标佐证的"回归"不可行动；
   而真正影响用户可感知耗时的退化必然会体现在主指标上。新增指标想获得"单独判 FAIL"的能力，
   必须显式加进 `tests/perf/judgment.js` 的 `PRIMARY_METRICS`。
+- **噪声门槛（3σ）**：变化的幅度必须超过**基线自身历史散布的 3σ**才算超阈值。
+  基线（schemaVersion 2）为每个指标保留最近 8 次运行的聚合值，σ 由此估计；
+  比较用的参考值也改为**历史中位数**（滚动参考），不再依赖单次运行的偶然快慢。
+  实测同一份代码的 5 次 CI 运行：`inputSyncMs` 3σ≈1.25ms（占基线 66%）、
+  `ttiMs` 3σ≈241ms（27%）、`longTaskMs` 3σ≈161ms（53%），
+  而 vsync 量化的 `frameMs.p95` 只有 3σ≈0.39ms——**能分辨多大差异是环境属性**，
+  靠人给固定百分比必然出错。各行 3σ 会打印在报告表格里，读者可直接看到本次的分辨率。
+  过了相对阈值但被地板或噪声挡下的行不是 PASS，而是 WARN 并标注原因
+  （变化低于该指标的绝对地板 / 变化在运行噪声内（3σ=…））。
+  历史不足 3 次运行时门槛不启用，报告头部会显式说明并回退到「百分比 + 绝对地板」。
+  积累历史：每次 `--update-baseline`（本地或 CI 的 update_baseline 勾选）都会追加一次运行。
 - 「连续 2 次复现」：首轮超阈值 → 自动只复测该场景 → 仍超阈值判 FAIL，回落判 WARN（抖动）。
   只有"可行动"的超阈值才触发复测（派生指标无佐证时不复测，避免为抖动多跑一轮）。
   FAIL 摘要区分「相对回归确认」与「绝对目标未达标」，两者成因不同。
@@ -176,6 +187,7 @@ CI 上 Benchmark **不阻断合并**，只上传 `.perf-output/` 产物并写入
 - CI：Actions → **Benchmark** → Run workflow，勾选 `update_baseline`（档位选 quick），
   跑完从 artifact 取回 `.perf-baseline/<profile>/` 并提交；不勾选时 CI 只做比较，不会写仓库。
 - 任何 fixture 生成规则变更都必须提升 `FIXTURE_VERSION`，旧基线会自动整体作废。
+- 基线历史（`history` / `historyP95`）只在**同一 fixture** 下累积；换文档即重新起头。
 - 可比性校验现在覆盖 **env / profile / mode / rounds / fixture** 五维：改采样轮数、改测量模式
   （headless ↔ headed/uncapped）都会让旧基线整体不可比——报告里会显式列出
   `未参与相对判定：ROUNDS_MISMATCH(...)` 之类的原因，重建即可。

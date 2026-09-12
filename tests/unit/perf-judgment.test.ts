@@ -12,10 +12,18 @@ import {
   DEFAULT_PCT,
   isOver,
   isPrimary,
+  median,
   METRIC_RULES,
+  NOISE_MIN_POINTS,
+  NOISE_SIGMA,
+  noiseFor,
+  noiseThreshold,
   P95_EXTRA_PCT,
+  referenceValue,
   requiresPrimaryCorroboration,
   ruleFor,
+  sampleSd,
+  suppressionReason,
 } from "../perf/judgment.js";
 
 describe("阈值规则解析", () => {
@@ -161,5 +169,73 @@ describe("指标分层与佐证要求", () => {
         "saveMs",
       ].sort(),
     );
+  });
+});
+
+// ── 噪声门槛（第四轮）：用基线自身的历史散布替代手工常数 ──
+//
+// 依据是 5 次同代码 CI 运行的实测：inputSyncMs 的 5 次中位数是 [1.9, 1.3, 1.2, 2.2, 1.6]，
+// σ=0.42 → 3σ=1.25ms；而 15% 阈值在 1.9ms 上只等于 0.29ms——之前的假 FAIL 就出在这里。
+
+describe("统计工具", () => {
+  it("median 与 sampleSd（n-1）", () => {
+    expect(median([3, 1, 2])).toBe(2);
+    expect(median([4, 1, 3, 2])).toBe(2.5);
+    expect(median([])).toBe(0);
+    expect(sampleSd([2, 2, 2])).toBe(0);
+    expect(sampleSd([1])).toBeNull();
+    expect(sampleSd([1, 3])).toBeCloseTo(1.414, 2);
+  });
+
+  it("noiseThreshold：点数不足或零方差时不启用（返回 null）", () => {
+    expect(noiseThreshold(undefined)).toBeNull();
+    expect(noiseThreshold([1, 2])).toBeNull(); // < NOISE_MIN_POINTS
+    expect(noiseThreshold([2, 2, 2])).toBeNull(); // σ=0（量化型指标）
+    // 真实 inputSyncMs 历史 → 3σ ≈ 1.25
+    expect(noiseThreshold([1.9, 1.3, 1.2, 2.2, 1.6])).toBeCloseTo(1.25, 1);
+    expect(NOISE_SIGMA).toBe(3);
+    expect(NOISE_MIN_POINTS).toBe(3);
+  });
+
+  it("referenceValue：历史足够时用历史中位数（滚动参考），否则用点值", () => {
+    const entry = { median: 1.9, history: [1.9, 1.3, 1.2, 2.2, 1.6] };
+    expect(referenceValue(entry)).toBe(1.6); // 历史中位数
+    expect(referenceValue({ median: 1.9, history: [1.9, 1.3] })).toBe(1.9); // 点值
+    expect(referenceValue({ median: 1.9 })).toBe(1.9);
+    // p95 走 historyP95
+    const withP95 = { median: 2.4, historyP95: [2.4, 3.0, 2.6, 2.8, 3.1] };
+    expect(referenceValue(withP95, "p95")).toBe(2.8);
+    expect(noiseFor(entry)).toBeCloseTo(1.25, 1);
+    expect(noiseFor({ historyP95: [2.4, 3.0, 2.6, 2.8, 3.1] }, "p95")).toBeCloseTo(
+      0.81,
+      1,
+    );
+  });
+});
+
+describe("噪声门槛对判定的作用", () => {
+  const NOISE = 1.25; // inputSyncMs 的 3σ（真实历史估计）
+
+  it("变化超过 3σ 才算超阈值", () => {
+    // Δ=4.8ms > 1.25 → 超阈值
+    expect(isOver("inputSyncMs", 6.4, 1.6, NOISE)).toBe(true);
+  });
+
+  it("变化在 3σ 内 → 不算超阈值（但会被标注为被抑制，而非 PASS）", () => {
+    expect(isOver("inputSyncMs", 2.7, 1.6, NOISE)).toBe(false);
+    expect(suppressionReason("inputSyncMs", 2.7, 1.6, NOISE)).toBe("noise");
+  });
+
+  it("未启用噪声门槛（null）时退回百分比 + 绝对地板", () => {
+    expect(isOver("inputSyncMs", 6.4, 1.6, null)).toBe(true);
+    expect(isOver("inputSyncMs", 2.0, 1.6, null)).toBe(false); // 地板 1ms 拦下
+  });
+
+  it("suppressionReason 区分 floor / noise / 正常 PASS", () => {
+    expect(suppressionReason("inputSyncMs", 2.0, 1.6, NOISE)).toBe("floor"); // Δ0.4 < 地板 1ms
+    expect(suppressionReason("inputSyncMs", 2.7, 1.6, NOISE)).toBe("noise"); // 过地板、未过 3σ
+    expect(suppressionReason("inputSyncMs", 1.5, 1.6, NOISE)).toBeNull(); // 改善
+    expect(suppressionReason("ttiMs", 850, 800, 241)).toBeNull(); // +6% 未过 15%
+    expect(suppressionReason("longTaskCount", 3, 0, null)).toBeNull(); // 基数为 0 走绝对增量
   });
 });

@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "env": "ci-ubuntu",
   "profile": "quick",
   "mode": "headless",
@@ -15,39 +15,81 @@
   },
   "metrics": {
     "searchMs": {
-      "median": 477.95,
-      "p95": 561.4,
-      "max": 561.4,
-      "n": 2
+      "median": 357.4,
+      "p95": 358.6,
+      "max": 358.6,
+      "n": 2,
+      "history": [
+        477.95,
+        320.9,
+        318.95,
+        481.45,
+        357.4
+      ],
+      "historyP95": [
+        561.4,
+        330.9,
+        326.9,
+        542.1,
+        358.6
+      ]
     },
     "longTaskCount": {
-      "median": 2,
+      "median": 1.5,
       "p95": null,
       "max": null,
       "n": null,
-      "scalar": true
+      "scalar": true,
+      "history": [
+        2,
+        1,
+        1,
+        2,
+        1.5
+      ]
     },
     "longTaskMs": {
-      "median": 137.5,
+      "median": 101,
       "p95": null,
       "max": null,
       "n": null,
-      "scalar": true
+      "scalar": true,
+      "history": [
+        137.5,
+        64,
+        62,
+        149,
+        101
+      ]
     },
     "cls": {
       "median": 0,
       "p95": null,
       "max": null,
       "n": null,
-      "scalar": true
+      "scalar": true,
+      "history": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
     },
     "heapDeltaMB": {
       "median": 0,
       "p95": null,
       "max": null,
       "n": null,
-      "scalar": true
+      "scalar": true,
+      "history": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
     }
   },
-  "updatedAt": "2026-09-12T10:15:29.218Z"
+  "updatedAt": "2026-09-12T12:32:43.631Z"
 }

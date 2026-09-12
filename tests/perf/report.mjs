@@ -18,7 +18,13 @@ import {
   COMPARED_SCALARS,
   isOver,
   isPrimary,
+  median,
+  NOISE_MIN_POINTS,
+  NOISE_SIGMA,
+  noiseFor,
+  referenceValue,
   requiresPrimaryCorroboration,
+  suppressionReason,
 } from "./judgment.js";
 
 // 三个目录都可用环境变量覆盖。RAW_DIR 原本就支持（复测轮要写到独立目录，
@@ -71,12 +77,7 @@ function parseArgs(argv) {
   return out;
 }
 
-function median(values) {
-  if (values.length === 0) return 0;
-  const sorted = [...values].sort((a, b) => a - b);
-  const mid = Math.floor(sorted.length / 2);
-  return sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
-}
+// median 来自 judgment.js（与判定层共用同一定义，避免多处实现漂移）
 
 function p95(values) {
   if (values.length === 0) return 0;
@@ -127,17 +128,19 @@ function readBaseline(env, profile, id) {
  * 样本类指标存的是统计对象（用 median），标量类指标也走 buildStats 存成对象，
  * 直接当数字用会得到 [object Object] → NaN → 永远判 PASS。这里统一取 median。
  */
+/** 取 baseline 里某指标的参考值（历史足够时用历史中位数，见 judgment.referenceValue） */
 function baselineValue(baseline, metric) {
   const entry = baseline.metrics?.[metric];
   if (entry === undefined || entry === null) return undefined;
-  return typeof entry === "number" ? entry : entry.median;
+  if (typeof entry === "number") return entry;
+  return referenceValue(entry, "median");
 }
 
-/** 取 baseline 里某样本指标的 p95 */
+/** 取 baseline 里某样本指标的 p95 参考值（同样支持滚动参考） */
 function baselineP95(baseline, metric) {
   const entry = baseline.metrics?.[metric];
   if (!entry || typeof entry === "number") return undefined;
-  return entry.p95;
+  return referenceValue(entry, "p95");
 }
 
 /**
@@ -189,50 +192,80 @@ function compareRun(raw, baseline) {
   const rows = [];
   if (!baseline) return rows;
 
+  /**
+   * 噪声门槛（3σ）：由基线历史（同一环境、同一 fixture 的多次运行）估计。
+   * 历史不足时返回 null → 判定退化为"百分比 + 绝对地板"。
+   * 被噪声抑制的行不是 PASS（它确实动了），而是 WARN「变化在运行噪声内」。
+   */
+  const pushRow = (row, entry, statistic) => {
+    const noise = noiseFor(entry, statistic);
+    rows.push({
+      ...row,
+      noise,
+      historyPoints: (statistic === "p95" ? entry?.historyP95 : entry?.history)?.length ?? 0,
+      // 过了相对阈值但被绝对地板/噪声门槛挡下：不是 PASS，需要显式标注原因
+      suppressed: suppressionReason(row.metric, row.cur, row.base, noise),
+    });
+  };
+
   for (const [metric, samples] of Object.entries(raw.samples ?? {})) {
     const cur = statsFor(samples);
+    const entry = baseline.metrics?.[metric];
     const base = baselineValue(baseline, metric);
     if (base === undefined || base === null) continue;
-    rows.push({
-      metric,
-      base,
-      cur: cur.median,
-      p95: cur.p95,
-      max: cur.max,
-      n: cur.n,
-      over: isOver(metric, cur.median, base),
-    });
+    pushRow(
+      {
+        metric,
+        base,
+        cur: cur.median,
+        p95: cur.p95,
+        max: cur.max,
+        n: cur.n,
+        over: isOver(metric, cur.median, base, noiseFor(entry, "median")),
+      },
+      entry,
+      "median",
+    );
 
     // p95 单独成行参与判定（评审 P1-3）：
     // 「每 10 帧一次 40ms 尖刺」这种回归在 median 上完全看不出来，只有尾部指标能捕获
     const baseP95 = baselineP95(baseline, metric);
     if (baseP95 !== undefined && baseP95 !== null) {
-      rows.push({
-        metric: `${metric}.p95`,
-        base: baseP95,
-        cur: cur.p95,
-        p95: null,
-        max: cur.max,
-        n: cur.n,
-        over: isOver(`${metric}.p95`, cur.p95, baseP95),
-      });
+      pushRow(
+        {
+          metric: `${metric}.p95`,
+          base: baseP95,
+          cur: cur.p95,
+          p95: null,
+          max: cur.max,
+          n: cur.n,
+          over: isOver(`${metric}.p95`, cur.p95, baseP95, noiseFor(entry, "p95")),
+        },
+        entry,
+        "p95",
+      );
     }
   }
 
   for (const metric of COMPARED_SCALARS) {
     if (!(metric in (raw.scalars ?? {}))) continue;
+    const entry = baseline.metrics?.[metric];
     const base = baselineValue(baseline, metric);
     if (base === undefined || base === null) continue;
     const cur = raw.scalars[metric];
-    rows.push({
-      metric,
-      base,
-      cur,
-      p95: null,
-      max: null,
-      n: null,
-      over: isOver(metric, cur, base),
-    });
+    pushRow(
+      {
+        metric,
+        base,
+        cur,
+        p95: null,
+        max: null,
+        n: null,
+        over: isOver(metric, cur, base, noiseFor(entry, "median")),
+      },
+      entry,
+      "median",
+    );
   }
   return rows;
 }
@@ -249,6 +282,55 @@ function buildStats(raw) {
     }
   }
   return metrics;
+}
+
+/**
+ * 基线历史保留的最近运行数。噪声门槛（3σ）与滚动参考值都依赖它：
+ * 点越多，σ 越接近真实的运行间漂移；但太旧的点会把"环境已经变了"混进来。
+ */
+const HISTORY_MAX = 8;
+
+/** 追加一次运行的聚合值到历史序列（旧基线无 history 时用它的点值起头） */
+function appendHistory(previousSeries, value, previousValue) {
+  const base = Array.isArray(previousSeries)
+    ? previousSeries
+    : typeof previousValue === "number"
+      ? [previousValue]
+      : [];
+  return [...base, value].slice(-HISTORY_MAX);
+}
+
+/**
+ * 给每个指标补上 history / historyP95（逐次运行的聚合值）。
+ *
+ * 只有**同一份 fixture** 的历史才能合并——换了文档，历史就测的不是同一个对象。
+ * fixture 变了则从本次重新起头（等价于重建基线）。
+ */
+function withHistory(stats, previous, source) {
+  // schemaVersion < 2 的旧基线没有历史序列，从本次重新起头（也避免把同一个点重复计入）
+  const comparable =
+    previous?.schemaVersion === 2 &&
+    previous.fixture &&
+    previous.fixture.version === source.fixture.version &&
+    previous.fixture.hash === source.fixture.hash;
+  const out = {};
+  for (const [metric, entry] of Object.entries(stats)) {
+    const prevEntry = comparable ? previous.metrics?.[metric] : undefined;
+    out[metric] = {
+      ...entry,
+      history: appendHistory(prevEntry?.history, entry.median, prevEntry?.median),
+      ...(typeof entry.p95 === "number"
+        ? {
+            historyP95: appendHistory(
+              prevEntry?.historyP95,
+              entry.p95,
+              prevEntry?.p95 ?? undefined,
+            ),
+          }
+        : {}),
+    };
+  }
+  return out;
 }
 
 function ensureDir(dir) {
@@ -311,6 +393,18 @@ function main() {
     for (const row of rows1) {
       const second = rows2.find((r) => r.metric === row.metric);
       const isAbsolute = row.absolute === true;
+      // 过了相对阈值但被绝对地板/噪声门槛挡下：确实动了，但幅度不可行动 → WARN 并说明原因
+      if (row.suppressed) {
+        verdicts.push({
+          ...row,
+          verdict: "WARN",
+          note:
+            row.suppressed === "floor"
+              ? "变化低于该指标的绝对地板"
+              : `变化在运行噪声内（${NOISE_SIGMA}σ=${round(row.noise)}）`,
+        });
+        continue;
+      }
       if (!row.over) {
         verdicts.push({ ...row, verdict: "PASS" });
         continue;
@@ -349,11 +443,12 @@ function main() {
       const source = raw2 ?? raw;
       const file = baselinePath(env, profile, id);
       ensureDir(resolve(file, ".."));
+      const previous = readBaseline(env, profile, id);
       writeFileSync(
         file,
         JSON.stringify(
           {
-            schemaVersion: 1,
+            schemaVersion: 2,
             env,
             profile,
             mode: source.mode ?? "headless",
@@ -362,7 +457,7 @@ function main() {
             kind: source.kind,
             rounds: source.rounds,
             fixture: source.fixture,
-            metrics: buildStats(source),
+            metrics: withHistory(buildStats(source), previous, source),
             updatedAt: new Date().toISOString(),
           },
           null,
@@ -446,6 +541,23 @@ function main() {
     );
   }
   lines.push(`- 场景数：${results.length}　FAIL：${failed.length}　WARN：${warned.length}`);
+  // 噪声门槛：由基线历史（同一环境 + 同一 fixture 的多次运行）估计的 3σ。
+  // 历史不足时判定退化为"百分比 + 绝对地板"，必须显式说明，避免读者高估分辨率。
+  const historyPoints = results
+    .flatMap((r) => r.metrics.map((m) => m.historyPoints ?? 0))
+    .filter((n) => n > 0);
+  const minHistory = historyPoints.length > 0 ? Math.min(...historyPoints) : 0;
+  if (minHistory >= NOISE_MIN_POINTS) {
+    lines.push(
+      `- 噪声门槛：按基线历史（每指标 ${minHistory}+ 次运行）估计的 ${NOISE_SIGMA}σ 判定；` +
+        `小于该幅度的变化无法与运行间抖动区分，标为 WARN（各行的 3σ 见表格）`,
+    );
+  } else {
+    lines.push(
+      `- 噪声门槛未启用：基线历史不足（最少 ${minHistory} 次运行，需 ≥${NOISE_MIN_POINTS}）→ ` +
+        `回退到「百分比 + 绝对地板」。重建基线（--update-baseline）会逐次累积历史`,
+    );
+  }
   const absoluteCount = results.filter((r) => r.absoluteEnabled).length;
   if (absoluteCount > 0) {
     lines.push(
@@ -462,8 +574,8 @@ function main() {
     );
   }
   lines.push("");
-  lines.push("| 场景 | 指标 | baseline | 本次 | 复测 | 变化 | 判定 |");
-  lines.push("|---|---|---|---|---|---|---|");
+  lines.push("| 场景 | 指标 | baseline | 本次 | 复测 | 变化 | 3σ | 判定 |");
+  lines.push("|---|---|---|---|---|---|---|---|");
   for (const r of results) {
     // 不可比时必须显式出现在表里：否则读者会把"没有相对行"误读成"相对判定通过"
     if (r.baselineState !== "OK") {
@@ -478,9 +590,9 @@ function main() {
           ? "—"
           : `${(((m.cur - m.base) / m.base) * 100).toFixed(1)}%`;
       lines.push(
-        `| ${r.id} | ${m.metric} | ${m.base} | ${m.cur} | ${m.retest ?? "—"} | ${delta} | ${m.verdict}${
-          m.note ? `（${m.note}）` : ""
-        } |`,
+        `| ${r.id} | ${m.metric} | ${m.base} | ${m.cur} | ${m.retest ?? "—"} | ${delta} | ${
+          typeof m.noise === "number" ? round(m.noise) : "—"
+        } | ${m.verdict}${m.note ? `（${m.note}）` : ""} |`,
       );
     }
   }
@@ -496,6 +608,17 @@ function main() {
   if (jitterRows.length > 0) {
     console.log(
       `[perf] 派生指标超阈值但无主指标佐证（按运行抖动处理，不判 FAIL）：${jitterRows.join(", ")}`,
+    );
+  }
+
+  const noiseRows = results.flatMap((r) =>
+    r.metrics
+      .filter((m) => (m.note ?? "").includes("变化在运行噪声内"))
+      .map((m) => `${r.id}:${m.metric}`),
+  );
+  if (noiseRows.length > 0) {
+    console.log(
+      `[perf] 变化在运行噪声内（${NOISE_SIGMA}σ 门槛，按抖动处理，不判 FAIL）：${noiseRows.join(", ")}`,
     );
   }
 
