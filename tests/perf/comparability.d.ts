@@ -3,6 +3,7 @@
 // 从而直接对线上代码做断言，而不是测试一份副本。
 
 export const MODE_FALLBACK: string;
+export const ROUNDS_FALLBACK: number;
 
 export interface ComparabilityFixture {
   version: number;
@@ -15,12 +16,14 @@ export interface ComparabilityPeer {
   profile: string;
   /** 旧基线可能缺该字段，按 MODE_FALLBACK 处理 */
   mode?: string;
+  /** 旧基线可能缺该字段，按 ROUNDS_FALLBACK 处理 */
+  rounds?: number;
   fixture: ComparabilityFixture;
 }
 
 export interface ComparabilityResult {
   ok: boolean;
-  /** ok=false 时给出可读原因（NEW / ENV_MISMATCH / PROFILE_MISMATCH / MODE_MISMATCH / FIXTURE_CHANGED） */
+  /** ok=false 时给出可读原因（NEW / ENV_MISMATCH / PROFILE_MISMATCH / MODE_MISMATCH / ROUNDS_MISMATCH / FIXTURE_CHANGED） */
   reason: string;
 }
 

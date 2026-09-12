@@ -87,7 +87,12 @@ pnpm run benchmark -- --profile=xl       # 追加 5 万行档（仅本地，CI �
 pnpm run benchmark -- --update-baseline  # 用本次结果重建基线
 pnpm run benchmark -- --scenario=open,scroll
 PERF_PORT=3000 pnpm run benchmark        # 本机端口冲突时改端口（Windows 保留 1350-2149）
+PERF_REPEAT=3 pnpm run benchmark         # 覆盖采样轮数（quick 默认 2、full/xl 默认 3）
 ```
+
+采样轮数决定每个标量指标有几个样本：quick 档从 1 提升到 2，是因为 `rounds=1` 时标量只有
+**一个样本、没有任何平均**，共享 runner 的抖动足以让 `longTaskMs` 自然波动 35%（实测）。
+轮数同时是基线可比性的一维——**改轮数必须重建基线**（`--update-baseline`）。
 
 ### 测量口径（先看这条，避免误读）
 
@@ -134,7 +139,15 @@ PERF_DOC_FILE=md_editor_stress_test.md pnpm run benchmark
   若默认启用，无 baseline 的首次运行就会因掉帧率贴线而打印「回归确认」并以 exit 1 结束，
   与真实回归无法区分。`PERF_ABSOLUTE=1` 可强制开启（调试/复现用），`=0` 可强制关闭。
   绝对判定所依赖的模式会随采样一起落盘，因此事后单独复算不会改变结论。
+- **判定分层**：只有主指标（`ttiMs` / `frameMs` / `switchMs` / `searchMs` / `saveMs` / `inputSyncMs` /
+  `inputPaintMs`，含其 `.p95`）可以**单独**判 FAIL；派生指标（`longTaskMs` / `longTaskCount` /
+  `jankRatePct` / `cls` / `heapDeltaMB` 等，以及未登记的新指标）需要**同一场景内有主指标同样超阈值**才判 FAIL，
+  否则降级为 WARN 并标注「派生指标无主指标佐证（疑似运行抖动）」。
+  依据：同一份代码在共享 runner 上，派生标量能自然波动 35%，没有主指标佐证的"回归"不可行动；
+  而真正影响用户可感知耗时的退化必然会体现在主指标上。新增指标想获得"单独判 FAIL"的能力，
+  必须显式加进 `tests/perf/judgment.js` 的 `PRIMARY_METRICS`。
 - 「连续 2 次复现」：首轮超阈值 → 自动只复测该场景 → 仍超阈值判 FAIL，回落判 WARN（抖动）。
+  只有"可行动"的超阈值才触发复测（派生指标无佐证时不复测，避免为抖动多跑一轮）。
   FAIL 摘要区分「相对回归确认」与「绝对目标未达标」，两者成因不同。
 - 掉帧定义：帧间隔 > `1.5 × 帧预算`（60Hz → >25ms），避免把 vsync 抖动当卡顿。
 
@@ -154,6 +167,9 @@ CI 上 Benchmark **不阻断合并**，只上传 `.perf-output/` 产物并写入
 - CI：Actions → **Benchmark** → Run workflow，勾选 `update_baseline`（档位选 quick），
   跑完从 artifact 取回 `.perf-baseline/<profile>/` 并提交；不勾选时 CI 只做比较，不会写仓库。
 - 任何 fixture 生成规则变更都必须提升 `FIXTURE_VERSION`，旧基线会自动整体作废。
+- 可比性校验现在覆盖 **env / profile / mode / rounds / fixture** 五维：改采样轮数、改测量模式
+  （headless ↔ headed/uncapped）都会让旧基线整体不可比——报告里会显式列出
+  `未参与相对判定：ROUNDS_MISMATCH(...)` 之类的原因，重建即可。
 
 ## 代码风格
 

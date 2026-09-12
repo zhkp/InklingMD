@@ -9,6 +9,7 @@ import { describe, expect, it } from "vitest";
 import {
   baselineComparability,
   MODE_FALLBACK,
+  ROUNDS_FALLBACK,
   type ComparabilityPeer,
 } from "../perf/comparability.js";
 
@@ -16,6 +17,7 @@ const raw = (over: Partial<ComparabilityPeer> = {}): ComparabilityPeer => ({
   env: "ci-ubuntu",
   profile: "quick",
   mode: "headless",
+  rounds: 2,
   fixture: { version: 2, hash: "hashabc12345" },
   ...over,
 });
@@ -92,13 +94,39 @@ describe("基线可比性策略", () => {
   });
 
   it("旧基线缺 fixture 字段时按不可比处理（不能默认放行）", () => {
-    const broken = { env: "ci-ubuntu", profile: "quick", mode: "headless" } as ComparabilityPeer;
+    // 只缺 fixture，其余维度一致——否则会先撞上前面的 ROUNDS_MISMATCH 分支
+    const broken = {
+      env: "ci-ubuntu",
+      profile: "quick",
+      mode: "headless",
+      rounds: 2,
+    } as ComparabilityPeer;
     const result = baselineComparability(raw(), broken);
     expect(result.ok).toBe(false);
     expect(result.reason).toBe("FIXTURE_CHANGED");
   });
 
-  it("兼容回退值固定为 headless（已存在的基线全部由 headless 运行产出）", () => {
+  it("采样轮数不同不可比（1 轮的标量只有 1 个样本，噪声水平与 2 轮不同）", () => {
+    const result = baselineComparability(raw({ rounds: 3 }), raw());
+    expect(result.ok).toBe(false);
+    expect(result.reason).toContain("ROUNDS_MISMATCH");
+    expect(result.reason).toContain("baseline=2");
+    expect(result.reason).toContain("now=3");
+  });
+
+  it("旧基线缺 rounds 时按 1 兼容——与当前 quick=2 不匹配，从而强制重建基线", () => {
+    const legacy = { ...raw(), rounds: undefined } as ComparabilityPeer;
+    const result = baselineComparability(raw(), legacy);
+    expect(result.ok).toBe(false);
+    expect(result.reason).toContain("ROUNDS_MISMATCH");
+    expect(result.reason).toContain("baseline=1");
+    // 当前采样同样缺 rounds 时按 1 处理 → 与旧基线（1 轮）可比
+    const noRounds = { ...raw(), rounds: undefined } as ComparabilityPeer;
+    expect(baselineComparability(noRounds, legacy).ok).toBe(true);
+  });
+
+  it("兼容回退值固定为 headless 与 1 轮（已存在的基线都是该组合产出的）", () => {
     expect(MODE_FALLBACK).toBe("headless");
+    expect(ROUNDS_FALLBACK).toBe(1);
   });
 });

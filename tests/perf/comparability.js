@@ -14,6 +14,14 @@
 export const MODE_FALLBACK = "headless";
 
 /**
+ * 旧基线没有 rounds 字段时的回退值。
+ * 本 PR 之前 quick 档的采样轮数是 1，因此按 1 兼容在语义上正确。
+ * 注意这与当前 quick=2 不一致 → 旧基线会被判不可比，需要重建（这是有意的：
+ * 1 轮的标量只有一个样本、2 轮是两个样本，中位数与噪声水平都不同，不能混比）。
+ */
+export const ROUNDS_FALLBACK = 1;
+
+/**
  * 判断当前采样与基线是否可比。
  * 四个维度任一不一致都不可比——它们的物理含义不同，混比得到的差值不是性能变化：
  * - env：本地 vs CI（dev server 与 runner 差异）
@@ -44,6 +52,15 @@ export function baselineComparability(raw, baseline) {
     return {
       ok: false,
       reason: `MODE_MISMATCH(baseline=${baseMode}, now=${curMode})`,
+    };
+  }
+
+  const baseRounds = baseline.rounds ?? ROUNDS_FALLBACK;
+  const curRounds = raw.rounds ?? ROUNDS_FALLBACK;
+  if (baseRounds !== curRounds) {
+    return {
+      ok: false,
+      reason: `ROUNDS_MISMATCH(baseline=${baseRounds}, now=${curRounds})`,
     };
   }
 

@@ -14,17 +14,17 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { resolve, join } from "node:path";
 import { baselineComparability } from "./comparability.js";
+import {
+  COMPARED_SCALARS,
+  isOver,
+  isPrimary,
+  requiresPrimaryCorroboration,
+} from "./judgment.js";
 
 const OUT_DIR = resolve(".perf-output");
 const RAW_DIR = resolve(process.env.PERF_RAW_DIR ?? ".perf-output/raw");
 const RETEST_DIR = resolve(".perf-output/raw-retest");
 const BASE_DIR = resolve(".perf-baseline");
-
-/** 默认劣化阈值（%）；可按指标覆盖 */
-const DEFAULT_PCT = 15;
-
-/** p95 天然比中位数抖，在基础阈值上放宽（评审 P1-3：p95 也要参与判定） */
-const P95_EXTRA_PCT = 10;
 
 /**
  * 绝对阈值（不依赖 baseline，首次运行也能判；评审 P1-1）：
@@ -57,41 +57,6 @@ function absoluteEnabledFor(raw) {
 }
 const JANK_RATE_LIMIT_PCT = Number(process.env.PERF_JANK_RATE_LIMIT ?? 10);
 const P95_BUDGET_FACTOR = 2;
-
-/**
- * 指标阈值覆盖：
- * - longTaskCount 基数常常是 0，纯百分比会无限放大，因此要求「+20% 且绝对值 +5」同时成立
- * - longTaskMs 是**少数 long task 的求和**（样本里只有 1~5 段），且 quick 档 rounds=1
- *   （每个标量只有一个样本、无平均），因此 runner 抖动会直接顶到阈值上。
- *   同代码实测的 5 个噪声样本：+25.0%/+34ms、+18.9%/+76ms、+16.5%/+69ms、
- *   +17.5%/+329ms、+35.7%/+81ms——百分比与绝对值都无法单独区分噪声。
- *   故要求「+50% 且绝对增量 ≥100ms」同时成立：上述 5 例全部落回 PASS，
- *   而真正的成倍恶化（如 136→250ms，+84%/+114ms）仍判 FAIL。
- *   注意这是**当前采样深度下的噪声地板**：提升 rounds 后可收紧该阈值。
- * - cls 基数极小（千分位），用绝对增量判定
- * - heapDeltaMB 波动天然大，放宽到 25%
- * - 掉帧相关指标基数通常是 0，用绝对增量门槛
- */
-const METRIC_RULES = {
-  longTaskCount: { pct: 20, absMin: 5 },
-  longTaskMs: { pct: 50, absMin: 100 },
-  longFrameCount: { pct: 20, absMin: 3 },
-  jankCount: { pct: 50, absMin: 6 },
-  jankRatePct: { pct: 50, absMin: 5 },
-  cls: { abs: 0.02 },
-  heapDeltaMB: { pct: 25 },
-};
-
-/** 只比较这些标量；matchCount / frameBudgetMs / step 之类不是性能指标，不参与判定 */
-const COMPARED_SCALARS = [
-  "longTaskCount",
-  "longTaskMs",
-  "longFrameCount",
-  "jankCount",
-  "jankRatePct",
-  "cls",
-  "heapDeltaMB",
-];
 
 function parseArgs(argv) {
   const out = {};
@@ -170,30 +135,6 @@ function baselineP95(baseline, metric) {
   const entry = baseline.metrics?.[metric];
   if (!entry || typeof entry === "number") return undefined;
   return entry.p95;
-}
-
-/** 取指标对应的阈值规则（`xxx.p95` 行在基础规则上放宽） */
-function ruleFor(metric) {
-  if (METRIC_RULES[metric]) return METRIC_RULES[metric];
-  if (metric.endsWith(".p95")) {
-    const base = METRIC_RULES[metric.slice(0, -4)] ?? { pct: DEFAULT_PCT };
-    return { pct: (base.pct ?? DEFAULT_PCT) + P95_EXTRA_PCT };
-  }
-  return { pct: DEFAULT_PCT };
-}
-
-/** 单指标是否劣化超阈值 */
-function isOver(metric, current, base) {
-  const rule = ruleFor(metric);
-  const delta = current - base;
-  if (rule.abs !== undefined) return delta > rule.abs;
-  if (base === 0) {
-    // 基数为 0 时百分比无意义：退化为绝对增量门槛
-    return delta > (rule.absMin ?? 0.5);
-  }
-  const pctOk = delta / base > rule.pct / 100;
-  if (rule.absMin !== undefined) return pctOk && delta >= rule.absMin;
-  return pctOk;
 }
 
 /**
@@ -344,7 +285,13 @@ function main() {
         ]
       : [];
 
-    const overMetrics = rows1.filter((r) => r.over).map((r) => r.metric);
+    // 只有"可行动"的超阈值才值得复测：主指标超阈值算，派生指标要有主指标佐证才算。
+    // 否则会为一次纯粹的 runner 抖动多跑一轮（实测这类抖动在 CI 上很常见）。
+    const primaryOver = rows1.some((r) => r.over && isPrimary(r.metric));
+    const actionableOver = rows1.filter(
+      (r) => r.over && (!requiresPrimaryCorroboration(r.metric) || primaryOver),
+    );
+    const overMetrics = actionableOver.map((r) => r.metric);
     if (phase === "check" && overMetrics.length > 0) retest.push(id);
 
     // 最终判定：首轮超阈值 + 复测仍超阈值 = FAIL；首轮超但复测回落 = WARN
@@ -355,6 +302,17 @@ function main() {
       const isAbsolute = row.absolute === true;
       if (!row.over) {
         verdicts.push({ ...row, verdict: "PASS" });
+        continue;
+      }
+      // 派生指标（longTaskMs / jankRate 之类）在共享 runner 上的自然波动可达 35%，
+      // 无主指标佐证时不判 FAIL，只提示：没有主指标佐证的"回归"不可行动。
+      // 绝对行不受此限——它本来就只在定向测量（headed/uncapped）下产出。
+      if (!isAbsolute && requiresPrimaryCorroboration(row.metric) && !primaryOver) {
+        verdicts.push({
+          ...row,
+          verdict: "WARN",
+          note: "派生指标无主指标佐证（疑似运行抖动）",
+        });
         continue;
       }
       if (!raw2) {
@@ -483,6 +441,10 @@ function main() {
       `- 绝对阈值参与判定：${absoluteCount}/${results.length} 个场景（帧间隔 p95 ≤ ${P95_BUDGET_FACTOR}× 帧预算、掉帧率 ≤ ${JANK_RATE_LIMIT_PCT}%）`,
     );
   }
+  lines.push(
+    `- 判定分层：主指标（ttiMs / frameMs / switchMs / searchMs / saveMs / inputMs）可单独判 FAIL；` +
+      `派生指标（longTaskMs / longTaskCount / jankRate 等）需同场景有主指标佐证，否则只提示 WARN`,
+  );
   if (absoluteCount < results.length) {
     lines.push(
       `- 其余 ${results.length - absoluteCount} 个场景未参与绝对判定：本次为 headless 测量（vsync 锁 60Hz，帧间隔反映显示器节拍而非单帧工作耗时）。要拿绝对结论请用 PERF_HEADED=1 或 PERF_UNCAPPED=1，或用 PERF_ABSOLUTE=1 强制开启`,
@@ -514,6 +476,17 @@ function main() {
   lines.push("");
   writeFileSync(resolve(OUT_DIR, "report.md"), lines.join("\n"), "utf8");
   console.log(lines.join("\n"));
+
+  const jitterRows = results.flatMap((r) =>
+    r.metrics
+      .filter((m) => m.verdict === "WARN" && (m.note ?? "").includes("无主指标佐证"))
+      .map((m) => `${r.id}:${m.metric}`),
+  );
+  if (jitterRows.length > 0) {
+    console.log(
+      `[perf] 派生指标超阈值但无主指标佐证（按运行抖动处理，不判 FAIL）：${jitterRows.join(", ")}`,
+    );
+  }
 
   const notCompared = results.filter((r) => r.baselineState !== "OK");
   if (notCompared.length > 0) {

@@ -21,6 +21,8 @@ import {
 interface ProfilesConfig {
   tiers: Record<string, number>;
   profiles: Record<string, string[]>;
+  /** 各档位的采样轮数（不含 warmup）；标量指标每轮一个值，轮数即其样本数 */
+  rounds: Record<string, number>;
   scenarios: string[];
   plainScenarios: string[];
 }
@@ -64,9 +66,16 @@ export function readRunContext(): RunContext {
     ? [CUSTOM_TIER]
     : (tierMap[profile] ?? tierMap.quick);
 
+  // 采样轮数（不含 warmup）：标量指标每轮一个值，轮数决定它有几个样本。
+  // quick 档从 1 提升到 2 的原因：rounds=1 时每个标量只有一个样本、没有任何平均，
+  // 共享 runner 的抖动会直接顶到阈值上（实测同一份代码 longTaskMs 就能涨 35%）。
   const repeat = Number(process.env.PERF_REPEAT ?? "");
+  const roundsByProfile = profiles.rounds as Record<string, number>;
+  const configured = roundsByProfile[profile];
   const rounds =
-    Number.isFinite(repeat) && repeat > 0 ? repeat : profile === "full" ? 3 : 1;
+    Number.isFinite(repeat) && repeat > 0
+      ? repeat
+      : (configured ?? (profile === "full" ? 3 : 2));
 
   const onlyRaw = process.env.PERF_SCENARIO ?? "";
   const only = onlyRaw

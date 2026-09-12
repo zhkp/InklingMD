@@ -10,6 +10,11 @@
     "full": ["S", "M", "L"],
     "xl": ["S", "M", "L", "XL"]
   },
+  "rounds": {
+    "quick": 2,
+    "full": 3,
+    "xl": 3
+  },
   "scenarios": ["open", "input", "scroll", "search", "tab-switch", "save"],
   "plainScenarios": ["open", "scroll"]
 }
