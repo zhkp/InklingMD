@@ -1,0 +1,115 @@
+{
+  "schemaVersion": 2,
+  "env": "ci-ubuntu",
+  "profile": "quick",
+  "mode": "headless",
+  "scenario": "input",
+  "tier": "M",
+  "kind": "rich",
+  "rounds": 2,
+  "fixture": {
+    "version": 2,
+    "hash": "6864ff7ce0c9",
+    "lines": 5000,
+    "source": "generated:rich"
+  },
+  "metrics": {
+    "inputPaintMs": {
+      "median": 29.45,
+      "p95": 43.4,
+      "max": 53.5,
+      "n": 120,
+      "history": [
+        36.8,
+        25.3,
+        24.6,
+        38.65,
+        29.45
+      ],
+      "historyP95": [
+        44.5,
+        35.3,
+        30.8,
+        50.4,
+        43.4
+      ]
+    },
+    "inputSyncMs": {
+      "median": 6.9,
+      "p95": 10,
+      "max": 16.4,
+      "n": 120,
+      "history": [
+        9.2,
+        5.9,
+        5.4,
+        10.1,
+        6.9
+      ],
+      "historyP95": [
+        10.6,
+        8.9,
+        7.8,
+        11.4,
+        10
+      ]
+    },
+    "longTaskCount": {
+      "median": 1.5,
+      "p95": null,
+      "max": null,
+      "n": null,
+      "scalar": true,
+      "history": [
+        1,
+        1.5,
+        0,
+        2.5,
+        1.5
+      ]
+    },
+    "longTaskMs": {
+      "median": 78.5,
+      "p95": null,
+      "max": null,
+      "n": null,
+      "scalar": true,
+      "history": [
+        57,
+        89,
+        0,
+        140.5,
+        78.5
+      ]
+    },
+    "cls": {
+      "median": 0,
+      "p95": null,
+      "max": null,
+      "n": null,
+      "scalar": true,
+      "history": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    "heapDeltaMB": {
+      "median": 0,
+      "p95": null,
+      "max": null,
+      "n": null,
+      "scalar": true,
+      "history": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    }
+  },
+  "updatedAt": "2026-09-12T12:32:43.613Z"
+}
