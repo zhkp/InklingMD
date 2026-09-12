@@ -2,10 +2,11 @@
   "schemaVersion": 1,
   "env": "ci-ubuntu",
   "profile": "quick",
+  "mode": "headless",
   "scenario": "scroll",
   "tier": "S",
   "kind": "rich",
-  "rounds": 1,
+  "rounds": 2,
   "fixture": {
     "version": 2,
     "hash": "02bd30f6342c",
@@ -15,9 +16,9 @@
   "metrics": {
     "frameMs": {
       "median": 16.7,
-      "p95": 17.2,
-      "max": 23.4,
-      "n": 120
+      "p95": 17.1,
+      "max": 22.3,
+      "n": 240
     },
     "longTaskCount": {
       "median": 0,
@@ -69,6 +70,5 @@
       "scalar": true
     }
   },
-  "updatedAt": "2026-09-10T14:51:56.253Z",
-  "mode": "headless"
+  "updatedAt": "2026-09-12T10:15:29.218Z"
 }

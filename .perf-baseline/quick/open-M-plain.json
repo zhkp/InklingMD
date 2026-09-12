@@ -2,10 +2,11 @@
   "schemaVersion": 1,
   "env": "ci-ubuntu",
   "profile": "quick",
+  "mode": "headless",
   "scenario": "open",
   "tier": "M",
   "kind": "plain",
-  "rounds": 1,
+  "rounds": 2,
   "fixture": {
     "version": 2,
     "hash": "e6f4ba5042dc",
@@ -14,10 +15,10 @@
   },
   "metrics": {
     "ttiMs": {
-      "median": 763.4,
-      "p95": 763.4,
-      "max": 763.4,
-      "n": 1
+      "median": 830.15,
+      "p95": 847,
+      "max": 847,
+      "n": 2
     },
     "longTaskCount": {
       "median": 1,
@@ -27,7 +28,7 @@
       "scalar": true
     },
     "longTaskMs": {
-      "median": 402,
+      "median": 471.5,
       "p95": null,
       "max": null,
       "n": null,
@@ -48,6 +49,5 @@
       "scalar": true
     }
   },
-  "updatedAt": "2026-09-10T14:51:56.250Z",
-  "mode": "headless"
+  "updatedAt": "2026-09-12T10:15:29.215Z"
 }

@@ -2,10 +2,11 @@
   "schemaVersion": 1,
   "env": "ci-ubuntu",
   "profile": "quick",
+  "mode": "headless",
   "scenario": "scroll",
   "tier": "M",
   "kind": "rich",
-  "rounds": 1,
+  "rounds": 2,
   "fixture": {
     "version": 2,
     "hash": "6864ff7ce0c9",
@@ -14,41 +15,41 @@
   },
   "metrics": {
     "frameMs": {
-      "median": 17.55,
-      "p95": 28.8,
-      "max": 52.3,
-      "n": 120
+      "median": 16.6,
+      "p95": 22,
+      "max": 46.9,
+      "n": 240
     },
     "longTaskCount": {
-      "median": 1,
+      "median": 0,
       "p95": null,
       "max": null,
       "n": null,
       "scalar": true
     },
     "longTaskMs": {
-      "median": 54,
+      "median": 0,
       "p95": null,
       "max": null,
       "n": null,
       "scalar": true
     },
     "longFrameCount": {
-      "median": 1,
+      "median": 0,
       "p95": null,
       "max": null,
       "n": null,
       "scalar": true
     },
     "jankCount": {
-      "median": 13,
+      "median": 1.5,
       "p95": null,
       "max": null,
       "n": null,
       "scalar": true
     },
     "jankRatePct": {
-      "median": 10.8,
+      "median": 1.25,
       "p95": null,
       "max": null,
       "n": null,
@@ -69,6 +70,5 @@
       "scalar": true
     }
   },
-  "updatedAt": "2026-09-10T14:51:56.252Z",
-  "mode": "headless"
+  "updatedAt": "2026-09-12T10:15:29.218Z"
 }

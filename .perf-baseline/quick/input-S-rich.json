@@ -2,10 +2,11 @@
   "schemaVersion": 1,
   "env": "ci-ubuntu",
   "profile": "quick",
+  "mode": "headless",
   "scenario": "input",
   "tier": "S",
   "kind": "rich",
-  "rounds": 1,
+  "rounds": 2,
   "fixture": {
     "version": 2,
     "hash": "02bd30f6342c",
@@ -14,16 +15,16 @@
   },
   "metrics": {
     "inputPaintMs": {
-      "median": 17.4,
-      "p95": 17.8,
-      "max": 18,
-      "n": 60
+      "median": 17.2,
+      "p95": 17.4,
+      "max": 17.4,
+      "n": 120
     },
     "inputSyncMs": {
-      "median": 2.85,
-      "p95": 3.8,
-      "max": 4.3,
-      "n": 60
+      "median": 1.9,
+      "p95": 2.4,
+      "max": 3.6,
+      "n": 120
     },
     "longTaskCount": {
       "median": 0,
@@ -54,6 +55,5 @@
       "scalar": true
     }
   },
-  "updatedAt": "2026-09-10T14:51:56.250Z",
-  "mode": "headless"
+  "updatedAt": "2026-09-12T10:15:29.214Z"
 }
