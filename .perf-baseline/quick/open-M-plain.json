@@ -48,5 +48,6 @@
       "scalar": true
     }
   },
-  "updatedAt": "2026-09-10T14:51:56.250Z"
+  "updatedAt": "2026-09-10T14:51:56.250Z",
+  "mode": "headless"
 }

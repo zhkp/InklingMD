@@ -13,6 +13,7 @@
 
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { resolve, join } from "node:path";
+import { baselineComparability } from "./comparability.js";
 
 const OUT_DIR = resolve(".perf-output");
 const RAW_DIR = resolve(process.env.PERF_RAW_DIR ?? ".perf-output/raw");
@@ -60,12 +61,17 @@ const P95_BUDGET_FACTOR = 2;
 /**
  * 指标阈值覆盖：
  * - longTaskCount 基数常常是 0，纯百分比会无限放大，因此要求「+20% 且绝对值 +5」同时成立
+ * - longTaskMs 是**少数 long task 的求和**（实测样本里只有 1~5 段），单个任务的时长波动
+ *   就能拉动 ±20%：CI 曾因此产出 4 个假 FAIL——它们的 longTaskCount 全部 0.0% 没变、
+ *   主指标仅 +6~11%。故要求「+30% 且绝对增量 ≥50ms」同时成立；真正的恶化
+ *   （如 136ms → 250ms，+84%）仍然会被判 FAIL
  * - cls 基数极小（千分位），用绝对增量判定
  * - heapDeltaMB 波动天然大，放宽到 25%
  * - 掉帧相关指标基数通常是 0，用绝对增量门槛
  */
 const METRIC_RULES = {
   longTaskCount: { pct: 20, absMin: 5 },
+  longTaskMs: { pct: 30, absMin: 50 },
   longFrameCount: { pct: 20, absMin: 3 },
   jankCount: { pct: 50, absMin: 6 },
   jankRatePct: { pct: 50, absMin: 5 },
@@ -142,24 +148,8 @@ function readBaseline(env, profile, id) {
   return JSON.parse(readFileSync(file, "utf8"));
 }
 
-/** baseline 是否可比较：env / profile / fixture 任一不匹配即失效 */
-function baselineState(raw, baseline) {
-  if (!baseline) return { ok: false, reason: "NEW" };
-  if (baseline.env !== raw.env) {
-    return { ok: false, reason: `ENV_MISMATCH(baseline=${baseline.env}, now=${raw.env})` };
-  }
-  if (baseline.profile !== raw.profile) {
-    return {
-      ok: false,
-      reason: `PROFILE_MISMATCH(baseline=${baseline.profile}, now=${raw.profile})`,
-    };
-  }
-  const bf = baseline.fixture;
-  if (!bf || bf.version !== raw.fixture.version || bf.hash !== raw.fixture.hash) {
-    return { ok: false, reason: "FIXTURE_CHANGED" };
-  }
-  return { ok: true, reason: "OK" };
-}
+// 基线可比性策略在 ./comparability.mjs（env / profile / mode / fixture 四维），
+// 抽成独立模块是为了让单测直接断言线上实现，而不是它的副本。
 
 /**
  * 取 baseline 里某指标的可比值。
@@ -336,7 +326,7 @@ function main() {
     const env = raw.env;
     const profile = raw.profile;
     const baseline = readBaseline(env, profile, id);
-    const state = baselineState(raw, baseline);
+    const state = baselineComparability(raw, baseline);
 
     // 相对（对 baseline）+ 绝对（对帧预算硬目标）两路判定并行
     const rows1 = [
@@ -394,6 +384,7 @@ function main() {
             schemaVersion: 1,
             env,
             profile,
+            mode: source.mode ?? "headless",
             scenario: source.scenario,
             tier: source.tier,
             kind: source.kind,
@@ -498,10 +489,13 @@ function main() {
   lines.push("| 场景 | 指标 | baseline | 本次 | 复测 | 变化 | 判定 |");
   lines.push("|---|---|---|---|---|---|---|");
   for (const r of results) {
-    if (r.metrics.length === 0) {
-      lines.push(`| ${r.id} | — | — | — | — | — | ${r.baselineState} |`);
-      continue;
+    // 不可比时必须显式出现在表里：否则读者会把"没有相对行"误读成"相对判定通过"
+    if (r.baselineState !== "OK") {
+      lines.push(
+        `| ${r.id} | 基线 | — | — | — | — | 未参与相对判定：${r.baselineState} |`,
+      );
     }
+    if (r.metrics.length === 0) continue;
     for (const m of r.metrics) {
       const delta =
         typeof m.base !== "number" || m.base === 0
@@ -517,6 +511,14 @@ function main() {
   lines.push("");
   writeFileSync(resolve(OUT_DIR, "report.md"), lines.join("\n"), "utf8");
   console.log(lines.join("\n"));
+
+  const notCompared = results.filter((r) => r.baselineState !== "OK");
+  if (notCompared.length > 0) {
+    console.log(
+      `[perf] 未做相对比较的 ${notCompared.length} 个场景：` +
+        notCompared.map((r) => `${r.id}(${r.baselineState})`).join(", "),
+    );
+  }
 
   if (failed.length > 0) {
     // 两类 FAIL 的成因完全不同，必须分开表述，避免"代码回归"与"目标未达标"混为一谈
