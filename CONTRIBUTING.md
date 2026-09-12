@@ -90,6 +90,9 @@ PERF_PORT=3000 pnpm run benchmark        # 本机端口冲突时改端口（Wind
 PERF_REPEAT=3 pnpm run benchmark         # 覆盖采样轮数（quick 默认 2、full/xl 默认 3）
 ```
 
+参数同时支持 argv 与环境变量两种写法（如 `--scenario=a,b` 与 `PERF_SCENARIO=a,b`），
+未知参数会直接报错退出而不是静默忽略——静默忽略曾让 `--scenario` 变成"跑了却没过滤"的死参数。
+
 采样轮数决定每个标量指标有几个样本：quick 档从 1 提升到 2，是因为 `rounds=1` 时标量只有
 **一个样本、没有任何平均**，共享 runner 的抖动足以让 `longTaskMs` 自然波动 35%（实测）。
 轮数同时是基线可比性的一维——**改轮数必须重建基线**（`--update-baseline`）。

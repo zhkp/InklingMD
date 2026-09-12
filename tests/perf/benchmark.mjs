@@ -17,23 +17,28 @@
 import { spawn, execSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
+import {
+  buildRunEnv,
+  KNOWN_ARG_KEYS,
+  parseArgs,
+  unknownArgKeys,
+} from "./cli-env.js";
 
 const OUT_DIR = resolve(".perf-output");
 const CONFIG = "tests/perf/playwright.perf.config.ts";
 const PW_CLI = resolve("node_modules/@playwright/test/cli.js");
 
-function parseArgs(argv) {
-  const out = {};
-  for (const arg of argv) {
-    if (arg.startsWith("--")) {
-      const [key, value] = arg.slice(2).split("=");
-      out[key] = value ?? "1";
-    }
-  }
-  return out;
-}
-
 const args = parseArgs(process.argv.slice(2));
+
+// 未知参数直接报错退出：静默忽略正是 `--scenario` 曾经失效的成因
+const unknownArgs = unknownArgKeys(args);
+if (unknownArgs.length > 0) {
+  console.error(
+    `[perf] 未知参数：${unknownArgs.map((k) => `--${k}`).join(", ")}；` +
+      `可用参数：${KNOWN_ARG_KEYS.map((k) => `--${k}`).join(", ")}`,
+  );
+  process.exit(2);
+}
 
 /** 参数同时支持 argv 与环境变量：绕开 npm/pnpm 在 `--` 透传上的差异 */
 const profile = args.profile ?? process.env.PERF_PROFILE ?? "quick";
@@ -111,11 +116,8 @@ async function main() {
   if (!existsSync(OUT_DIR)) mkdirSync(OUT_DIR, { recursive: true });
   writeFileSync(resolve(OUT_DIR, "meta.json"), JSON.stringify(meta, null, 2), "utf8");
 
-  const baseEnv = {
-    PERF_PROFILE: profile,
-    PERF_PORT: port,
-    ...(repeat ? { PERF_REPEAT: String(repeat) } : {}),
-  };
+  // 全部参数统一走 buildRunEnv：任何"解析了却忘了往下传"的参数都会在这里暴露
+  const baseEnv = buildRunEnv({ profile, port, repeat, scenario });
 
   // 两个 raw 目录每轮都清空：
   // - raw-retest：残留样本会让"连续 2 次"判定读到上一轮的数据
