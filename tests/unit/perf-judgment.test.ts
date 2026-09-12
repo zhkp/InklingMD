@@ -87,6 +87,35 @@ describe("longTaskMs 标定值（依据真实 CI 噪声样本）", () => {
   });
 });
 
+describe("小量级主指标的绝对地板（依据同代码重复实测）", () => {
+  it("inputSyncMs：CI 曾因 Δ0.3ms 开出假 FAIL，地板 1ms 应拦住", () => {
+    // 同代码实测中位数：本机 1.5/1.6/2.0，CI 1.9/2.2/2.5
+    expect(isOver("inputSyncMs", 2.2, 1.9)).toBe(false); // +15.8%、Δ0.3ms ← 真实发生过的假 FAIL
+    expect(isOver("inputSyncMs", 2.5, 1.9)).toBe(false); // +31.6%、Δ0.6ms
+    expect(isOver("inputSyncMs", 2.0, 1.5)).toBe(false); // +33.3%、Δ0.5ms
+  });
+
+  it("inputSyncMs：真正的同步耗时上升仍会被判超标", () => {
+    expect(isOver("inputSyncMs", 3.0, 1.6)).toBe(true); // +87.5%、Δ1.4ms
+    expect(isOver("inputSyncMs", 4.2, 1.9)).toBe(true); // +121%、Δ2.3ms
+  });
+
+  it("saveMs：同代码实测散布 4.6ms，地板 8ms 应拦住贴线噪声", () => {
+    expect(isOver("saveMs", 38, 34)).toBe(false); // +11.8%、Δ4ms
+    expect(isOver("saveMs", 38, 33.4)).toBe(false); // +13.8%、Δ4.6ms
+  });
+
+  it("saveMs：真正的恶化仍会被判超标", () => {
+    expect(isOver("saveMs", 48, 34)).toBe(true); // +41.2%、Δ14ms
+  });
+
+  it(".p95 行必须继承基础指标的绝对地板（否则 2ms 量级的尾部仍被噪声顶过）", () => {
+    expect(ruleFor("inputSyncMs.p95")).toEqual({ pct: 25, absMin: 1 });
+    expect(isOver("inputSyncMs.p95", 2.4, 1.9)).toBe(false); // Δ0.5ms
+    expect(isOver("inputSyncMs.p95", 3.4, 1.9)).toBe(true); // Δ1.5ms
+  });
+});
+
 describe("指标分层与佐证要求", () => {
   it("主指标可单独判 FAIL，其 p95 行继承主指标身份", () => {
     for (const metric of ["ttiMs", "frameMs", "switchMs", "searchMs", "saveMs"]) {
@@ -118,16 +147,18 @@ describe("指标分层与佐证要求", () => {
     expect(isPrimary("frameMs.p95(绝对)")).toBe(false);
   });
 
-  it("METRIC_RULES 的键必须是已登记比较的派生标量", () => {
+  it("METRIC_RULES 的键必须是已登记比较的派生标量或小量级主指标", () => {
     expect(Object.keys(METRIC_RULES).sort()).toEqual(
       [
         "cls",
         "heapDeltaMB",
+        "inputSyncMs",
         "jankCount",
         "jankRatePct",
         "longFrameCount",
         "longTaskCount",
         "longTaskMs",
+        "saveMs",
       ].sort(),
     );
   });

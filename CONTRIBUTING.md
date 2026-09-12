@@ -133,6 +133,12 @@ PERF_DOC_FILE=md_editor_stress_test.md pnpm run benchmark
 
 - 相对判定：耗时/帧间隔的 **median 与 p95 都参与比较**（周期性尖刺在 median 上看不出来）；
   掉帧率、long task 数等标量同时比较；默认劣化阈值 15%，p95 放宽 10 个百分点。
+  小量级指标另有**绝对地板**（如 `inputSyncMs` 需 Δ≥1ms、`saveMs` 需 Δ≥8ms）——
+  阈值必须高于该指标的实测噪声地板，否则就是在判定抖动；各地板的实测依据写在
+  `tests/perf/judgment.js` 的 `METRIC_RULES` 注释里。
+  小量级指标另有**绝对地板**（如 `inputSyncMs` 需 Δ≥1ms、`saveMs` 需 Δ≥8ms）——
+  阈值必须高于该指标的实测噪声地板，否则就是在判定抖动；各地板的实测依据写在
+  `tests/perf/judgment.js` 的 `METRIC_RULES` 注释里。
 - 绝对判定（不依赖基线，首次运行也生效）：滚动场景的帧间隔 p95 不得超过 `2 × 帧预算`，
   掉帧率不得超过 10%（`PERF_JANK_RATE_LIMIT` 可调整）。
   **默认只在定向模式下启用**：`PERF_HEADED=1`（vsync 跟随显示器）或 `PERF_UNCAPPED=1`

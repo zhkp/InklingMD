@@ -12,17 +12,25 @@ export const DEFAULT_PCT = 15;
 export const P95_EXTRA_PCT = 10;
 
 /**
- * 指标阈值覆盖。标定依据都来自真实 CI 采样（同一份代码的多次运行）：
+ * 指标阈值覆盖。标定依据都来自真实采样（同一份代码的多次运行）：
  *
  * - longTaskCount：基数常常是 0，纯百分比会被无限放大 → 要求「+20% 且 +5」同时成立
  * - longTaskMs：少数 long task 的求和（样本里只有 1~5 段），实测噪声样本为
  *   +25.0%/+34ms、+18.9%/+76ms、+16.5%/+69ms、+17.5%/+329ms、+35.7%/+81ms
  *   ——百分比与绝对值都无法单独区分噪声，故要求「+50% 且 +100ms」同时成立；
  *   真正的成倍恶化（136→250ms、227→500ms）仍会被判 FAIL
+ * - inputSyncMs：**量级只有 1.5~2.5ms**，15% 阈值等于 0.29ms，完全埋在噪声里。
+ *   同代码实测中位数：本机 1.5 / 1.6 / 2.0，CI 1.9 / 2.2 / 2.5（散布 ±0.5ms），
+ *   故加绝对地板「Δ≥1ms」：CI 曾因 Δ0.3ms 判出假 FAIL
+ * - saveMs：同代码实测 33.4 / 34.0 / 38.0ms（散布 4.6ms ≈ 13.5%，已逼近 15% 阈值），
+ *   故加绝对地板「Δ≥8ms」
  * - longFrameCount：同 longTaskCount 的基数问题
  * - jankCount / jankRatePct：稳态基数为 0，用绝对增量门槛
  * - cls：基数极小（千分位），用绝对增量判定
  * - heapDeltaMB：波动天然大，放宽到 25%
+ *
+ * 通用原则：每个指标都有**可分辨的噪声地板**，低于地板的差异不可行动。
+ * 地板必须由同代码的重复实测得出，不能凭感觉给。
  */
 export const METRIC_RULES = {
   longTaskCount: { pct: 20, absMin: 5 },
@@ -30,6 +38,8 @@ export const METRIC_RULES = {
   longFrameCount: { pct: 20, absMin: 3 },
   jankCount: { pct: 50, absMin: 6 },
   jankRatePct: { pct: 50, absMin: 5 },
+  inputSyncMs: { pct: 15, absMin: 1 },
+  saveMs: { pct: 15, absMin: 8 },
   cls: { abs: 0.02 },
   heapDeltaMB: { pct: 25 },
 };
@@ -87,12 +97,17 @@ export function requiresPrimaryCorroboration(metric) {
   return !isPrimary(metric);
 }
 
-/** 取指标对应的阈值规则（`xxx.p95` 行在基础规则上放宽） */
+/** 取指标对应的阈值规则（`xxx.p95` 行在基础规则上放宽，并继承绝对地板） */
 export function ruleFor(metric) {
   if (METRIC_RULES[metric]) return METRIC_RULES[metric];
   if (metric.endsWith(".p95")) {
     const base = METRIC_RULES[baseMetric(metric)] ?? { pct: DEFAULT_PCT };
-    return { pct: (base.pct ?? DEFAULT_PCT) + P95_EXTRA_PCT };
+    return {
+      pct: (base.pct ?? DEFAULT_PCT) + P95_EXTRA_PCT,
+      // 绝对地板必须继承：否则 inputSyncMs.p95 这种 2ms 量级的尾部指标
+      // 仍会被 0.3ms 的噪声顶过 25% 阈值
+      ...(base.absMin !== undefined ? { absMin: base.absMin } : {}),
+    };
   }
   return { pct: DEFAULT_PCT };
 }
