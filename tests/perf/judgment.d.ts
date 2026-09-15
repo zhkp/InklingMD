@@ -63,6 +63,10 @@ export function resolutionPct(
 ): number | null;
 /** 3σ 达到参考值这个百分比时，报告会显式列出该指标（默认 30） */
 export const RESOLUTION_WARN_PCT: number;
+/** 会话标定指标（进基线但不参与判定，issue #236） */
+export const SESSION_PROBE_METRICS: string[];
+/** 是否为会话标定指标 */
+export function isSessionProbe(metric: string): boolean;
 /** 比基线差的相对行占比达到此比例时，报告提示「疑似整机变慢」（默认 70，仅披露不改判定） */
 export const DRIFT_WARN_PCT: number;
 /**

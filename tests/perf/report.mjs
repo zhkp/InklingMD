@@ -26,6 +26,7 @@ import {
   referenceValue,
   requiresPrimaryCorroboration,
   RESOLUTION_WARN_PCT,
+  SESSION_PROBE_METRICS,
   resolutionPct,
   suppressionReason,
 } from "./judgment.js";
@@ -295,7 +296,9 @@ function buildStats(raw) {
   for (const [metric, samples] of Object.entries(raw.samples ?? {})) {
     metrics[metric] = statsFor(samples);
   }
-  for (const metric of COMPARED_SCALARS) {
+  // 判定白名单 + 会话标定指标：标定值必须**持久化**（否则基线没有参考值与 3σ 门槛，
+  // 「环境归因」永远判不出来），但它不参与判定——见 judgment.SESSION_PROBE_METRICS 的说明。
+  for (const metric of [...COMPARED_SCALARS, ...SESSION_PROBE_METRICS]) {
     if (metric in (raw.scalars ?? {})) {
       const v = raw.scalars[metric];
       metrics[metric] = { median: v, p95: null, max: null, n: null, scalar: true };
@@ -382,6 +385,29 @@ function coverageState(result) {
   // 否则 PERF_ABSOLUTE=1 / headed / uncapped + 「元数据可比但没有可用指标」的基线时，
   // 绝对行会让覆盖虚报为 OK、EMPTY_BASELINE 不触发——同一族假绿灯的最后一角。
   return result.metrics.some((m) => m.absolute !== true) ? "OK" : "EMPTY_BASELINE";
+}
+
+/**
+ * 会话标定对比（issue #236）：当前轮的标定值与基线参考值。
+ *
+ * 标定指标（probeMs / probeLayoutMs / probeCpuMs）刻意**不进 COMPARED_SCALARS 白名单**——
+ * 「机器变慢」不是代码回归，它们不参与 FAIL/WARN 判定；这里只把两侧取出来供**环境归因**披露。
+ * 任一缺失（基线还没播种到标定指标 / 老产物回放）时返回 null，不猜测。
+ */
+function sessionProbeOf(raw, baseline) {
+  const cur = raw?.scalars?.probeMs;
+  const entry = baseline?.metrics?.probeMs;
+  const base = entry ? referenceValue(entry) : undefined;
+  if (typeof cur !== "number" || typeof base !== "number" || base <= 0) return null;
+  return {
+    cur,
+    base,
+    deltaPct: ((cur - base) / base) * 100,
+    noise: noiseFor(entry),
+    historyPoints: entry?.history?.length ?? 0,
+    // 历史序列：门槛判"是否超出历史范围"要用（3σ 对"机器档位双峰"这种分布不适用）
+    history: Array.isArray(entry?.history) ? entry.history : [],
+  };
 }
 
 function ensureDir(dir) {
@@ -530,6 +556,8 @@ function main() {
       baselineState: state.reason,
       metrics: verdicts,
       overMetrics,
+      // 会话标定（#236）：不参与判定，只供「环境归因」披露使用
+      sessionProbe: sessionProbeOf(raw, baseline),
     });
   }
 
@@ -652,6 +680,33 @@ function main() {
           `FAIL 结论请结合这一点判断（二者在共享 runner 上无法仅凭本报告区分）`,
       );
     }
+  }
+  // 会话标定（#236）：把「机器慢」从「代码回归」里分开。
+  // 注意门槛的选型：标定值的分布就是**机器档位的分布**（实测两档 ≈31ms / ≈50ms，同一次运行内
+  // 16 个场景彼此只差 ~2ms），σ 自然很大 → 用 3σ 会几乎永不触发。所以改判「是否超出历史范围」：
+  // 落在范围内 = 与历史档位一致（不看机器好坏，只看是否"见过"）；超出 10% 才算环境异常。
+  const probes = results
+    .filter((r) => r.sessionProbe)
+    .map((r) => ({ id: r.id, ...r.sessionProbe }));
+  if (probes.length > 0) {
+    const probeCur = median(probes.map((p) => p.cur));
+    const probeRef = median(probes.map((p) => p.base));
+    const hist = probes.flatMap((p) => p.history ?? []);
+    const lo = Math.round(Math.min(...hist) * 100) / 100;
+    const hi = Math.round(Math.max(...hist) * 100) / 100;
+    const deltaPct = ((probeCur - probeRef) / probeRef) * 100;
+    const outOfRange = probeCur > hi * 1.1;
+    lines.push(
+      `- 会话标定（与代码无关的固定工作量，#236）：本次 ${probeCur}ms vs 基线参考 ${probeRef}ms` +
+        `（${deltaPct >= 0 ? "+" : ""}${deltaPct.toFixed(1)}%），基线历史范围 ${lo}–${hi}ms（${probes.length} 个场景）→ ` +
+        (outOfRange
+          ? `**⚠️ 判为「会话环境异常」**（超出历史范围 10% 以上）：应用指标的恶化**很可能来自 runner 变慢**` +
+            `而非代码回归，请换 runner 重跑确认`
+          : `环境在历史范围内（**档位归因**：本次比基线参考${deltaPct >= 0 ? "慢" : "快"} ` +
+            `${Math.abs(deltaPct).toFixed(1)}%）——标定负载覆盖 **CPU 与布局/绘制**两条路径，` +
+            `不含 IO/网络；应用指标若同时变差，机器档位不足以解释它（须看代码或 IO 侧）；` +
+            `只有超出历史范围才判为环境异常`),
+    );
   }
   const absoluteCount = results.filter((r) => r.absoluteEnabled).length;
   if (absoluteCount > 0) {

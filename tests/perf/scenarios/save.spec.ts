@@ -14,6 +14,7 @@ import { bootWithFiles, focusEditorEnd, openFileInTree } from "../helpers";
 import {
   armDirtyWatch,
   armTiming,
+  createSessionProbe,
   INPUT_LANDING_RETRIES,
   installObservers,
   readDirtyGone,
@@ -42,6 +43,7 @@ for (const tier of ctx.tiers) {
       test.skip(!shouldRun(id, ctx), "不在本次运行范围（复测过滤）");
 
       const fixture = fixtureFor(tier, kind);
+      const probe = createSessionProbe();
       const saveSamples: number[] = [];
       const longTaskCount: number[] = [];
       const longTaskMs: number[] = [];
@@ -106,6 +108,8 @@ for (const tier of ctx.tiers) {
         expect(doneAt).not.toBeNull();
 
         if (round >= ctx.warmups) {
+          // 标定负载：#236 与编辑器代码无关的固定工作量，用于把「机器慢」与「代码回归」分开
+          await probe.measure(page);
           saveSamples.push(doneAt! - startAt);
           longTaskCount.push(observers.longTaskCount);
           longTaskMs.push(observers.longTaskMs);
@@ -135,6 +139,7 @@ for (const tier of ctx.tiers) {
         },
         samples: { saveMs: saveSamples },
         scalars: {
+          ...probe.scalars(),
           longTaskCount: avg(longTaskCount),
           longTaskMs: avg(longTaskMs),
           cls: avg(clsValues),

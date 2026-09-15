@@ -15,63 +15,63 @@
   },
   "metrics": {
     "ttiMs": {
-      "median": 3471.5,
-      "p95": 3513,
-      "max": 3513,
+      "median": 2614,
+      "p95": 2630.5,
+      "max": 2630.5,
       "n": 2,
       "history": [
-        3205.05,
-        2455.45,
-        2204.75,
         3396.2,
         2763.55,
         2640.7,
         3404.5,
-        3471.5
+        3471.5,
+        2214.6,
+        3213.65,
+        2614
       ],
       "historyP95": [
-        3213.5,
-        2464,
-        2213,
         3429.6,
         2780.1,
         3413.4,
         3446.1,
-        3513
+        3513,
+        2231.1,
+        3247,
+        2630.5
       ]
     },
     "longTaskCount": {
-      "median": 8,
+      "median": 4.5,
       "p95": null,
       "max": null,
       "n": null,
       "scalar": true,
       "history": [
-        5.5,
-        4,
-        3.5,
         6,
         4.5,
         6.5,
         6,
-        8
+        8,
+        4,
+        6.5,
+        4.5
       ]
     },
     "longTaskMs": {
-      "median": 1579,
+      "median": 1014.5,
       "p95": null,
       "max": null,
       "n": null,
       "scalar": true,
       "history": [
-        1409.5,
-        999,
-        821.5,
         1523.5,
         1136.5,
         1434,
         1494,
-        1579
+        1579,
+        870.5,
+        1401.5,
+        1014.5
       ]
     },
     "cls": {
@@ -107,7 +107,43 @@
         0,
         0
       ]
+    },
+    "probeMs": {
+      "median": 39.8,
+      "p95": null,
+      "max": null,
+      "n": null,
+      "scalar": true,
+      "history": [
+        32.3,
+        49.75,
+        39.8
+      ]
+    },
+    "probeLayoutMs": {
+      "median": 11.7,
+      "p95": null,
+      "max": null,
+      "n": null,
+      "scalar": true,
+      "history": [
+        7.65,
+        13.8,
+        11.7
+      ]
+    },
+    "probeCpuMs": {
+      "median": 28.1,
+      "p95": null,
+      "max": null,
+      "n": null,
+      "scalar": true,
+      "history": [
+        24.65,
+        35.95,
+        28.1
+      ]
     }
   },
-  "updatedAt": "2026-09-14T14:00:52.195Z"
+  "updatedAt": "2026-09-15T16:50:01.609Z"
 }

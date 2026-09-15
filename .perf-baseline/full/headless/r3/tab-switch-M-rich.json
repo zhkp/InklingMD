@@ -15,27 +15,33 @@
   },
   "metrics": {
     "switchMs": {
-      "median": 760.65,
-      "p95": 1323.9,
-      "max": 1323.9,
+      "median": 745.65,
+      "p95": 1279.4,
+      "max": 1279.4,
       "n": 6,
       "history": [
         750.2,
         752.45,
         757.8,
         757.1,
-        760.65
+        760.65,
+        743.4,
+        667.4,
+        745.65
       ],
       "historyP95": [
         2596.4,
         1335.4,
         1318.4,
         1725,
-        1323.9
+        1323.9,
+        1282.2,
+        1102.6,
+        1279.4
       ]
     },
     "longTaskCount": {
-      "median": 5.33,
+      "median": 5,
       "p95": null,
       "max": null,
       "n": null,
@@ -45,11 +51,14 @@
         5,
         5,
         5,
-        5.33
+        5.33,
+        5,
+        5,
+        5
       ]
     },
     "longTaskMs": {
-      "median": 2200.33,
+      "median": 2131.33,
       "p95": null,
       "max": null,
       "n": null,
@@ -59,7 +68,10 @@
         2151.33,
         2204,
         2136.33,
-        2200.33
+        2200.33,
+        2133.33,
+        1811.33,
+        2131.33
       ]
     },
     "cls": {
@@ -69,6 +81,9 @@
       "n": null,
       "scalar": true,
       "history": [
+        0,
+        0,
+        0,
         0,
         0,
         0,
@@ -87,9 +102,48 @@
         0,
         0,
         0,
+        0,
+        0,
+        0,
         0
+      ]
+    },
+    "probeMs": {
+      "median": 47.6,
+      "p95": null,
+      "max": null,
+      "n": null,
+      "scalar": true,
+      "history": [
+        50.1,
+        39.9,
+        47.6
+      ]
+    },
+    "probeLayoutMs": {
+      "median": 11.6,
+      "p95": null,
+      "max": null,
+      "n": null,
+      "scalar": true,
+      "history": [
+        11.6,
+        9.8,
+        11.6
+      ]
+    },
+    "probeCpuMs": {
+      "median": 36,
+      "p95": null,
+      "max": null,
+      "n": null,
+      "scalar": true,
+      "history": [
+        38.5,
+        30.1,
+        36
       ]
     }
   },
-  "updatedAt": "2026-09-15T14:10:30.684Z"
+  "updatedAt": "2026-09-15T17:41:17.223Z"
 }

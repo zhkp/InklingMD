@@ -84,6 +84,25 @@ export function resolutionPct(entry, statistic = "median") {
 }
 
 /**
+ * 会话标定指标（issue #236）：与编辑器代码无关的固定合成工作量（见 metrics.runSessionProbe）。
+ *
+ * 关键区别——**进基线，但不参与判定**：
+ * - **要进基线**：只有持久化了历史，报告才能算出参考值、3σ 门槛与"环境异常"结论；
+ * - **不参与判定**：`COMPARED_SCALARS` 是判定白名单，标定指标刻意不在其中——
+ *   机器变慢不是代码回归，它绝不能被判成 FAIL/WARN。
+ *
+ * ⚠️ 这两个集合必须分开维护：`buildStats`（写基线）取两者的并集，
+ * 判定循环只取 `COMPARED_SCALARS`。实测踩过——把标定值只留给"不持久化"的一侧，
+ * 结果是播种产物里根本没有 `probeMs`，基线没有历史、归因行永远不出现。
+ */
+export const SESSION_PROBE_METRICS = ["probeMs", "probeLayoutMs", "probeCpuMs"];
+
+/** 是否为会话标定指标（进基线但不参与判定） */
+export function isSessionProbe(metric) {
+  return SESSION_PROBE_METRICS.includes(metric);
+}
+
+/**
  * 分辨率提醒阈值（%）：3σ 达到参考值这个比例时，报告会显式列出该指标。
  *
  * 取 30% 的依据：默认劣化阈值是 15%（p95 为 25%），3σ 一旦超过两倍基础阈值，

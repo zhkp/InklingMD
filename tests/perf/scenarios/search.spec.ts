@@ -12,6 +12,7 @@ import { bootWithFiles, openFileInTree } from "../helpers";
 import {
   armSearchWatch,
   armTiming,
+  createSessionProbe,
   installObservers,
   readObservers,
   readSearchDone,
@@ -39,6 +40,7 @@ for (const tier of ctx.tiers) {
       test.skip(!shouldRun(id, ctx), "不在本次运行范围（复测过滤）");
 
       const fixture = fixtureFor(tier, kind);
+      const probe = createSessionProbe();
       // 关键词必须从文档本身推导：用户自带文档里不会有生成 fixture 的 "bench-" 编号
       const keyword = pickSearchKeyword(fixture.content);
       const searchSamples: number[] = [];
@@ -86,6 +88,8 @@ for (const tier of ctx.tiers) {
         expect(total).toBeGreaterThan(0);
 
         if (round >= ctx.warmups) {
+          // 标定负载：#236 与编辑器代码无关的固定工作量，用于把「机器慢」与「代码回归」分开
+          await probe.measure(page);
           searchSamples.push(doneAt! - startAt);
           matchCounts.push(total);
           longTaskCount.push(observers.longTaskCount);
@@ -116,6 +120,7 @@ for (const tier of ctx.tiers) {
         },
         samples: { searchMs: searchSamples },
         scalars: {
+          ...probe.scalars(),
           matchCount: avg(matchCounts),
           longTaskCount: avg(longTaskCount),
           longTaskMs: avg(longTaskMs),

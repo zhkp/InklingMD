@@ -17,6 +17,7 @@ import { expect, test } from "@playwright/test";
 import { PERF_DOC_PATH } from "../inject";
 import { bootWithFiles, focusEditorEnd, openFileInTree } from "../helpers";
 import {
+  createSessionProbe,
   INPUT_LANDING_RETRIES,
   installObservers,
   readObservers,
@@ -43,6 +44,7 @@ for (const tier of ctx.tiers) {
       test.skip(!shouldRun(id, ctx), "不在本次运行范围（复测过滤）");
 
       const fixture = fixtureFor(tier, kind);
+      const probe = createSessionProbe();
       const paintSamples: number[] = [];
       const syncSamples: number[] = [];
       const longTaskCount: number[] = [];
@@ -92,6 +94,8 @@ for (const tier of ctx.tiers) {
         const { burst, observers } = measured;
 
         if (round >= ctx.warmups) {
+          // 标定负载：#236 与编辑器代码无关的固定工作量，用于把「机器慢」与「代码回归」分开
+          await probe.measure(page);
           paintSamples.push(...burst.paint);
           syncSamples.push(...burst.sync);
           longTaskCount.push(observers.longTaskCount);
@@ -124,6 +128,7 @@ for (const tier of ctx.tiers) {
         },
         samples: { inputPaintMs: paintSamples, inputSyncMs: syncSamples },
         scalars: {
+          ...probe.scalars(),
           longTaskCount: avg(longTaskCount),
           longTaskMs: avg(longTaskMs),
           cls: avg(clsValues),

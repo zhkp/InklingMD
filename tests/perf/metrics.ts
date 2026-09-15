@@ -316,6 +316,96 @@ export function runScrollFrames(opts: {
 }
 
 /**
+ * 会话标定负载：与编辑器代码无关的**固定合成工作量**，用来回答"这台 runner 这一轮有多快"（issue #236）。
+ *
+ * 为什么需要：基线比对是跨运行比较——若 runner 本身变慢（共享宿主机争用 / VM 放置差异），
+ * 所有应用指标会一起变差，而"连续 2 次复现"过滤不掉它（#234 实测：一次慢会话里 88% 的相对行
+ * 同时变差、中位 Δ +18.7%）。有了一段**不受被测代码影响**的参照，才能把"机器慢"从"代码回归"里
+ * 分离出来。用应用自己的指标当锚点不行：它同时受"机器慢"与"代码变慢"影响，会掩盖真实回归。
+ *
+ * 工作量必须**写死**（下两个常量），否则标定值本身不可比。
+ */
+export const PROBE_NODES = 1500;
+export const PROBE_LOOP_ITERS = 20_000_000;
+
+/**
+ * 在页面内执行标定负载（经 page.evaluate 序列化，故不引用模块作用域变量）。
+ * 两条路径分别覆盖：① 布局/绘制（DOM 合成 + 强制布局）② 纯 CPU（固定步数计算）。
+ *
+ * ⚠️ 工作量在函数体内写成字面量（序列化只带函数体，拿不到 PROBE_NODES / PROBE_LOOP_ITERS），
+ * 单测 `perf-session-probe` 断言两者一致——改了一个忘了另一个会当场失败。
+ * 量级选择：实测本机约 8ms 布局 + 30ms CPU——太短会让标定值自身抖动（±1ms 即 10%+），
+ * 分辨率不足以判"机器变慢 20%"；总量 ~40ms 相对场景耗时（秒级）可忽略。
+ */
+export function runSessionProbe(): Promise<{
+  layoutMs: number;
+  cpuMs: number;
+  totalMs: number;
+}> {
+  const nodes = 1500;
+  const iters = 20_000_000;
+  return (async () => {
+    // ① 布局/绘制路径：固定数量节点 + 固定样式，离屏（contain:strict）避免影响被测页面
+    const host = document.createElement("div");
+    host.style.cssText =
+      "position:absolute;left:-99999px;top:0;width:800px;contain:strict;visibility:hidden";
+    const t0 = performance.now();
+    const frag = document.createDocumentFragment();
+    for (let i = 0; i < nodes; i += 1) {
+      const d = document.createElement("div");
+      d.style.cssText = "height:3px;margin:1px;padding:1px;border:1px solid #333";
+      d.textContent = "x";
+      frag.appendChild(d);
+    }
+    host.appendChild(frag);
+    document.body.appendChild(host);
+    // 读一次尺寸强制 flush 布局（只创建不布局的话测不到 layout 成本）
+    void host.offsetHeight;
+    const layoutMs = performance.now() - t0;
+    host.remove();
+
+    // ② CPU 路径：固定步数的纯计算
+    const t1 = performance.now();
+    let acc = 0;
+    for (let i = 1; i <= iters; i += 1) acc += (i % 7) * 0.5;
+    const cpuMs = performance.now() - t1;
+    // 防死代码消除：结果必须被"用到"，否则 V8 可能把整个循环优化掉
+    if (!Number.isFinite(acc) || acc <= 0) throw new Error("perf: 标定负载被优化掉");
+
+    return { layoutMs, cpuMs, totalMs: layoutMs + cpuMs };
+  })();
+}
+
+/** 标定负载的采集器：每轮调一次 measure，最后取中位数成标量（与其它 scalars 一起进基线） */
+export function createSessionProbe() {
+  const layout: number[] = [];
+  const cpu: number[] = [];
+  const round2 = (n: number): number => Math.round(n * 100) / 100;
+  const median = (xs: number[]): number => {
+    const s = [...xs].sort((a, b) => a - b);
+    const m = Math.floor(s.length / 2);
+    return s.length % 2 === 1 ? s[m] : (s[m - 1] + s[m]) / 2;
+  };
+  return {
+    async measure(page: { evaluate: (fn: () => unknown) => Promise<unknown> }): Promise<void> {
+      const r = (await page.evaluate(runSessionProbe)) as {
+        layoutMs: number;
+        cpuMs: number;
+      };
+      layout.push(r.layoutMs);
+      cpu.push(r.cpuMs);
+    },
+    /** 未采集到任何样本时返回空对象（例如老版本产物的回放），不伪造 0 */
+    scalars(): Record<string, number> {
+      if (layout.length === 0 || cpu.length === 0) return {};
+      const l = round2(median(layout));
+      const c = round2(median(cpu));
+      return { probeLayoutMs: l, probeCpuMs: c, probeMs: round2(l + c) };
+    },
+  };
+}
+
+/**
  * 「输入未落地」时的重试上限（配合 runInputBurst 的 allApplied 守卫）。
  *
  * 为什么需要：`execCommand('insertText')` 偶发返回 false（实测 2 万行档在共享 runner 上

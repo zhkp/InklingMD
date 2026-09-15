@@ -10,6 +10,7 @@ import { expect, test } from "@playwright/test";
 import { PERF_DOC_PATH } from "../inject";
 import { bootWithFiles, openFileInTree } from "../helpers";
 import {
+  createSessionProbe,
   installObservers,
   readObservers,
   runScrollFrames,
@@ -50,6 +51,7 @@ for (const tier of ctx.tiers) {
       test.skip(!shouldRun(id, ctx), "不在本次运行范围（复测过滤）");
 
       const fixture = fixtureFor(tier, kind);
+      const probe = createSessionProbe();
       const budget = frameBudgetMs();
       const frameSamples: number[] = [];
       const jankCounts: number[] = [];
@@ -91,6 +93,8 @@ for (const tier of ctx.tiers) {
         const jankCount = scroll.intervals.filter((ms) => ms > jankLimit).length;
 
         if (round >= ctx.warmups) {
+          // 标定负载：#236 与编辑器代码无关的固定工作量，用于把「机器慢」与「代码回归」分开
+          await probe.measure(page);
           frameSamples.push(...scroll.intervals);
           jankCounts.push(jankCount);
           jankRates.push(Math.round((jankCount / frames) * 1000) / 10);
@@ -124,6 +128,7 @@ for (const tier of ctx.tiers) {
         },
         samples: { frameMs: frameSamples },
         scalars: {
+          ...probe.scalars(),
           // 帧预算与步长是测量配置，随样本一起落盘（report 只比较白名单指标，不会误判为性能）
           frameBudgetMs: budget,
           jankFactor: JANK_FACTOR,
