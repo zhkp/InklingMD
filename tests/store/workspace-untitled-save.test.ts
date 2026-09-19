@@ -353,4 +353,42 @@ describe("saveCurrent 另存为到已打开路径的合并 (#150)", () => {
     expect(state.openTabs.filter((t) => t.path === "/docs/saved.md")).toHaveLength(1);
     expect(state.activeTabPath).toBe("/docs/saved.md");
   });
+
+  it("草稿转正后刷新所在目录：文件树与 Quick Open 索引一起更新（#228 评审 P3-4）", async () => {
+    reset();
+    // 只有工作区模式才会真的刷新（单文件模式 refreshTree 自身会跳过）
+    const refreshSpy = vi.fn().mockResolvedValue(undefined);
+    useWorkspace.setState({
+      workspaceMode: "folder",
+      rootPath: "/docs",
+      refreshTree: refreshSpy,
+    });
+
+    await useWorkspace.getState().saveCurrent();
+
+    // 只失效索引会形成「Quick Open 搜得到、文件树看不到」的新不一致，
+    // 所以必须走 refreshTree —— 它同时是索引的失效点
+    expect(refreshSpy).toHaveBeenCalledTimes(1);
+    expect(refreshSpy).toHaveBeenCalledWith("/docs");
+
+    // 普通（非草稿）保存不涉及新文件，不应触发刷新
+    refreshSpy.mockClear();
+    useWorkspace.setState({
+      openTabs: [
+        {
+          path: "/docs/saved.md",
+          content: "x",
+          dirty: true,
+          lastSavedAt: null,
+          cursorPos: null,
+          scrollTop: null,
+        },
+      ],
+      activeTabPath: "/docs/saved.md",
+      currentFile: "/docs/saved.md",
+      currentContent: "x",
+    });
+    await useWorkspace.getState().saveCurrent();
+    expect(refreshSpy).not.toHaveBeenCalled();
+  });
 });

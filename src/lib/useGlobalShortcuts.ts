@@ -15,6 +15,8 @@ export interface GlobalShortcutHandlers {
   onNewTab: () => void;
   /** Ctrl/Cmd+Shift+F 打开全局搜索 */
   openGlobalSearch: () => void;
+  /** Ctrl/Cmd+P 打开快速打开面板（#228） */
+  openQuickOpen: () => void;
   /** Ctrl/Cmd+F / Ctrl/Cmd+R 打开当前文件查找/替换面板 */
   openFindPanel: (showReplace: boolean) => void;
   /** Ctrl/Cmd+/ 切换快捷键帮助 */
@@ -134,6 +136,10 @@ export function useGlobalShortcuts(handlers: GlobalShortcutHandlers) {
       } else if (tryMatch("openSettings")) {
         e.preventDefault();
         handlersRef.current.openSettings();
+      } else if (tryMatch("quickOpen")) {
+        // Ctrl/Cmd+P：Chromium 下是原生打印，必须先 preventDefault 再打开面板
+        e.preventDefault();
+        handlersRef.current.openQuickOpen();
       } else if (tryMatch("toggleSourceMode")) {
         e.preventDefault();
         useWorkspace.getState().toggleTabSourceMode();

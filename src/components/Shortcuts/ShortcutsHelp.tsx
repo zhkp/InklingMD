@@ -23,6 +23,8 @@ const ALT = MAC ? "⌥" : "Alt";
 const SHIFT = MAC ? "⇧" : "Shift";
 
 // 应用级快捷键 ID → 描述（用于从 store 取动态绑定）
+// 新增 ShortcutId 时必须同步补这里，否则 Record<ShortcutId, string> 会直接编译失败
+// （属可被 tsc 拦住的失败模式，比运行时漏展示更早暴露）。
 const APP_SHORTCUT_DESC: Record<ShortcutId, string> = {
   find: "查找替换（源码模式下用编辑器内置查找）",
   toggleSidebar: "切换侧边栏",
@@ -30,6 +32,7 @@ const APP_SHORTCUT_DESC: Record<ShortcutId, string> = {
   showShortcuts: "显示快捷键帮助",
   openSettings: "打开偏好设置",
   toggleSourceMode: "切换源代码模式",
+  quickOpen: "快速打开文件",
 };
 
 const STATIC_GROUPS: ShortcutGroup[] = [

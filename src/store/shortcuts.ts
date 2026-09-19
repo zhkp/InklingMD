@@ -18,7 +18,8 @@ export type ShortcutId =
   | "toggleOutline"
   | "showShortcuts"
   | "openSettings"
-  | "toggleSourceMode";
+  | "toggleSourceMode"
+  | "quickOpen";
 
 export interface ShortcutDef {
   id: ShortcutId;
@@ -35,6 +36,9 @@ export const SHORTCUT_DEFS: ShortcutDef[] = [
   { id: "showShortcuts", desc: "显示快捷键帮助", default: "mod+/" },
   { id: "openSettings", desc: "打开偏好设置", default: "mod+," },
   { id: "toggleSourceMode", desc: "切换源代码模式", default: "mod+alt+s" },
+  // 与 Typora / VS Code 一致：mod+p 是「快速打开」。CodeMirror 默认 keymap 不占用
+  // Mod-p，故源码模式下不会双重触发（由 shortcuts.test 断言锁定，防将来 CM 升级漂移）。
+  { id: "quickOpen", desc: "快速打开文件", default: "mod+p" },
 ];
 
 /**

@@ -100,10 +100,19 @@ export interface SourceModeExtensionOpts {
  *   defaultKeymap 里它是内嵌 emacsStyleKeymap 的 mac 变体（仅 mac: "Ctrl-n"，
  *   无 key: "Ctrl-n"），因此 b.key 过滤不命中、需按 mac 过滤才生效，
  *   否则 macOS 上 mac 变体仍会命中（b.key 过滤为无害死代码，保留以防依赖升级）
- * 过滤后应用级语义在两种模式下一致（帮助面板 / 新建草稿）。
+ * - "Ctrl-p"（cursorLineUp，shift 变体为 selectLineUp）与全局 quickOpen
+ *   （默认 mod+p，#228）冲突：同属内嵌 emacsStyleKeymap，此处是 key: "Ctrl-p"
+ *   的常规变体；不过滤则源码模式下 Ctrl+P 会「先上移一行、再弹出快速打开」。
+ *   两个变体一起过滤，故 mod+p 与 mod+shift+p 都不再被 CM 占用。
+ * 过滤后应用级语义在两种模式下一致（帮助面板 / 新建草稿 / 快速打开）。
  */
 const sourceModeDefaultKeymap = defaultKeymap.filter(
-  (b) => b.key !== "Mod-/" && b.key !== "Ctrl-n" && b.mac !== "Ctrl-n",
+  (b) =>
+    b.key !== "Mod-/" &&
+    b.key !== "Ctrl-n" &&
+    b.mac !== "Ctrl-n" &&
+    b.key !== "Ctrl-p" &&
+    b.mac !== "Ctrl-p",
 );
 
 /** 源代码模式 CodeMirror 扩展组合 */

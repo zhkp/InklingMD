@@ -8,6 +8,7 @@ import {
   captureFromEvent,
   SHORTCUT_DEFS,
 } from "../../src/store/shortcuts";
+import { getSourceModeConflictBindings } from "../../src/lib/codemirror-shared";
 
 /** 构造 KeyboardEvent 的辅助函数 */
 function kbd(
@@ -183,7 +184,7 @@ describe("formatBinding", () => {
 });
 
 describe("SHORTCUT_DEFS", () => {
-  it("包含全部 6 个可自定义快捷键", () => {
+  it("包含全部 7 个可自定义快捷键", () => {
     const ids = SHORTCUT_DEFS.map((d) => d.id);
     expect(ids).toEqual([
       "find",
@@ -192,6 +193,7 @@ describe("SHORTCUT_DEFS", () => {
       "showShortcuts",
       "openSettings",
       "toggleSourceMode",
+      "quickOpen",
     ]);
   });
 
@@ -200,5 +202,16 @@ describe("SHORTCUT_DEFS", () => {
       expect(def.default).toBeTruthy();
       expect(def.default.startsWith("mod+")).toBe(true);
     }
+  });
+
+  it("快速打开的默认绑定是 mod+p", () => {
+    const quickOpen = SHORTCUT_DEFS.find((d) => d.id === "quickOpen");
+    expect(quickOpen?.default).toBe("mod+p");
+  });
+
+  it("mod+p 未被源码模式 CodeMirror 键位占用（#228 R9）", () => {
+    // 被占用则会在源码模式下双重触发。数据由 CM keymap 派生，故 CM 升级后
+    // 若新增 Mod-p 绑定，本断言会立刻失败，提示改用 mod+shift+p。
+    expect(getSourceModeConflictBindings()).not.toContain("mod+p");
   });
 });

@@ -36,6 +36,35 @@ export async function listDir(dirPath: string): Promise<FileNode> {
   };
 }
 
+/** 工作区文件索引结果（与 Rust 端 WorkspaceFileList 对应，#227） */
+export interface WorkspaceFileList {
+  /**
+   * 工作区内全部 Markdown 文件的完整路径，按路径字节序升序。
+   * 路径为**平台原生分隔符**（Windows 为 `\`），展示前需自行归一化。
+   */
+  files: string[];
+  /** 文件数达到后端上限（50_000）被截断时为 true */
+  truncated: boolean;
+}
+
+/**
+ * 列出工作区内全部 Markdown 文件（Quick Open 的数据源，#228）
+ *
+ * **不传代次**：代次由 Rust 侧分配（#227 复审 P2-2——前端各窗口独立计数会让
+ * 后开窗口的请求被永久判过期）。忽略规则（隐藏项 / 默认黑名单 / .gitignore）
+ * 全部在 Rust 侧统一实现，前端不做二次过滤，避免出现第二份 ignore 真值源。
+ */
+export async function listWorkspaceFiles(root: string): Promise<WorkspaceFileList> {
+  if (isTauri()) {
+    return invoke<WorkspaceFileList>("list_workspace_files", { root });
+  }
+  // 浏览器 mock：从 mock 目录树递归派生，保证 Quick Open 在 E2E 中可测
+  const { MOCK_TREE, findNode, collectMockMarkdownFiles } = await import("./mockFs");
+  await new Promise((r) => setTimeout(r, 30));
+  if (!findNode(MOCK_TREE, root)) throw new Error(`工作区不存在: ${root}`);
+  return { files: collectMockMarkdownFiles(root), truncated: false };
+}
+
 /** issue #159：Rust 后端读取错误的结构化标记（与 src-tauri commands 常量保持契约一致） */
 const READ_ERROR_ENCODING_UNSUPPORTED = "ENCODING_UNSUPPORTED";
 const READ_ERROR_FILE_TOO_LARGE = "FILE_TOO_LARGE";

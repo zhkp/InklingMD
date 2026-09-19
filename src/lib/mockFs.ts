@@ -148,3 +148,25 @@ export function splitPath(p: string): { dir: string; base: string } {
   if (idx < 0) return { dir: "", base: p };
   return { dir: p.slice(0, idx), base: p.slice(idx + 1) };
 }
+
+/**
+ * 递归收集 mock 目录树下的 Markdown 文件路径（浏览器端的索引数据源，#228）
+ *
+ * 与 Rust 侧保持同一契约：只收 `.md` / `.markdown`（大小写不敏感）、按路径升序。
+ * 真实环境额外的默认黑名单与 `.gitignore` 过滤在 Rust 侧完成；mock 树中不存在
+ * 这两类目录，因此**不重复实现一份过滤逻辑**（避免出现第二份真值源）。
+ * 从 `MOCK_TREE` 派生而非另建一份列表，保证 mock 与文件树始终一致。
+ */
+export function collectMockMarkdownFiles(root: string): string[] {
+  const node = findNode(MOCK_TREE, root);
+  if (!node || !node.is_dir) return [];
+  const out: string[] = [];
+  const walk = (current: FileNode): void => {
+    for (const child of current.children) {
+      if (child.is_dir) walk(child);
+      else if (/\.(md|markdown)$/i.test(child.name)) out.push(child.path);
+    }
+  };
+  walk(node);
+  return out.sort();
+}

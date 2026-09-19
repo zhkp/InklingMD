@@ -5,6 +5,7 @@
 import type { StateCreator } from "zustand";
 import { listDir, type FileNode } from "../../lib/fs";
 import { showMessage } from "../../lib/dialogs";
+import { invalidateWorkspaceIndex } from "../../lib/workspaceIndex";
 import { flushAllMarkdownPublishers } from "../../components/Editor/markdown-publisher";
 import {
   collectDirectoryPaths,
@@ -242,6 +243,8 @@ export const createFileTreeSlice: StateCreator<
     if (!rootPath || workspaceMode !== "folder") return;
     try {
       await get().loadDirectory(dirPath ?? rootPath, true);
+      // 文件树内容已变化，Quick Open 的候选缓存随之失效（#228）
+      invalidateWorkspaceIndex();
     } catch {
       // 刷新失败忽略，不阻塞用户操作
     }

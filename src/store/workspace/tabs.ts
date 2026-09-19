@@ -1082,6 +1082,14 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
           lastSavedAt: latestState.activeTabPath === activeTabPath ? now : latestState.lastSavedAt,
           recentFiles: nextRecent,
         });
+
+        // 草稿转正（另存为）后磁盘上多了一个文件：刷新它所在目录，
+        // 让文件树与 Quick Open 索引一起更新 —— refreshTree 同时是索引的失效点，
+        // 两者必须一起做，否则会形成「Quick Open 搜得到、文件树看不到」的新不一致
+        //（#228 评审 P3-4）。单文件模式 / 未打开工作区时 refreshTree 自身会跳过。
+        if (tab.isUntitled) {
+          void get().refreshTree(parentDir(savePath));
+        }
       } catch (e) {
         set((current) => {
           const openTabs = current.openTabs.map((t) =>

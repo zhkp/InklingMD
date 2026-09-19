@@ -13,28 +13,13 @@ import {
   nextGlobalSearchGeneration,
   type SearchHit,
 } from "../../lib/fs";
+import { relativeToRoot } from "../../lib/path";
 import { IconFileText, IconX } from "../icons";
 import "./GlobalSearchPanel.css";
 
 interface GlobalSearchPanelProps {
   getEditor: () => Editor | undefined;
   onClose: () => void;
-}
-
-/** 取文件名 */
-function basename(p: string): string {
-  return p.split(/[\\/]/).pop() ?? p;
-}
-
-/** 取相对工作区的路径 */
-function relPath(p: string, root: string | null): string {
-  if (!root) return basename(p);
-  const rootNorm = root.replace(/\\/g, "/");
-  const pNorm = p.replace(/\\/g, "/");
-  if (pNorm.startsWith(rootNorm + "/")) {
-    return pNorm.slice(rootNorm.length + 1);
-  }
-  return basename(p);
 }
 
 /** 按文件分组命中结果 */
@@ -318,7 +303,7 @@ export function GlobalSearchPanel({ getEditor, onClose }: GlobalSearchPanelProps
                 <span className="gs-file-icon">
                   <IconFileText size={14} />
                 </span>
-                <span className="gs-file-name">{relPath(group.path, rootPath)}</span>
+                <span className="gs-file-name">{relativeToRoot(group.path, rootPath)}</span>
                 <span className="gs-count">{group.hits.length}</span>
               </div>
               {group.hits.map((hit) => {
