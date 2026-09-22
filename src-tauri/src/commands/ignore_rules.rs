@@ -308,6 +308,87 @@ mod tests {
         assert!(!truncated);
     }
 
+    /// 目录符号链接不被跟随：内容不进结果，且**自指链接不会造成无限遍历**
+    ///
+    /// Windows 未开开发者模式时创建符号链接会失败，故 Windows 侧用 `mklink /J` 建目录联接
+    /// （不需要管理员/开发者模式，与 `commands/mod.rs` 的既有 symlink 用例同一手法）。
+    #[cfg(unix)]
+    #[test]
+    fn directory_symlinks_are_not_followed() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TestDir::new("dir-symlink");
+        write(&temp.child("real/inside.md"), "# inside");
+        write(&temp.child("visible.md"), "# visible");
+        symlink(temp.path.join("real"), temp.child("linked")).unwrap();
+        symlink(&temp.path, temp.child("loop")).unwrap();
+
+        let files = walk(&temp.path);
+
+        assert_eq!(
+            relative(&temp.path, &files),
+            vec!["real/inside.md", "visible.md"]
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn directory_symlinks_are_not_followed() {
+        use std::process::Command;
+
+        let temp = TestDir::new("dir-symlink");
+        write(&temp.child("real/inside.md"), "# inside");
+        write(&temp.child("visible.md"), "# visible");
+        for (link, target) in [
+            (temp.child("linked"), temp.path.join("real")),
+            (temp.child("loop"), temp.path.clone()),
+        ] {
+            let output = Command::new("cmd")
+                .args(["/C", "mklink", "/J"])
+                .arg(link)
+                .arg(target)
+                .output()
+                .expect("cmd.exe should create a directory junction");
+            assert!(
+                output.status.success(),
+                "failed to create junction: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        let files = walk(&temp.path);
+
+        assert_eq!(
+            relative(&temp.path, &files),
+            vec!["real/inside.md", "visible.md"]
+        );
+    }
+
+    /// 文件符号链接按文件处理（与历史实现一致：只跳过**目录**链接）
+    #[test]
+    fn file_symlinks_are_treated_as_files() {
+        let temp = TestDir::new("file-symlink");
+        write(&temp.child("real.md"), "# real");
+        #[cfg(unix)]
+        let created =
+            std::os::unix::fs::symlink(temp.child("real.md"), temp.child("link.md")).is_ok();
+        #[cfg(windows)]
+        let created =
+            std::os::windows::fs::symlink_file(temp.child("real.md"), temp.child("link.md"))
+                .is_ok();
+        #[cfg(not(any(unix, windows)))]
+        let created = false;
+        // Windows 未开开发者模式时 `symlink_file` 会**返回 Ok 但链接并未真的创建**（本机实测），
+        // 所以判定必须落到「链接确实可用」而不是只看创建调用的返回值
+        if !created || !temp.child("link.md").exists() {
+            return; // 平台无创建符号链接权限，跳过
+        }
+
+        let files = walk(&temp.path);
+
+        assert_eq!(relative(&temp.path, &files), vec!["link.md", "real.md"]);
+    }
+
     #[test]
     fn hidden_files_and_directories_are_skipped() {
         let temp = TestDir::new("hidden");
