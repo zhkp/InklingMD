@@ -378,8 +378,11 @@ mod tests {
                 .is_ok();
         #[cfg(not(any(unix, windows)))]
         let created = false;
-        // Windows 未开开发者模式时 `symlink_file` 会**返回 Ok 但链接并未真的创建**（本机实测），
-        // 所以判定必须落到「链接确实可用」而不是只看创建调用的返回值
+        // 无创建符号链接权限时 `symlink_file` 的**返回值不可靠**，实测到两种表现：
+        // 普通非提权进程返回 `Err(1314)`（「客户端没有所需的特权。」），
+        // 而本项目的测试环境里会返回 `Ok(())` 却并未真的建出链接 —— 同一环境下
+        // `commands/mod.rs` 的既有 symlink 用例也因此越过 `is_ok()` 守卫、在后续断言上失败。
+        // 所以跳过判据必须落到「链接确实可用」；只看创建调用的返回值会在这里假失败。
         if !created || !temp.child("link.md").exists() {
             return; // 平台无创建符号链接权限，跳过
         }
