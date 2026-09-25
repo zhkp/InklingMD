@@ -15,63 +15,63 @@
   },
   "metrics": {
     "saveMs": {
-      "median": 278.3,
-      "p95": 278.9,
-      "max": 278.9,
+      "median": 266,
+      "p95": 281.2,
+      "max": 281.2,
       "n": 3,
       "history": [
-        198.8,
         283.3,
         282,
         215.6,
         307.6,
         243,
         237.8,
-        278.3
+        278.3,
+        266
       ],
       "historyP95": [
-        290.3,
         292,
         299.4,
         216.3,
         315.2,
         375.2,
         326.2,
-        278.9
+        278.9,
+        281.2
       ]
     },
     "longTaskCount": {
-      "median": 3.33,
+      "median": 3,
       "p95": null,
       "max": null,
       "n": null,
       "scalar": true,
       "history": [
-        2.33,
         3.33,
         4,
         2,
         3.33,
         3.67,
         2,
-        3.33
+        3.33,
+        3
       ]
     },
     "longTaskMs": {
-      "median": 270.67,
+      "median": 237.33,
       "p95": null,
       "max": null,
       "n": null,
       "scalar": true,
       "history": [
-        203,
         284.33,
         279.33,
         180,
         286.33,
         294,
         206.33,
-        270.67
+        270.67,
+        237.33
       ]
     },
     "cls": {
@@ -109,7 +109,7 @@
       ]
     },
     "probeMs": {
-      "median": 50.6,
+      "median": 45.3,
       "p95": null,
       "max": null,
       "n": null,
@@ -117,11 +117,12 @@
       "history": [
         52.8,
         44.1,
-        50.6
+        50.6,
+        45.3
       ]
     },
     "probeLayoutMs": {
-      "median": 14.1,
+      "median": 13.3,
       "p95": null,
       "max": null,
       "n": null,
@@ -129,11 +130,12 @@
       "history": [
         14.5,
         13.7,
-        14.1
+        14.1,
+        13.3
       ]
     },
     "probeCpuMs": {
-      "median": 36.5,
+      "median": 32,
       "p95": null,
       "max": null,
       "n": null,
@@ -141,9 +143,10 @@
       "history": [
         38.3,
         30.4,
-        36.5
+        36.5,
+        32
       ]
     }
   },
-  "updatedAt": "2026-09-15T17:41:17.216Z"
+  "updatedAt": "2026-09-25T15:40:59.528Z"
 }

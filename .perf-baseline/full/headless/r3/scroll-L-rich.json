@@ -15,114 +15,114 @@
   },
   "metrics": {
     "frameMs": {
-      "median": 65.25,
-      "p95": 136.1,
-      "max": 341.5,
+      "median": 62.45,
+      "p95": 144.4,
+      "max": 328.2,
       "n": 600,
       "history": [
-        61.4,
         65,
         58.1,
         61.35,
         66.3,
         59.6,
         51.2,
-        65.25
+        65.25,
+        62.45
       ],
       "historyP95": [
-        129.5,
         120.1,
         112.4,
         120.4,
         135.7,
         129.1,
         119.8,
-        136.1
+        136.1,
+        144.4
       ]
     },
     "longTaskCount": {
-      "median": 133.33,
+      "median": 133,
       "p95": null,
       "max": null,
       "n": null,
       "scalar": true,
       "history": [
-        114,
         139.67,
         106.33,
         135,
         132.33,
         108.33,
         102,
-        133.33
+        133.33,
+        133
       ]
     },
     "longTaskMs": {
-      "median": 10183.33,
+      "median": 10415,
       "p95": null,
       "max": null,
       "n": null,
       "scalar": true,
       "history": [
-        9042.33,
         10369.33,
         7720.67,
         9735,
         10606.67,
         8203.67,
         7376.33,
-        10183.33
+        10183.33,
+        10415
       ]
     },
     "longFrameCount": {
-      "median": 139,
+      "median": 137,
       "p95": null,
       "max": null,
       "n": null,
       "scalar": true,
       "history": [
-        117,
         148,
         116.33,
         140.33,
         131.33,
         115,
         109.33,
-        139
+        139,
+        137
       ]
     },
     "jankCount": {
-      "median": 199,
+      "median": 199.67,
       "p95": null,
       "max": null,
       "n": null,
       "scalar": true,
       "history": [
-        200,
         199,
         195.67,
         196.33,
         199.33,
         199.67,
         187.67,
-        199
+        199,
+        199.67
       ]
     },
     "jankRatePct": {
-      "median": 99.5,
+      "median": 99.83,
       "p95": null,
       "max": null,
       "n": null,
       "scalar": true,
       "history": [
-        100,
         99.5,
         97.83,
         98.17,
         99.67,
         99.83,
         93.83,
-        99.5
+        99.5,
+        99.83
       ]
     },
     "cls": {
@@ -160,7 +160,7 @@
       ]
     },
     "probeMs": {
-      "median": 49.5,
+      "median": 47.3,
       "p95": null,
       "max": null,
       "n": null,
@@ -168,11 +168,12 @@
       "history": [
         53.1,
         44.8,
-        49.5
+        49.5,
+        47.3
       ]
     },
     "probeLayoutMs": {
-      "median": 13.4,
+      "median": 15.2,
       "p95": null,
       "max": null,
       "n": null,
@@ -180,11 +181,12 @@
       "history": [
         14.1,
         13.7,
-        13.4
+        13.4,
+        15.2
       ]
     },
     "probeCpuMs": {
-      "median": 36.1,
+      "median": 32.1,
       "p95": null,
       "max": null,
       "n": null,
@@ -192,9 +194,10 @@
       "history": [
         39,
         31.1,
-        36.1
+        36.1,
+        32.1
       ]
     }
   },
-  "updatedAt": "2026-09-15T17:41:17.219Z"
+  "updatedAt": "2026-09-25T15:40:59.531Z"
 }
