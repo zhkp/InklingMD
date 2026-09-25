@@ -2,6 +2,49 @@
 
 本项目所有值得记录的变更都汇入本文件，格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本语义遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [3.3.0] - 2026-09-25
+
+> **Quick Open 交付完成**：Epic #222 的两个子项一并落地——子项 1/2 #227（PR #240）把忽略规则收敛成唯一真值源并新增 Rust 工作区文件索引，子项 2/2 #228（PR #242）在其上做出键盘优先的快速打开面板；#243 补齐符号链接断言，闭合 #222 计划 §7.1 清单。自 v3.2.0 起 21 个提交（含 3 个 merge 提交）/ 41 个文件（+3707 / −213，不含本版发版文档提交）。`Ctrl/Cmd+P` → 输入几个字符 → 回车，打开文件不再需要鼠标逐层找目录。
+
+### 子项 1/2：忽略规则唯一真值源 + 工作区文件索引（#227，PR #240）
+
+**根因（三处 issue 未写到的实情）**：忽略黑名单实际有**三份**（`searchIgnore.ts` 14 项 / `search.rs` 同 14 项 / `commands/mod.rs` 5 项子集，靠注释手工同步）；前端那份是**死代码**（全仓只被自己的测试 import，生产零调用）；**`.gitignore` 完全不生效**——`venv/`、`vendor/`、`Pods/`、`__pycache__/` 里的 `.md` 会被全局搜索扫到，索引建起来后该问题会被放大。
+
+- **`commands/ignore_rules.rs` 成为唯一真值源**，忽略来源穷举三项：默认目录黑名单（沿用原 14 项，集合与语义不变）、工作区内 `.gitignore`（含嵌套子目录）、点号前缀隐藏项。明确**不启用** `.ignore` / git 全局排除 / `.git/info/exclude` / 祖先目录 `.gitignore`；`.ignore(false)` 显式关闭——旧实现也不读它，但把「不生效」写成契约 + 用例锁定，防默认值将来变化。
+- **`hidden(false)` + 自行按点号判定**：不复用 ignore crate 的 Windows 隐藏属性判定，否则带隐藏属性的普通文件会被连带过滤，与文件树语义不一致（`#[cfg(windows)]` + `attrib +h` 用例锁定）。
+- **新增 `list_workspace_files` 命令**：`MAX_INDEX_FILES = 50_000` + `truncated`；路径字节序升序（与历史 `files.sort()` 一致，保证分片合并顺序确定）；平台原生分隔符；`root` 为文件时不特判（由 walker 产出自身，避免两份 markdown 判定漂移）。
+- **代次改由 Rust 侧分配（评审裁决：改机制而不是改注释）**：`fetch_max` + 各 webview 独立计数器 = 「先到的窗口永久胜出、后开的窗口被饿死」，与注释声称的「后发起者胜出」相反；改为 Rust 侧 `fetch_add(1) + 1` 严格单调，「最新请求胜出」跨窗口自然成立，前端因此**零状态**。`INDEX_GENERATION` 与 `SEARCH_GENERATION` **刻意分离**——共用一个计数器会让「打开 Quick Open」把在途的全局搜索取消掉。
+- **测试竞态结构上消除（P2-1）**：取消链路改为注入固定桩、代次分配与过期判定改为接收计数器引用，仅剩「索引/搜索代次不同源」一个用例写全局并与 `search::generation_cancel_semantics` 共用测试锁；**证据边界如实说明**——摘掉锁连跑 15 轮未复现失败，故修复依据是**结构性**（窗口在任何调度下都不复存在）而非统计性复现。
+- **行为变化（已裁决）**：文件树忽略目录 5 → 14 项，**实际新隐藏的只有 `coverage/`**（`out` 原就在旧清单、9 个点号条目原就被点号判定覆盖；并更正了上一轮「`out/` 不再显示」的错误描述）；全局搜索新增 `.gitignore` 过滤（结果为**减少**，用户预期内）；隐藏项语义统一为点号前缀（不含 Windows 隐藏属性）。
+- **性能**（合成树、交替顺序各 5 轮取中位数）：1 万文件 **1.543 s → 52 ms**、5 万文件 **7.536 s → 257 ms**（均 ~29×，线性）；差异来自旧实现每条目多调 `is_dir()`/`is_file()`（Windows 上是额外 stat）与每文件名一次 `to_lowercase()` 分配。不进 CI 门禁，仅作后续基线。
+
+### 子项 2/2：Quick Open 面板（#228，PR #242）
+
+- **索引缓存层 `workspaceIndex.ts`**：懒构建 + `INDEX_TTL_MS = 30_000` + stale-while-revalidate（TTL 过期**先返回旧结果**再后台重建，不出现空面板等待）+ 失效 + 失败降级 + 单文件模式候选集；`fileTree.ts` 的 `refreshTree` 成功后失效缓存——重命名/删除/另存为转正都以它为出口，**失效点只有一处**。
+- **`invalidateEpoch` 世代号（评审 P2-1，阻塞项）**：失效拦不住「在途请求落定后写回」——旧清单会以新 `builtAt` 被当成新鲜数据，TTL 内一直读到重命名前的路径。修法为发起前捕获 epoch、落定时比对，**并额外**标记 `stale` + 立刻补一次重建（只挡住回写的话，调用方仍会渲染到失效前的旧清单）。
+- **递归消费 `refresh` 链（TomGoh 复审 P2，真 bug）**：面板只挂一层 `.then`，`fresh.refresh` 被丢弃——只要**一次**失效落在「TTL 后台重建在途」窗口里，就会渲染中间版本且永远等不到最终数据；改为可自引用的 `consume` 递归跟进到 `refresh === null`。
+- **单文件模式 relPath 基准（TomGoh 复审 P2，真 bug）**：`relativeToRoot` 对基准外路径返回 basename，而单文件模式的 rootPath 只是其中某个文件的父目录 → `/a/report.md` 与 `/b/report.md` 无法区分、搜 `b/report` 搜不到；新增 `commonParentDir()` 取最深共同父目录。未改用完整路径：绝对嵌套深度会进打分，2/级 惩罚可能压过更近打开的文件。
+- **两条 mint 路径统一兜底**：epoch 与 TTL 路径产出的 `refresh` 都可能在「已取消」路径失去消费方，补重建失败会冒出 `unhandledRejection`；统一到 `startBackgroundRebuild()` 在 **mint 处**兜底——模块自己保证不产出孤儿 promise，任何调用方都受益。
+- **打分排序纯函数 `quickOpenScore.ts`**：`已打开(+1000) + 最近打开(0~100) + 匹配档位分(0~100) − 深度×2`，六档取最高不叠加；排序键 `score↓ → relPath(小写)↑ → 绝对路径↑`，全部 code-unit 比较（**禁 `localeCompare`**，保证跨平台 / 跨 locale 确定）。**修正计划书**：深度惩罚必须是 `− depth * 2`（原书写 `+`，会让越深的文件越靠前，与「优先根附近文件」相反）。
+- **面板 UI `QuickOpenPanel`**：实时过滤、↑/↓、Enter、Esc；`MAX_RENDERED_RESULTS = 200` + 底部提示，**不做虚拟滚动**（上限已把 DOM 封顶 200 行，为被封顶的列表引入虚拟化等于无实际作用的代码；且虚拟滚动 + 键盘高亮是已知易 flaky 区域）；空态 / 错误 + 重试 / 打开失败保持面板开启（失败以 `role="alert"` 面板内提示，不隐藏列表以便改选）。
+- **可访问性用 combobox 模式**：焦点**始终留在输入框** + `aria-activedescendant` 指向当前项 + `aria-label`（否则屏幕阅读器只念「组合框」）+ `aria-expanded/controls/autocomplete`；面板声明 `aria-modal="true"` 故补**焦点陷阱**（Tab / Shift+Tab 双向环绕）让该语义名副其实。**未复用 `useMenuA11y`**——它会把 DOM 焦点移到 `[role="menuitem"]`，夺走输入框焦点、打断连续输入，与该条目要求的 `aria-activedescendant` 互斥。
+- **IME 组字守卫**：组字期间（`e.nativeEvent.isComposing`）的 Enter / 方向键不是命令——拼音按 Enter 确认候选原本会同时打开文件并关掉面板；同类扩展到面板的 Esc 关闭监听（组字期间 Esc 通常是取消候选）。用例含正向对照（组字结束后同一按键仍生效），防守卫过宽。
+- **模态互斥收敛**：`modals.ts` 新增 `resolveModalAction` 三分支，`App.tsx` 的 6 个模态布尔量收敛为单个 `activeModal`，`requestModal` 成为**唯一**归并点；**模态层提为 `modalLayer` 并在两个分支都渲染**——禅模式分支此前不渲染模态而 `requestModal` 仍置位，形成全局静默锁（`mod+p` 无反馈、随后的 `mod+shift+f` 被 `ignore` 吞掉），并顺带把 `ConflictDialog` 纳入该层（阻塞式确认弹不出来 = 保存被静默卡住）；Esc 层级经 `GlobalShortcutHandlers.isModalOpen` 让位给模态自身监听（已核对六个模态都有 Esc，不会变死键）。
+- **快捷键 `mod+p`**：与 Typora / VS Code 一致；实测备选键 `mod+shift+p` **同样**被占用，溯源为 CM `defaultKeymap` 内嵌 emacsStyleKeymap 的 `Ctrl-p`，按项目**早已为同源 Ctrl-n 做过的过滤**一并处理（代价：源码模式下 emacs 风格 `Ctrl-p` 让位；`shortcuts.test.ts` 断言锁定，防 CM 升级漂移）。
+- **性能实测**：Rust 遍历 5,000 文件中位数 **20.3 ms**（验收线「< 2s」，约 100× 裕量；50,000 文件 154.9 ms，线性）、打分排序 5,000 候选 **1.8 ms**、渲染行数 **≤ 200**、打字**不触发**磁盘 / 索引工作（均为确定性断言）；**真机 DOM 渲染耗时无有效自动化手段量化**（happy-dom 随行数陡增，不是 DOM 计时的有效仪器），按计划 §7.6 属**人工核对**项，不写成「已验证达标」。
+
+### 测试补全（#243，闭合 #222 计划 §7.1 第 3 项）
+
+- 计划 §7.1 的 15 项行为清单逐项对账后，只有第 3 项「目录符号链接不被跟随（不成环）」**没有断言**：行为本身是对的（`ignore` crate 的 `follow_links` 默认 `false`，且目录链接会落到 `!is_file` 分支 `continue`），但将来谁把 `follow_links` 打开都不会有测试变红。补 `directory_symlinks_are_not_followed`（同时建指向真实目录的链接与**自指链接**，被跟随即无限递归；Windows 用 `mklink /J` 目录联接，无需管理员 / 开发者模式）与 `file_symlinks_are_treated_as_files`（锁定「只跳过**目录**链接、文件链接按文件处理」这条既有语义）。
+- **环境守卫口径订正**：评审指出原叙述把单一环境的表现当成通用语义——独立复测确认 **`Err(1314)`（特权不足）与本机 `Ok` 但 `link.exists() = false` 两种表现都真实存在**（取决于进程环境），故跳过判据落在「链接确实可用」（`!created || !exists()`），注释不再宣称单一机制。变异验证：`follow_links(true)` → 目标用例精确失败。
+
+### 质量门禁
+
+- Vitest **130 文件 / 942 用例**（基线 126 / 869；#242 新增 73 例）、Playwright E2E **181 用例**（基线 171 + Q1–Q10）、Rust `cargo test` CI **ubuntu 85 / windows 90 全绿**（#240 新增 29 例、#243 新增 2 例）；本机发版实测 **90 通过 / 0 失败**，与 CI windows 侧逐数吻合（历史上曾记为「85 通过 + 3 个 symlink 用例失败」，那是未开启开发者模式的环境差异，非代码问题）、`tsc --noEmit` 零错误、`vite build` 通过、rustfmt 0 diff。
+- **变异验证 21 项全部精确命中**（#240 七项 / #242 十三项 / #243 一项）；并主动删掉一条**不成立**的断言——原想锁定「rank 不重复计算档位分」，写完发现算两遍断言照样绿，该约束改由 `scoreCandidate(candidate, matchScore)` 的类型签名保证。
+- CI：PR #242 run [35613352774](https://github.com/zhkp/InklingMD/actions/runs/35613352774) 全绿、PR #243 run [35756802502](https://github.com/zhkp/InklingMD/actions/runs/35756802502) 全绿（`build.yml` **不在 PR 上自动触发**，由 `gh workflow run "Build" --ref <branch>` 手动派发）。
+- 详见 `docs/v3.3.0 设计文档.md`。
+
 ## [3.2.0] - 2026-09-13
 
 > **性能回归防线基建**：关闭 issue #216，合入 PR #231 → 09-14~09-16 四轮评审加固（PR #232 / #235 / #237 / #239），**本版本为重发**，总计 86 个文件（+12817 / −8，含基线数据），详见文末「发布后加固」。**本版本不含产品代码改动**（`src/`、`src-tauri/` 零改动），全部为工程质量投入——把「这次改动有没有把性能改坏」从主观感受变成**有基线、有噪声门槛、有退出码**的客观结论。
