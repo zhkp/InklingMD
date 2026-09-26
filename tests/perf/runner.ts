@@ -113,6 +113,29 @@ export function frameBudgetMs(): number {
   return Number.isFinite(raw) && raw > 0 ? raw : 16.7;
 }
 
+/**
+ * 单测超时按档位放宽（issue #247）。
+ *
+ * 为什么不统一用 180s：最重的 L 档（2 万行）在 CI 的 wall 实测 114–174s、中位 ≈138s，
+ * 紧贴 config 里的全局 180s 线——慢会话会周期性穿线（如 input-L-rich 一次超时），
+ * 而单场景超时会把整轮判定作废（无「判定覆盖」行、无 report.md）。档位越大测量工作量越大，
+ * 超时线就该随之放宽；S/M 维持 180s（现状足够，不作为）。
+ *
+ * 为什么 XL / 自定义档给 600s：XL 是 5 万行、自定义档是用户自带文档（可能比 XL 更大），
+ * 两者都没有历史观测可依赖，只能给足余量——宁可慢也不要撞线作废。
+ *
+ * `PERF_TEST_TIMEOUT_MS` 可整体覆盖（仿 frameBudgetMs 的 env 先例），便于定向调试；
+ * 非法值（非数字 / ≤0）忽略，回退到档位线。未知档位回退 180s，与 config 全局兜底同值。
+ */
+export function testTimeoutMs(tier: string): number {
+  const raw = Number(process.env.PERF_TEST_TIMEOUT_MS ?? "");
+  if (Number.isFinite(raw) && raw > 0) return raw;
+  if (tier === "S" || tier === "M") return 180_000;
+  if (tier === "L") return 300_000;
+  if (tier === "XL" || tier === CUSTOM_TIER) return 600_000;
+  return 180_000;
+}
+
 /** 测量运行模式：决定帧间隔到底反映"显示器刷新节拍"还是"单帧真实工作耗时" */
 export type PerfMode = "uncapped" | "headed" | "headless";
 

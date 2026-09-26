@@ -14,6 +14,7 @@
 // - PERF_HEADED=1：有头运行，vsync 跟随显示器刷新率，本机高刷屏可参与测量
 // - PERF_UNCAPPED=1：额外解除 vsync 上限（--disable-gpu-vsync --disable-frame-rate-limit），
 //   在任意显示器上都能看出「单帧真实工作耗时是否还在 8.3ms 预算内」
+import { resolve } from "node:path";
 import { defineConfig, devices } from "@playwright/test";
 
 const PORT = Number(process.env.PERF_PORT ?? 1420);
@@ -28,7 +29,23 @@ export default defineConfig({
   forbidOnly: !!process.env.CI,
   retries: 0,
   timeout: 180_000,
-  reporter: [["list"], ["json", { outputFile: ".perf-output/pw-report.json" }]],
+  // json reporter 的相对 outputFile 按 **configDir**（= tests/perf/）解析，
+  // 于是它实际落到 tests/perf/.perf-output/pw-report.json——既不在 benchmark.yml 上传的
+  // 根 `.perf-output/` 产物里（retest job 拿不到），按仓库根 cwd 读 `.perf-output/pw-report.json`
+  // 的消费方（report.mjs）也读不到。改成按 **cwd** 解析的绝对路径，与产物落点一致（issue #247）。
+  // PERF_PW_REPORT 让复测轮写 `pw-report-retest.json`，从而不覆盖首轮报告（否则 final 的覆盖分母会错）。
+  reporter: [
+    ["list"],
+    [
+      "json",
+      {
+        outputFile: resolve(
+          process.cwd(),
+          process.env.PERF_PW_REPORT ?? ".perf-output/pw-report.json",
+        ),
+      },
+    ],
+  ],
   use: {
     baseURL: BASE_URL,
     trace: "off",

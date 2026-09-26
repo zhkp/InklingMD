@@ -17,7 +17,7 @@
 //   2 = 没测到（playwright 启动失败、场景缺失等 infra 故障）
 
 import { spawn, execSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import {
   buildRunEnv,
@@ -103,6 +103,12 @@ function readRetestList() {
   }
 }
 
+/** 数一数某轮 raw 目录里落盘了几份采样（用于判断"整轮没测到"还是"部分场景没测到"） */
+function countRawSamples(dir) {
+  if (!existsSync(dir)) return 0;
+  return readdirSync(dir).filter((f) => f.endsWith(".json")).length;
+}
+
 async function main() {
   if (!existsSync(PW_CLI)) {
     console.error(`[perf] 未找到 Playwright CLI：${PW_CLI}`);
@@ -165,10 +171,21 @@ async function main() {
 
     const code1 = await runCommand(pwArgs, baseEnv);
     if (code1 !== 0) {
-      console.error(
-        `[perf] 测量阶段失败（playwright exit=${code1}）。未产出完整采样，按 infra 故障处理。`,
+      // 方向 2（issue #247）：单场景超时/失败不再整轮作废。
+      // playwright 退出非 0 只说明"有场景没跑完"，不代表"整轮没测到"——只要还有采样落盘，
+      // 就让 check / 复测 / final 照常跑下去，未测量场景由 final 统一列清单并 exit 2。
+      // raw 目录为空才是真的没测到（server 起不来、启动即崩），维持旧行为直接 exit 2。
+      const sampleCount = countRawSamples(resolve(OUT_DIR, "raw"));
+      if (sampleCount === 0) {
+        console.error(
+          `[perf] 测量阶段失败（playwright exit=${code1}）且未落盘任何采样，按 infra 故障处理。`,
+        );
+        process.exit(2);
+      }
+      console.warn(
+        `[perf] 测量阶段 playwright exit=${code1}，但已落盘 ${sampleCount} 份采样——继续判定；` +
+          `未测量的场景由 final 报告统一列出并以 exit 2 报出。`,
       );
-      process.exit(2);
     }
 
     const checkCode = await runCommand(["tests/perf/report.mjs", "--phase=check"]);
@@ -206,6 +223,9 @@ async function main() {
       ...baseEnv,
       PERF_SCENARIO: suspects.join(","),
       PERF_RAW_DIR: ".perf-output/raw-retest",
+      // 复测轮写到独立文件：否则会覆盖首轮 pw-report.json，
+      // 使 final 的「应测场景」分母只剩复测的少数几个（覆盖核算全错，issue #247）。
+      PERF_PW_REPORT: ".perf-output/pw-report-retest.json",
     });
     if (retestCode !== 0) {
       // 复测跑挂既不是"有回归"也不是"没回归"：按 infra 故障处理，不做无根据的判定
