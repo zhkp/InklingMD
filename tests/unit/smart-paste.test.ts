@@ -417,6 +417,25 @@ describe("#219 网页富文本 HTML → Markdown 结构", () => {
     expect(hrefs).toEqual(["https://x.com/1%7C2"]);
   });
 
+  it("表格单元格内图片 alt 含未编码 |：粘贴后列结构不拆裂且 alt 完整（#248 同类第三路径）", async () => {
+    const h = await make();
+    h.paste({
+      "text/html":
+        '<table><tr><th>a</th></tr><tr><td><img src="https://x.com/i.png" alt="i|j"></td></tr></table>',
+      "text/plain": "a i|j",
+    });
+    const doc = h.view.state.doc;
+    // 列数与表头一致：alt 里的 | 不得被当成列分隔
+    const cols: number[] = [];
+    doc.descendants((n) => {
+      if (n.type.name === "table_row" || n.type.name === "table_header_row") cols.push(n.childCount);
+      return true;
+    });
+    expect(cols).toEqual([1, 1]);
+    // 转义往返：Markdown 里的 `\|` 解析回 alt 属性 `|`
+    expect(findNode(doc, "image")?.attrs.alt).toBe("i|j");
+  });
+
   it("编辑器内部复制（data-pm-slice）不做二次转换：与默认行为一致", async () => {
     const html =
       '<meta charset="utf-8"><h2 data-pm-slice="1 1 []">内部</h2><p>复制 <strong>内容</strong></p>';

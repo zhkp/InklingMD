@@ -198,9 +198,12 @@ function inlineOf(node: Node, ctx: InlineCtx): string {
     case "img": {
       const src = el.getAttribute("src");
       if (!src) return "";
-      const alt = encodeSentinels(
-        collapseWhitespace(el.getAttribute("alt") ?? "").trim().replace(/[\\[\]]/g, "\\$&"),
-      );
+      // alt 与目标/标题同理：表格单元格内裸 `|` 会被按列分隔切分（#248 同类第三路径），
+      // 用反斜杠转义——CommonMark 解析 alt 时会把 `\|` 还原为 `|`
+      const altText = collapseWhitespace(el.getAttribute("alt") ?? "")
+        .trim()
+        .replace(/[\\[\]]/g, "\\$&");
+      const alt = encodeSentinels(ctx.inTable ? altText.replace(/\|/g, "\\|") : altText);
       return `![${alt}](${formatDestination(src, ctx.inTable)}${formatTitle(el.getAttribute("title"), ctx.inTable)})`;
     }
     case "input":
