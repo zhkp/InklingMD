@@ -12,6 +12,9 @@ pub use file_index::list_workspace_files;
 pub mod search;
 pub use search::search_in_workspace;
 
+pub mod assets;
+pub use assets::{download_remote_image, find_asset_by_hash};
+
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 use std::fs;

@@ -1,4 +1,4 @@
-import type { FileNode } from "./fs";
+import type { FileNode, RemoteImage } from "./fs";
 
 /** mock 文件树（浏览器开发用） */
 export const MOCK_TREE: FileNode = {
@@ -169,4 +169,51 @@ export function collectMockMarkdownFiles(root: string): string[] {
   };
   walk(node);
   return out.sort();
+}
+
+/** mock 二进制文件表（浏览器无真实 fs；图片粘贴落盘记录在这里） */
+export const MOCK_BINARY_FILES = new Map<string, Uint8Array>();
+
+async function sha256HexOf(data: Uint8Array): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", data as unknown as ArrayBuffer);
+  return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/** 与 Rust find_asset_by_hash 同语义：只看目录的直接子文件，先比大小再比哈希 */
+export async function findMockBinaryByHash(
+  dirPath: string,
+  size: number,
+  sha256: string,
+): Promise<string | null> {
+  const prefix = dirPath.replace(/\/+$/, "") + "/";
+  const names = [...MOCK_BINARY_FILES.keys()]
+    .filter((p) => p.startsWith(prefix) && !p.slice(prefix.length).includes("/"))
+    .sort();
+  for (const path of names) {
+    const data = MOCK_BINARY_FILES.get(path)!;
+    if (data.byteLength !== size) continue;
+    if ((await sha256HexOf(data)) === sha256.toLowerCase()) return path.slice(prefix.length);
+  }
+  return null;
+}
+
+/**
+ * 浏览器 mock 的远程图片下载：用 fetch（no-referrer）模拟 Rust 端的判定逻辑，
+ * 让 E2E 可以通过 page.route 构造成功 / 403 / 非图片等响应。
+ */
+export async function mockDownloadRemoteImage(url: string): Promise<RemoteImage> {
+  const { RemoteImageError } = await import("./fs");
+  if (!/^https?:\/\//i.test(url)) throw new RemoteImageError("bad-url", `不支持的地址: ${url}`);
+  let resp: Response;
+  try {
+    resp = await fetch(url, { referrerPolicy: "no-referrer", credentials: "omit" });
+  } catch (e) {
+    throw new RemoteImageError("network", String(e));
+  }
+  if (resp.status === 403) throw new RemoteImageError("forbidden", "HTTP 403");
+  if (!resp.ok) throw new RemoteImageError("http-status", `HTTP ${resp.status}`);
+  const type = (resp.headers.get("content-type") ?? "").toLowerCase();
+  if (type.includes("svg")) throw new RemoteImageError("svg", type);
+  if (!type.startsWith("image/")) throw new RemoteImageError("not-image", type);
+  return { data: new Uint8Array(await resp.arrayBuffer()), mime: type.split(";")[0].trim() };
 }

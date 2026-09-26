@@ -2,10 +2,11 @@
 // 拦截编辑器的 drop 和 paste 事件，将图片文件复制到当前 Markdown 同目录的 assets/，
 // 并在编辑器中插入相对路径引用的图片节点。
 // markdown 源码保持相对路径（assets/xxx.png），便于连同文档一起迁移。
+// 落盘走 lib/assetStore：目录里已有相同内容的图片时直接复用（#220 去重）。
 
 import { Plugin, PluginKey } from "@milkdown/kit/prose/state";
 import type { EditorView } from "@milkdown/kit/prose/view";
-import { resolvePathFromDocument, writeBinaryFile } from "../../lib/fs";
+import { saveImageAsset, genAssetName } from "../../lib/assetStore";
 import { showMessage } from "../../lib/dialogs";
 
 const key = new PluginKey("inkling-image-upload");
@@ -25,10 +26,7 @@ function isImageFile(file: File): boolean {
 /** 生成唯一文件名：时间戳 + 随机串 + 原扩展名 */
 function genImageName(file: File): string {
   const m = file.name.match(/(\.[^.]+)$/);
-  const ext = m ? m[1].toLowerCase() : ".png";
-  const ts = Date.now();
-  const rand = Math.random().toString(36).slice(2, 8);
-  return `${ts}-${rand}${ext}`;
+  return genAssetName(m ? m[1] : ".png");
 }
 
 function fileToDataUrl(file: File): Promise<string> {
@@ -45,7 +43,7 @@ function fileToDataUrl(file: File): Promise<string> {
  * 草稿 tab 的 path 形如 "untitled-N"（见 tabs.ts newTab），并非空字符串，
  * 仅判空会漏掉草稿场景，导致 resolvePathFromDocument 按 CWD 解析出错误路径。
  */
-function isUntitledPath(documentPath: string): boolean {
+export function isUntitledPath(documentPath: string): boolean {
   const p = documentPath.trim();
   return !p || p.startsWith("untitled-");
 }
@@ -77,15 +75,8 @@ async function insertImages(
       let relSrc: string;
       if (!isUntitledPath(documentPath)) {
         const buf = await file.arrayBuffer();
-        const name = genImageName(file);
-        const fullPath = await resolvePathFromDocument(
-          documentPath,
-          "assets",
-          name,
-        );
-        await writeBinaryFile(fullPath, new Uint8Array(buf));
-        // markdown 中用正斜杠相对路径（跨平台兼容）
-        relSrc = `assets/${name}`;
+        // markdown 中用正斜杠相对路径（跨平台兼容）；相同内容复用已有文件
+        relSrc = await saveImageAsset(documentPath, new Uint8Array(buf), genImageName(file));
       } else {
         // 未命名草稿（untitled-N 虚拟路径）没有可解析的本地目录，转 Data URL 内联插入；
         // 草稿另存到任意目录后图片依然随文档自带，不会产生失效的相对路径

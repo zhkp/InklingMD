@@ -276,7 +276,97 @@ export async function writeBinaryFile(
       data: uint8ArrayToBase64(data),
     });
   }
-  // 浏览器 mock：无操作
+  // 浏览器 mock：记录到内存二进制表（供 assets 去重与 E2E 断言）
+  const { MOCK_BINARY_FILES } = await import("./mockFs");
+  MOCK_BINARY_FILES.set(filePath, data.slice());
+}
+
+/**
+ * 在 assets 目录中按内容（大小 + SHA-256）查找已有的相同文件，返回文件名（#220 去重）。
+ * 目录不存在返回 null；浏览器 mock 在内存二进制表里查找。
+ */
+export async function findAssetByHash(
+  dirPath: string,
+  size: number,
+  sha256: string,
+): Promise<string | null> {
+  if (isTauri()) {
+    return (await invoke<string | null>("find_asset_by_hash", { dirPath, size, sha256 })) ?? null;
+  }
+  const { findMockBinaryByHash } = await import("./mockFs");
+  return findMockBinaryByHash(dirPath, size, sha256);
+}
+
+/** 远程图片下载结果（与 Rust 端 RemoteImage 对应） */
+export interface RemoteImage {
+  data: Uint8Array;
+  /** 按魔数识别出的 MIME（image/png 等） */
+  mime: string;
+}
+
+/** 远程图片下载失败的分类（与 src-tauri/src/commands/assets.rs 的错误标记保持契约一致） */
+export type RemoteImageErrorKind =
+  | "bad-url"
+  | "forbidden"
+  | "http-status"
+  | "timeout"
+  | "too-large"
+  | "not-image"
+  | "svg"
+  | "network";
+
+export class RemoteImageError extends Error {
+  constructor(
+    readonly kind: RemoteImageErrorKind,
+    message: string,
+  ) {
+    super(message);
+    this.name = "RemoteImageError";
+  }
+}
+
+const REMOTE_IMAGE_ERROR_MARKERS: [string, RemoteImageErrorKind][] = [
+  ["REMOTE_IMAGE_BAD_URL", "bad-url"],
+  ["REMOTE_IMAGE_FORBIDDEN", "forbidden"],
+  ["REMOTE_IMAGE_HTTP_STATUS", "http-status"],
+  ["REMOTE_IMAGE_TIMEOUT", "timeout"],
+  ["REMOTE_IMAGE_TOO_LARGE", "too-large"],
+  ["REMOTE_IMAGE_NOT_IMAGE", "not-image"],
+  ["REMOTE_IMAGE_SVG", "svg"],
+  ["REMOTE_IMAGE_NETWORK", "network"],
+];
+
+/** 把后端结构化错误映射为 RemoteImageError（未知错误归为 network） */
+export function mapRemoteImageError(error: unknown): RemoteImageError {
+  if (error instanceof RemoteImageError) return error;
+  const raw = error instanceof Error ? error.message : String(error);
+  const hit = REMOTE_IMAGE_ERROR_MARKERS.find(([marker]) => raw.startsWith(marker));
+  return new RemoteImageError(hit?.[1] ?? "network", raw);
+}
+
+function base64ToUint8Array(b64: string): Uint8Array {
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+/**
+ * 下载远程图片（#220）。
+ * 桌面端走 Rust download_remote_image（CSP 的 connect-src 不放行第三方域名，且多数图床
+ * 不带 CORS 头，前端 fetch 不可行）；浏览器 mock 用 fetch，便于 E2E 用路由拦截构造响应。
+ */
+export async function downloadRemoteImage(url: string): Promise<RemoteImage> {
+  if (isTauri()) {
+    try {
+      const res = await invoke<{ data: string; mime: string }>("download_remote_image", { url });
+      return { data: base64ToUint8Array(res.data), mime: res.mime };
+    } catch (e) {
+      throw mapRemoteImageError(e);
+    }
+  }
+  const { mockDownloadRemoteImage } = await import("./mockFs");
+  return mockDownloadRemoteImage(url);
 }
 
 /**

@@ -59,6 +59,17 @@ identifier = "allow-asset-dir"
 description = "Allow allow_asset_dir command"
 commands.allow = ["allow_asset_dir"]
 
+# Smart Paste 远程图片落盘（#220）：下载远程图片 + assets 目录内容哈希查重
+[[permission]]
+identifier = "allow-download-remote-image"
+description = "Allow download_remote_image command"
+commands.allow = ["download_remote_image"]
+
+[[permission]]
+identifier = "allow-find-asset-by-hash"
+description = "Allow find_asset_by_hash command"
+commands.allow = ["find_asset_by_hash"]
+
 # 全局搜索命令
 [[permission]]
 identifier = "allow-search-in-workspace"

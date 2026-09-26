@@ -24,6 +24,8 @@
     "allow-create-file",
     "allow-create-dir",
     "allow-asset-dir",
+    "allow-download-remote-image",
+    "allow-find-asset-by-hash",
     "allow-search-in-workspace",
     "allow-list-workspace-files",
     "allow-pandoc-check",

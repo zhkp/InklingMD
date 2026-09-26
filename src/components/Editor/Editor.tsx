@@ -24,6 +24,7 @@ import { codeBlockView } from "./code-block-view";
 import { imageView } from "./image-node-view";
 import { imageUploadPlugin } from "./image-upload";
 import { smartPastePlugin } from "./smart-paste";
+import { remoteImagePlugin } from "./remote-image";
 import { linkClickPlugin } from "./link-click";
 import { outlineTrackerPlugin } from "./outline-tracker";
 import { markdownPublisherPlugin } from "./markdown-publisher";
@@ -180,6 +181,8 @@ function EditorInner({
               imageUploadPlugin(filePath),
               // Smart Paste：网页 HTML / Markdown 源码粘贴解析为富文本（#219/#229）
               smartPastePlugin({ parseMarkdown: (md) => ctx.get(parserCtx)(md) }),
+              // 粘贴进来的远程图片后台下载落盘到 assets/（#220）
+              remoteImagePlugin({ documentPath: filePath }),
               // 链接跟随：Ctrl/Cmd+点击打开外部链接或跳转内部锚点
               linkClickPlugin(),
               // 仅主编辑器发布大纲；分屏编辑器不传回调，避免覆盖主面板。

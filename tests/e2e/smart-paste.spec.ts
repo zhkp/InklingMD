@@ -1,10 +1,11 @@
-// E2E：Smart Paste（#219 / #229）
+// E2E：Smart Paste（#219 / #229 / #220）
 //
 // 在真实 Chromium 里走完整粘贴链路。两种注入方式：
 // - 构造 ClipboardEvent（DataTransfer 注入 text/html / text/plain）派发到编辑区——可精确控制
 //   剪贴板形态（如「只有 text/html、没有 files」的 macOS 图片复制）
 // - 真实系统剪贴板 + 键盘快捷键（Ctrl+V / Ctrl+Shift+V）——验证浏览器原生粘贴事件与
 //   「粘贴为纯文本」快捷键
+// 远程图片走浏览器 mock 的 fetch 下载，用 page.route 构造成功 / 403 响应。
 
 import { test, expect, type Page } from "@playwright/test";
 import { openMockWorkspace, openFile, MOD } from "./helpers";
@@ -133,6 +134,57 @@ test.describe("Smart Paste", () => {
     // 纯文本：字面 Markdown 源码，不生成新的 h3
     await expect(page.locator(PM)).toContainText("### 剪贴板标题");
     await expect(page.locator(`${PM} h3`)).toHaveCount(1);
+  });
+
+  test("SP6 远程图片（只有 text/html、没有 files）下载落盘并改为 assets/ 相对路径，重复粘贴复用同一文件（#220）", async ({ page }) => {
+    // 1x1 PNG
+    const png = Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==",
+      "base64",
+    );
+    // 只统计下载请求（fetch）；编辑区 <img> 在替换前显示远程地址产生的 image 请求不计
+    let downloads = 0;
+    await page.route("https://img.smartpaste.test/**", async (route) => {
+      if (route.request().resourceType() === "fetch") downloads++;
+      await route.fulfill({
+        status: 200,
+        headers: { "content-type": "image/png", "access-control-allow-origin": "*" },
+        body: png,
+      });
+    });
+    await focusDocEnd(page);
+    await dispatchPaste(page, { "text/html": '<p><img src="https://img.smartpaste.test/a.png" alt="远程图"></p>' });
+    await expect(page.locator(`${PM} img[alt="远程图"]`)).toHaveAttribute("src", /^assets\/\d+-[a-z0-9]+\.png$/, {
+      timeout: 10_000,
+    });
+    const first = await page.locator(`${PM} img[alt="远程图"]`).getAttribute("src");
+
+    await focusDocEnd(page);
+    await dispatchPaste(page, { "text/html": '<p><img src="https://img.smartpaste.test/b.png?copy=2" alt="第二次"></p>' });
+    await expect(page.locator(`${PM} img[alt="第二次"]`)).toHaveAttribute("src", first!, { timeout: 10_000 });
+    // 两次粘贴各下载一次（URL 不同），但内容相同 → 复用同一个 assets 文件
+    expect(downloads).toBe(2);
+
+    const md = await sourceText(page);
+    expect(md).toContain(`![远程图](${first})`);
+    expect(md).toContain(`![第二次](${first})`);
+  });
+
+  test("SP7 远程图片下载失败（403 防盗链）：保留远程链接并提示", async ({ page }) => {
+    await page.route("https://img.smartpaste.test/**", (route) =>
+      route.fulfill({ status: 403, headers: { "access-control-allow-origin": "*" }, body: "forbidden" }),
+    );
+    const dialog = page.waitForEvent("dialog");
+    await focusDocEnd(page);
+    await dispatchPaste(page, { "text/html": '<p><img src="https://img.smartpaste.test/hotlink.png" alt="防盗链"></p>' });
+    const d = await dialog;
+    expect(d.message()).toContain("已保留远程链接");
+    expect(d.message()).toContain("403");
+    await d.dismiss();
+    await expect(page.locator(`${PM} img[alt="防盗链"]`)).toHaveAttribute(
+      "src",
+      "https://img.smartpaste.test/hotlink.png",
+    );
   });
 
   test("SP9 超长 Markdown 源码（review 中卡死 6s / OOM 的量级）降级为纯文本、不卡主线程", async ({ page }) => {
