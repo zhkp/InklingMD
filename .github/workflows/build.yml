@@ -1,10 +1,14 @@
 name: Build
 
-# 触发范围与原 build-windows.yml 保持一致：main 推送、v* tag、手动
+# 触发范围：main 推送、v* tag、PR、手动
+# PR 只跑 test job（双平台单测 / Rust 单测 / E2E，见 #252），打包 job 在 PR 上显式跳过——
+# 打包成本高且 fork PR 的产物无发布用途，打包仍只在 main / tag / 手动时执行
 on:
   push:
     branches: [main]
     tags: ["v*"]
+  pull_request:
+    types: [opened, synchronize, reopened]
   workflow_dispatch:
 
 # 创建 Release、上传产物需要 contents: write 权限
@@ -91,8 +95,10 @@ jobs:
           retention-days: 7
 
   # Windows 构建：NSIS exe + MSI + 便携 zip
+  # PR 上跳过打包（#252）：PR 门禁只需 test job，此处显式跳过避免付打包成本
   build-windows:
     needs: test
+    if: github.event_name != 'pull_request'
     runs-on: windows-latest
     steps:
       - name: Checkout
@@ -153,8 +159,10 @@ jobs:
           if-no-files-found: error
 
   # Linux amd64 构建：AppImage + deb
+  # PR 上跳过打包（#252）：同上，PR 门禁只需 test job
   build-linux:
     needs: test
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-22.04
     steps:
       - name: Checkout
