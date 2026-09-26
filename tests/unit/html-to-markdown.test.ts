@@ -196,6 +196,19 @@ describe("htmlToMarkdown：列表", () => {
     expect(lines.map((l) => l.trim())).toEqual(Array.from({ length: 8 }, (_, i) => `- L${i + 1}`));
   });
 
+  it("相邻同型列表之间插入 <!-- -->，不被并成一个松散列表（#249）", () => {
+    expect(md("<ul><li>a</li></ul><ul><li>b</li></ul>")).toBe("- a\n\n<!-- -->\n\n- b");
+    expect(md("<ol><li>a</li></ol><ol><li>b</li></ol>")).toBe("1. a\n\n<!-- -->\n\n1. b");
+    // 起始编号不同也会被合并并把编号改写为 2.，必须同样分隔
+    expect(md('<ol start="5"><li>a</li></ol><ol><li>b</li></ol>')).toBe("5. a\n\n<!-- -->\n\n1. b");
+    // 异型列表本就不合并：不插分隔
+    expect(md("<ul><li>a</li></ul><ol><li>b</li></ol>")).toBe("- a\n\n1. b");
+    // 引用块内的相邻同型列表同病同治
+    expect(md("<blockquote><ul><li>a</li></ul><ul><li>b</li></ul></blockquote>")).toBe(
+      "> - a\n>\n> <!-- -->\n>\n> - b",
+    );
+  });
+
   it("Word 列表段落（MsoListParagraph + 手写项目符号）转为列表", () => {
     const html =
       '<p class="MsoListParagraphCxSpFirst"><span>·<span>&nbsp;&nbsp;&nbsp;&nbsp;</span></span>苹果</p>' +

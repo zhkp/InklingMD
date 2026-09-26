@@ -394,6 +394,29 @@ describe("#219 网页富文本 HTML → Markdown 结构", () => {
     expect(countNodes(doc, "html")).toBe(0);
   });
 
+  it("相邻同型列表粘贴后保持两个列表，往返幂等（#249）", async () => {
+    const h = await make();
+    h.paste({
+      "text/html": "<ul><li>a</li></ul><ul><li>b</li></ul>",
+      "text/plain": "a b",
+    });
+    expect(countNodes(h.view.state.doc, "bullet_list")).toBe(2);
+    // 分隔注释进入文档（随 serializer 保留），二次解析结构不变
+    const md2 = h.markdown();
+    expect(md2).toContain("<!-- -->");
+    expect(countNodes(h.parse(md2), "bullet_list")).toBe(2);
+  });
+
+  it("相邻有序列表（起始编号不同）粘贴后编号不被改写（#249）", async () => {
+    const h = await make();
+    h.paste({
+      "text/html": '<ol start="5"><li>a</li></ol><ol><li>b</li></ol>',
+      "text/plain": "a b",
+    });
+    expect(countNodes(h.view.state.doc, "ordered_list")).toBe(2);
+    expect(h.markdown()).toContain("5. a");
+  });
+
   it("编辑器内部复制（data-pm-slice）不做二次转换：与默认行为一致", async () => {
     const html =
       '<meta charset="utf-8"><h2 data-pm-slice="1 1 []">内部</h2><p>复制 <strong>内容</strong></p>';

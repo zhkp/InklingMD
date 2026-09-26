@@ -10,6 +10,8 @@ A **WYSIWYG** Markdown editor built with [Tauri](https://tauri.app) and *Milkdow
 - Math via [KaTeX](docs/math.md)
   - inline and block formulas
 
+<!-- -->
+
 - [x] Smart Paste
 - [ ] Plugin system
 
