@@ -23,6 +23,7 @@ import "@milkdown/kit/prose/tables/style/tables.css";
 import { codeBlockView } from "./code-block-view";
 import { imageView } from "./image-node-view";
 import { imageUploadPlugin } from "./image-upload";
+import { smartPastePlugin } from "./smart-paste";
 import { linkClickPlugin } from "./link-click";
 import { outlineTrackerPlugin } from "./outline-tracker";
 import { markdownPublisherPlugin } from "./markdown-publisher";
@@ -175,7 +176,10 @@ function EditorInner({
                 onChange: (md) => onChangeRef.current?.(md),
               }),
               // 图片拖拽/粘贴上传：复制到当前文档的 assets/ 并插入相对路径
+              // （须排在 Smart Paste 之前：剪贴板带图片文件时优先按文件落盘）
               imageUploadPlugin(filePath),
+              // Smart Paste：网页 HTML 粘贴解析为富文本（#219）
+              smartPastePlugin({ parseMarkdown: (md) => ctx.get(parserCtx)(md) }),
               // 链接跟随：Ctrl/Cmd+点击打开外部链接或跳转内部锚点
               linkClickPlugin(),
               // 仅主编辑器发布大纲；分屏编辑器不传回调，避免覆盖主面板。

@@ -7,6 +7,7 @@ import {
   matchBinding,
   captureFromEvent,
   SHORTCUT_DEFS,
+  RESERVED_SHORTCUTS,
 } from "../../src/store/shortcuts";
 import { getSourceModeConflictBindings } from "../../src/lib/codemirror-shared";
 
@@ -184,7 +185,7 @@ describe("formatBinding", () => {
 });
 
 describe("SHORTCUT_DEFS", () => {
-  it("包含全部 7 个可自定义快捷键", () => {
+  it("包含全部 8 个可自定义快捷键", () => {
     const ids = SHORTCUT_DEFS.map((d) => d.id);
     expect(ids).toEqual([
       "find",
@@ -194,7 +195,15 @@ describe("SHORTCUT_DEFS", () => {
       "openSettings",
       "toggleSourceMode",
       "quickOpen",
+      "pastePlainText",
     ]);
+  });
+
+  it("粘贴为纯文本的默认绑定是 mod+shift+v 且不与保留快捷键冲突（#219）", () => {
+    const def = SHORTCUT_DEFS.find((d) => d.id === "pastePlainText");
+    expect(def?.default).toBe("mod+shift+v");
+    expect(RESERVED_SHORTCUTS.map((r) => r.binding)).not.toContain("mod+shift+v");
+    expect(getSourceModeConflictBindings()).not.toContain("mod+shift+v");
   });
 
   it("每个定义都有默认绑定", () => {

@@ -1,0 +1,22 @@
+<html><head><meta charset="utf-8"><title>深入理解 ProseMirror 事务</title><style>.post{font-family:serif}</style><script>window.dataLayer=[];</script></head>
+<body><header class="site-header"><nav><a href="/">首页</a> | <a href="/archive">归档</a></nav></header>
+<main><article class="post">
+<h1 class="post-title">深入理解 ProseMirror 事务</h1>
+<p class="meta"><time datetime="2026-09-01">2026-09-01</time> · 阅读约 5 分钟</p>
+<p>ProseMirror 的每一次修改都是一个 <code>Transaction</code>，它继承自 <code>Transform</code>。下面是一个<strong>最小示例</strong>：</p>
+<pre class="language-typescript"><code class="language-typescript"><span class="token keyword">const</span> tr <span class="token operator">=</span> view<span class="token punctuation">.</span>state<span class="token punctuation">.</span>tr<span class="token punctuation">;</span>
+tr<span class="token punctuation">.</span><span class="token function">insertText</span><span class="token punctuation">(</span><span class="token string">"hello"</span><span class="token punctuation">)</span><span class="token punctuation">;</span>
+view<span class="token punctuation">.</span><span class="token function">dispatch</span><span class="token punctuation">(</span>tr<span class="token punctuation">)</span><span class="token punctuation">;</span></code></pre>
+<blockquote><p>提示：<em>不要</em>在 <code>dispatch</code> 之后继续复用同一个 <code>tr</code>。</p></blockquote>
+<h2 id="mapping">位置映射</h2>
+<p>文档变化后旧位置需要经过 <code>tr.mapping.map(pos)</code> 映射，详见<a href="https://prosemirror.net/docs/guide/#transform.mapping" title="官方指南">官方指南</a>。</p>
+<figure><img src="https://blog.example.com/images/mapping.png" alt="映射示意图" loading="lazy"><figcaption>图 1：位置映射</figcaption></figure>
+<ol><li>创建事务</li><li>应用步骤<ol><li>替换</li><li>标记</li></ol></li><li>派发</li></ol>
+<pre>无语言的
+  纯文本代码块</pre>
+<hr>
+<p>本文完。<span style="color:#999">（转载请注明出处）</span></p>
+</article>
+<aside class="share"><button onclick="share()">分享</button><iframe title="评论区"></iframe></aside></main>
+<footer><p>© 2026 示例博客</p></footer>
+<script>window.dataLayer.push("pageview")</script></body></html>

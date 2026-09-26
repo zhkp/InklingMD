@@ -33,6 +33,7 @@ const APP_SHORTCUT_DESC: Record<ShortcutId, string> = {
   openSettings: "打开偏好设置",
   toggleSourceMode: "切换源代码模式",
   quickOpen: "快速打开文件",
+  pastePlainText: "粘贴为纯文本（跳过 Smart Paste 转换）",
 };
 
 const STATIC_GROUPS: ShortcutGroup[] = [

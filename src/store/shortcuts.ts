@@ -19,7 +19,8 @@ export type ShortcutId =
   | "showShortcuts"
   | "openSettings"
   | "toggleSourceMode"
-  | "quickOpen";
+  | "quickOpen"
+  | "pastePlainText";
 
 export interface ShortcutDef {
   id: ShortcutId;
@@ -39,6 +40,10 @@ export const SHORTCUT_DEFS: ShortcutDef[] = [
   // 与 Typora / VS Code 一致：mod+p 是「快速打开」。CodeMirror 默认 keymap 不占用
   // Mod-p，故源码模式下不会双重触发（由 shortcuts.test 断言锁定，防将来 CM 升级漂移）。
   { id: "quickOpen", desc: "快速打开文件", default: "mod+p" },
+  // Smart Paste（#219）的逃生口：跳过 HTML/Markdown 转换，按纯文本粘贴。
+  // 由编辑器插件（smart-paste.ts）处理而非全局监听：只在所见即所得编辑区内生效，
+  // 源码模式本就只收纯文本。
+  { id: "pastePlainText", desc: "粘贴为纯文本", default: "mod+shift+v" },
 ];
 
 /**

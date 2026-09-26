@@ -70,8 +70,14 @@ function isDangerousAttr(name: string): boolean {
   return name.toLowerCase().startsWith("on");
 }
 
-/** 检查 URL 是否安全（禁止 javascript: data: 协议，允许 http/https/mailto/锚点/相对路径） */
-function isSafeUrl(url: string): boolean {
+/**
+ * 检查 URL 是否安全（禁止 javascript: data: 协议，允许 http/https/mailto/锚点/相对路径）
+ *
+ * allowRelative（仅粘贴路径开启，#219）：无协议头的相对路径（`docs/a.md`、`./x.png`）
+ * 按原样保留（与 Typora 一致）。判定前先按 URL 解析器的做法剔除 C0 控制字符与空白，
+ * 防止 `java\nscript:` 这类「拆开协议头」的写法被误当成相对路径放行。
+ */
+export function isSafeUrl(url: string, allowRelative = false): boolean {
   const trimmed = url.trim().toLowerCase();
   if (trimmed === "") return true;
   // 锚点、相对路径、协议白名单
@@ -79,6 +85,11 @@ function isSafeUrl(url: string): boolean {
   if (/^(https?:|mailto:|tel:)/i.test(trimmed)) return true;
   // data: 仅允许图片类型
   if (/^data:image\//i.test(trimmed)) return true;
+  if (allowRelative) {
+    // eslint-disable-next-line no-control-regex
+    const compact = trimmed.replace(/[\u0000-\u0020\u007f]+/g, "");
+    return !/^[a-z][a-z0-9+.-]*:/.test(compact);
+  }
   return false;
 }
 
@@ -160,23 +171,91 @@ function containsBlockTag(html: string): boolean {
 }
 
 /**
+ * 粘贴模式（#219）下整棵丢弃（连同子节点）的标签：脚本/样式/嵌入对象/表单控件/
+ * 文档元信息等——它们要么是攻击面，要么是「不可编辑的网页结构」，文本内容也不该进文档。
+ */
+const PASTE_DROP_TAGS = new Set([
+  "script", "style", "noscript", "template", "iframe", "frame", "frameset", "object",
+  "embed", "applet", "head", "title", "meta", "link", "base", "textarea", "select",
+  "option", "optgroup", "button", "canvas", "video", "audio", "source", "track", "map",
+  "area", "svg", "math", "xml", "dialog", "datalist", "output", "progress", "meter",
+]);
+
+/**
+ * 粘贴模式下改写为 div 的未知块级容器：保留「块边界」再递归取子节点，
+ * 否则相邻两个 `<section>` 直接拆包会把两段文字粘成一段。
+ */
+const PASTE_BLOCK_CONTAINERS = new Set([
+  "section", "article", "main", "header", "footer", "nav", "aside", "figure",
+  "figcaption", "address", "center", "dl", "dt", "dd", "caption", "form",
+  "fieldset", "legend", "hgroup", "body", "html", "search", "menu", "listing",
+]);
+
+/** 粘贴模式额外放行的标签（渲染白名单之外、但对结构转换有意义且无害） */
+const PASTE_EXTRA_TAGS = new Set(["del", "strike", "ins", "tfoot", "input"]);
+
+/** 粘贴模式额外放行的标签属性 */
+const PASTE_EXTRA_TAG_ATTRS: Record<string, Set<string>> = {
+  ol: new Set(["start"]),
+  input: new Set(["type", "checked"]),
+};
+
+export interface SanitizeOptions {
+  /**
+   * render（默认）：HTML 嵌入渲染路径，未知标签连同子节点丢弃，结果带 LRU 缓存。
+   * paste：粘贴路径（#219）——危险标签整棵丢弃；未知块级容器改写为 div、未知行内
+   * 标签拆包保留子节点（「无法映射的块级容器：递归取子节点」）；相对链接保留；
+   * 不进缓存（粘贴内容一次性，不应挤占渲染缓存）。
+   */
+  mode?: "render" | "paste";
+}
+
+/**
  * 解析并过滤 HTML 字符串为安全的 DocumentFragment。
  * 用 DOMParser（不执行脚本、不加载资源）解析，白名单遍历克隆。
  * 导出供测试验证白名单过滤逻辑。
  */
-export function sanitizeHTML(value: string): globalThis.Node {
-  const cached = cacheGet(value);
-  if (cached) return cached.cloneNode(true);
+export function sanitizeHTML(value: string, options: SanitizeOptions = {}): globalThis.Node {
+  const paste = options.mode === "paste";
+  if (!paste) {
+    const cached = cacheGet(value);
+    if (cached) return cached.cloneNode(true);
+  }
 
   // DOMParser 解析不执行 script，比 innerHTML 安全
   const doc = new DOMParser().parseFromString(value, "text/html");
   const fragment = document.createDocumentFragment();
 
   // 递归过滤克隆节点
+  const appendChildren = (src: Element, target: globalThis.Node, inSvg: boolean): void => {
+    for (const child of Array.from(src.childNodes)) {
+      if (child.nodeType === globalThis.Node.TEXT_NODE) {
+        target.appendChild(document.createTextNode(child.textContent ?? ""));
+      } else if (child.nodeType === globalThis.Node.ELEMENT_NODE) {
+        cloneFiltered(child as Element, target, inSvg);
+      }
+    }
+  };
+
   const cloneFiltered = (src: Element, parent: globalThis.Node, isInsideSvg = false): void => {
     const rawTag = src.tagName;
-    const lowerTag = rawTag.toLowerCase();
-    if (!ALLOWED_TAGS.has(lowerTag)) return; // 不在白名单的标签直接丢弃（不保留子节点，避免结构混乱）
+    let lowerTag = rawTag.toLowerCase();
+    if (paste) {
+      if (PASTE_DROP_TAGS.has(lowerTag)) return;
+      // 任务列表复选框之外的 input 一律丢弃
+      if (lowerTag === "input" && (src.getAttribute("type") ?? "").toLowerCase() !== "checkbox") return;
+      if (!ALLOWED_TAGS.has(lowerTag) && !PASTE_EXTRA_TAGS.has(lowerTag)) {
+        if (PASTE_BLOCK_CONTAINERS.has(lowerTag)) {
+          lowerTag = "div";
+        } else {
+          // 未知行内标签（font、o:p、g-emoji、label…）：拆包，子节点并入父节点
+          appendChildren(src, parent, false);
+          return;
+        }
+      }
+    } else if (!ALLOWED_TAGS.has(lowerTag)) {
+      return; // 不在白名单的标签直接丢弃（不保留子节点，避免结构混乱）
+    }
 
     const inSvg = isInsideSvg ? lowerTag !== "foreignobject" : lowerTag === "svg";
     // SVG 元素必须用 SVG 命名空间创建，foreignObject 内部的 HTML 元素用标准 HTML 命名空间
@@ -191,12 +270,13 @@ export function sanitizeHTML(value: string): globalThis.Node {
       if (isDangerousAttr(lowerName)) continue;
       const allowed =
         ALLOWED_GLOBAL_ATTRS.has(lowerName) ||
-        ALLOWED_TAG_ATTRS[lowerTag]?.has(lowerName);
+        ALLOWED_TAG_ATTRS[lowerTag]?.has(lowerName) ||
+        (paste && PASTE_EXTRA_TAG_ATTRS[lowerTag]?.has(lowerName));
       if (!allowed) continue;
 
       let val = attr.value;
       // href/src/xlink:href 做协议检查
-      if ((lowerName === "href" || lowerName === "src" || lowerName === "xlink:href") && !isSafeUrl(val)) continue;
+      if ((lowerName === "href" || lowerName === "src" || lowerName === "xlink:href") && !isSafeUrl(val, paste)) continue;
       // style 单独过滤
       if (lowerName === "style") {
         val = sanitizeStyle(val);
@@ -214,23 +294,12 @@ export function sanitizeHTML(value: string): globalThis.Node {
 
     // 递归子节点：如果当前节点是 foreignObject，则其内部子节点进入 HTML 命名空间（isInsideSvg = false）
     const nextInSvg = lowerTag === "foreignobject" ? false : inSvg;
-    for (const child of Array.from(src.childNodes)) {
-      if (child.nodeType === globalThis.Node.TEXT_NODE) {
-        el.appendChild(document.createTextNode(child.textContent ?? ""));
-      } else if (child.nodeType === globalThis.Node.ELEMENT_NODE) {
-        cloneFiltered(child as Element, el, nextInSvg);
-      }
-    }
+    appendChildren(src, el, nextInSvg);
   };
 
-  for (const child of Array.from(doc.body.childNodes)) {
-    if (child.nodeType === globalThis.Node.TEXT_NODE) {
-      fragment.appendChild(document.createTextNode(child.textContent ?? ""));
-    } else if (child.nodeType === globalThis.Node.ELEMENT_NODE) {
-      cloneFiltered(child as Element, fragment, false);
-    }
-  }
+  appendChildren(doc.body, fragment, false);
 
+  if (paste) return fragment;
   // 缓存原始 fragment（非克隆）
   cacheSet(value, fragment);
   return fragment.cloneNode(true);
