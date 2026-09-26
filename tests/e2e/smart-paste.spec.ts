@@ -1,4 +1,4 @@
-// E2E：Smart Paste（#219）
+// E2E：Smart Paste（#219 / #229）
 //
 // 在真实 Chromium 里走完整粘贴链路。两种注入方式：
 // - 构造 ClipboardEvent（DataTransfer 注入 text/html / text/plain）派发到编辑区——可精确控制
@@ -86,7 +86,15 @@ test.describe("Smart Paste", () => {
     expect(md).not.toMatch(/onclick|onerror|__spXss|<script/);
   });
 
-  test("SP3 纯文本粘贴按原样插入（不做转换）", async ({ page }) => {
+  test("SP2 粘贴 Markdown 源码渲染为富文本（#229）", async ({ page }) => {
+    await focusDocEnd(page);
+    await dispatchPaste(page, { "text/plain": "## 来自 VS Code\n\n- 列表项\n\n```bash\npnpm dev\n```\n" });
+    await expect(page.locator(`${PM} h2`, { hasText: "来自 VS Code" })).toBeVisible();
+    await expect(page.locator(`${PM} li`, { hasText: "列表项" })).toBeVisible();
+    await expect(page.locator(PM)).not.toContainText("## 来自");
+  });
+
+  test("SP3 普通中文段落不误判，按原样插入", async ({ page }) => {
     await focusDocEnd(page);
     await dispatchPaste(page, { "text/plain": "今天天气很好，我们去公园散步。" });
     await expect(page.locator(`${PM} p`, { hasText: "今天天气很好，我们去公园散步。" })).toBeVisible();
@@ -125,6 +133,54 @@ test.describe("Smart Paste", () => {
     // 纯文本：字面 Markdown 源码，不生成新的 h3
     await expect(page.locator(PM)).toContainText("### 剪贴板标题");
     await expect(page.locator(`${PM} h3`)).toHaveCount(1);
+  });
+
+  test("SP9 超长 Markdown 源码（review 中卡死 6s / OOM 的量级）降级为纯文本、不卡主线程", async ({ page }) => {
+    // 长行文本：让「按纯文本插入」本身足够便宜（段落数少），耗时差异只来自是否整篇解析。
+    // 短行极多时（数万段落）ProseMirror 默认的纯文本粘贴本身就慢，上游 main 同样如此，不属本 PR
+    const unit = `## 小节\n\n${"正文 **粗体** 与 `代码`。".repeat(150)}\n\n- 列表项\n\n`;
+    for (const size of [160 * 1024, 1_100_000]) {
+      await focusDocEnd(page);
+      const elapsed = await page.evaluate(
+        ({ unit, size }) => {
+          const text = unit.repeat(Math.ceil(size / unit.length)).slice(0, size);
+          const dt = new DataTransfer();
+          dt.setData("text/plain", text);
+          const t0 = performance.now();
+          document
+            .querySelector(".ProseMirror")!
+            .dispatchEvent(new ClipboardEvent("paste", { clipboardData: dt, bubbles: true, cancelable: true }));
+          return performance.now() - t0;
+        },
+        { unit, size },
+      );
+      // 修复前：160K 约 6s、1.1M OOM；纯文本粘贴同量级为数十到数百毫秒
+      expect(elapsed, `${size} 字符`).toBeLessThan(3000);
+      await expect(page.locator(`${PM} h2`, { hasText: "小节" })).toHaveCount(0);
+      await expect(page.locator(PM)).toContainText("## 小节");
+      await page.keyboard.press(`${MOD}+z`);
+    }
+  });
+
+  test("SP10 拖放 Markdown 文本保持原行为（只有粘贴才解析）", async ({ page }) => {
+    await focusDocEnd(page);
+    await page.evaluate(() => {
+      const pm = document.querySelector(".ProseMirror")!;
+      const target = pm.lastElementChild!.getBoundingClientRect();
+      const dt = new DataTransfer();
+      dt.setData("text/plain", "## 拖放标题\n\n- 拖放列表");
+      pm.dispatchEvent(
+        new DragEvent("drop", {
+          dataTransfer: dt,
+          bubbles: true,
+          cancelable: true,
+          clientX: target.left + 4,
+          clientY: target.top + target.height / 2,
+        }),
+      );
+    });
+    await expect(page.locator(PM)).toContainText("## 拖放标题");
+    await expect(page.locator(`${PM} h2`, { hasText: "拖放标题" })).toHaveCount(0);
   });
 
   test("SP8 源码模式不做 HTML 转换，保持纯文本", async ({ page }) => {

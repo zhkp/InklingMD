@@ -1,13 +1,14 @@
-// Smart Paste（#217 Epic：#219）
+// Smart Paste（#217 Epic：#219 / #229）
 //
-// 网页/富文本 HTML：sanitizeHTML（粘贴模式）清洗 → htmlToMarkdown 结构映射 →
-// 「Markdown 文本 → Milkdown parser → Slice」。**清洗必须在结构映射之前**：粘贴路径是
-// 本特性最大的攻击面。Markdown 解析出口与「粘贴 Markdown 源码」（#229）共用。
+// 两条输入、一条出口——「Markdown 文本 → Milkdown parser → Slice」：
+// - 纯文本（#229）：clipboardTextParser 判定「看起来像 Markdown 源码」（≥2 类独立信号）
+//   时按 Markdown 解析成富文本；判定不成立时返回 null，走 ProseMirror 默认纯文本行为。
+//   只作用于粘贴（拖放文本保持原行为），且超过 MAX_MARKDOWN_PASTE_CHARS 的文本不解析
+// - 网页/富文本 HTML（#219）：sanitizeHTML（粘贴模式）清洗 → htmlToMarkdown 结构映射 →
+//   同一条 Markdown 解析出口。**清洗必须在结构映射之前**：粘贴路径是本特性最大的攻击面
 //
 // 不转换的情形（保持 ProseMirror 默认行为）：
-// - 纯文本粘贴
 // - 编辑器内部复制（HTML 带 data-pm-slice，默认路径能无损还原）
-// - 代码编辑器 / IDE 复制的无结构着色 HTML（结构信息在 text/plain 里）
 // - 光标在代码块内（默认路径按纯文本插入）；表格内（交给 prosemirror-tables 的粘贴逻辑）
 // - 「粘贴为纯文本」（mod+shift+v，可在快捷键设置中自定义）
 // - 源码模式（CodeMirror）本就只收纯文本，不经过本插件
@@ -21,10 +22,24 @@ import { Transform } from "@milkdown/kit/prose/transform";
 import { closeHistory } from "@milkdown/kit/prose/history";
 import { isSafeUrl, sanitizeHTML } from "./html-view";
 import { htmlToMarkdown } from "./html-to-markdown";
+import { looksLikeMarkdown, SCAN_LIMIT } from "./markdown-detect";
 import { matchBinding, useShortcuts } from "../../store/shortcuts";
 
 /** HTML 元素数上限：超出整体降级为纯文本（大内容粘贴的主线程保护） */
 export const MAX_PASTE_HTML_ELEMENTS = 5000;
+
+/**
+ * Markdown 源码解析的文本长度上限（UTF-16 码元数，与特征判定的扫描上限同一个值）：
+ * 超出按纯文本粘贴。与 HTML 路径的元素上限对等的主线程保护——解析 + 渲染成本随长度
+ * 近似线性增长，实测（Chromium，dev 构建）：真实文档（CHANGELOG，约 40K 字符）约 0.3s；
+ * 代码块/表格密集的最坏情况 64K 约 1.7s、128K 约 3.7s、160K 约 6s，1.1M 触发 OOM。
+ */
+export const MAX_MARKDOWN_PASTE_CHARS = SCAN_LIMIT;
+
+/** 值得按 Markdown 源码解析：长度在上限内，且命中至少 2 类独立信号 */
+export function isParsableMarkdownSource(text: string): boolean {
+  return text.length <= MAX_MARKDOWN_PASTE_CHARS && looksLikeMarkdown(text);
+}
 
 export interface SmartPasteDeps {
   /** Milkdown 的 Markdown 解析器（parserCtx），与打开文件用的是同一个 */
@@ -100,21 +115,27 @@ function isSourceLikeHtml(fragment: Node): boolean {
 export type HtmlPasteRoute =
   /** 交还 ProseMirror 默认处理 */
   | { kind: "default" }
+  /** 按 text/plain 的 Markdown 源码解析（VS Code 等） */
+  | { kind: "markdown-text" }
   /** 元素过多，整体降级为纯文本 */
   | { kind: "plain-text" }
   /** 转换得到的中间态 Markdown */
   | { kind: "convert"; markdown: string };
 
 /** HTML 粘贴路由判定（纯函数，便于单测） */
-export function routeHtmlPaste(html: string, types: readonly string[] = []): HtmlPasteRoute {
+export function routeHtmlPaste(html: string, text: string, types: readonly string[] = []): HtmlPasteRoute {
   if (!html.trim()) return { kind: "default" };
   // 编辑器内部复制：ProseMirror 自带的序列化能无损还原，不做二次转换
   if (/data-pm-slice/.test(html)) return { kind: "default" };
-  if (types.includes("vscode-editor-data")) return { kind: "default" };
+  if (types.includes("vscode-editor-data")) {
+    return isParsableMarkdownSource(text) ? { kind: "markdown-text" } : { kind: "default" };
+  }
   if (countHtmlElements(html) > MAX_PASTE_HTML_ELEMENTS) return { kind: "plain-text" };
   // 安全：先清洗，结构映射只处理清洗后的 DOM
   const fragment = sanitizeHTML(html, { mode: "paste" });
-  if (isSourceLikeHtml(fragment)) return { kind: "default" };
+  if (isSourceLikeHtml(fragment)) {
+    return isParsableMarkdownSource(text) ? { kind: "markdown-text" } : { kind: "default" };
+  }
   const markdown = htmlToMarkdown(fragment);
   if (!markdown.trim()) return { kind: "default" };
   return { kind: "convert", markdown };
@@ -156,6 +177,10 @@ function prepareHtmlPaste(
       return null;
     case "plain-text":
       return { slice: plainTextSlice(schema, text || htmlToText(html)) };
+    case "markdown-text": {
+      const doc = parsePastedMarkdown(text, parse);
+      return doc ? { slice: sliceForInsertion(doc.content) } : null;
+    }
     case "convert": {
       const doc = parsePastedMarkdown(route.markdown, parse);
       return doc ? { slice: sliceForInsertion(doc.content) } : null;
@@ -206,6 +231,8 @@ async function readClipboardText(): Promise<string> {
 const NATIVE_PLAIN_PASTE_BINDING = "mod+shift+v";
 
 export const smartPastePlugin = (deps: SmartPasteDeps) => {
+  // 每次粘贴的解析上下文：clipboardTextParser 写、handlePaste 读（同一次 doPaste 内同步发生）
+  let parseState: { plain: boolean; doc: PMNode | null } = { plain: false, doc: null };
   // 「粘贴为纯文本」快捷键已按下，等待本次 paste 事件
   let plainArmed = false;
   // 兜底读取剪贴板后，吞掉紧随其后的原生 paste，防止重复粘贴
@@ -245,6 +272,7 @@ export const smartPastePlugin = (deps: SmartPasteDeps) => {
       },
       handleDOMEvents: {
         paste(view, event) {
+          parseState = { plain: false, doc: null };
           pendingHtml = null;
           pasteEvent = null;
           if (Date.now() < swallowPasteUntil) {
@@ -278,7 +306,7 @@ export const smartPastePlugin = (deps: SmartPasteDeps) => {
         const text = data?.getData("text/plain") ?? "";
         try {
           const prepared = prepareHtmlPaste(
-            routeHtmlPaste(html, Array.from(data?.types ?? [])),
+            routeHtmlPaste(html, text, Array.from(data?.types ?? [])),
             html,
             text,
             view.state.schema,
@@ -292,13 +320,34 @@ export const smartPastePlugin = (deps: SmartPasteDeps) => {
           return html;
         }
       },
-      handlePaste(view) {
+      clipboardTextParser(text, $context, plain) {
+        parseState = { plain, doc: null };
+        // pasteEvent 为空说明不是粘贴（ProseMirror 的拖放也会调用本钩子）：保持原行为
+        if (plain || !pasteEvent || inTableOrCode($context) || !isParsableMarkdownSource(text)) {
+          return null as unknown as Slice;
+        }
+        const doc = parsePastedMarkdown(text, deps.parseMarkdown);
+        if (!doc) return null as unknown as Slice;
+        parseState.doc = doc;
+        return new Slice(doc.content, 0, 0);
+      },
+      handlePaste(view, _event, slice) {
+        const state = parseState;
         const prepared = pendingHtml;
+        parseState = { plain: false, doc: null };
         pendingHtml = null;
         pasteEvent = null;
-        if (!prepared) return false;
-        dispatchPaste(view, prepared.slice);
-        return true;
+        if (prepared) {
+          dispatchPaste(view, prepared.slice);
+          return true;
+        }
+        // 纯文本 Markdown：clipboardTextParser 已解析；按与 HTML 路径相同的块边界语义插入
+        // （ProseMirror 传入的 slice 已被 maxOpen 打开到底，不直接使用）
+        if (!state.plain && state.doc && slice.size > 0) {
+          dispatchPaste(view, sliceForInsertion(state.doc.content));
+          return true;
+        }
+        return false;
       },
     },
   });

@@ -219,4 +219,15 @@ describe("端到端：经真实粘贴链路进入文档", () => {
     expect(countNodes(h.view.state.doc, "html")).toBe(0);
     expect(h.view.state.doc.textContent).toContain("<script>alert(1)</script>");
   });
+
+  it("Markdown 文本路径：javascript: 链接与图片被剥离，data:text 图片被删除", async () => {
+    h = await createHarness({ plugins: (parse) => [smartPastePlugin({ parseMarkdown: parse })] });
+    h.paste({
+      "text/plain":
+        "# 标题\n\n[a](javascript:alert(1)) [b](JAVASCRIPT:x) [c](https://ok)\n\n![x](javascript:alert(1)) ![y](data:text/html,x) ![z](https://img/a.png)",
+    });
+    const { hrefs, srcs } = collect(h);
+    expect(hrefs).toEqual(["https://ok"]);
+    expect(srcs).toEqual(["https://img/a.png"]);
+  });
 });

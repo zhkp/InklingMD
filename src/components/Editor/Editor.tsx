@@ -178,7 +178,7 @@ function EditorInner({
               // 图片拖拽/粘贴上传：复制到当前文档的 assets/ 并插入相对路径
               // （须排在 Smart Paste 之前：剪贴板带图片文件时优先按文件落盘）
               imageUploadPlugin(filePath),
-              // Smart Paste：网页 HTML 粘贴解析为富文本（#219）
+              // Smart Paste：网页 HTML / Markdown 源码粘贴解析为富文本（#219/#229）
               smartPastePlugin({ parseMarkdown: (md) => ctx.get(parserCtx)(md) }),
               // 链接跟随：Ctrl/Cmd+点击打开外部链接或跳转内部锚点
               linkClickPlugin(),
