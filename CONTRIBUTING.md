@@ -34,6 +34,9 @@
    - 在 PR 描述中说明改了什么、为什么改、如何测试。
    - 若关联 issue，写明 `Closes #xxx`，合并后会自动关闭对应 issue。
    - 一个 PR 只做一件事，便于 review 与回滚。
+   - 提交后会自动触发 CI：`Build` 的 **test** job 在 Windows + Linux 双平台跑单测 / Rust 单测 / E2E
+     （打包 job 仅在 `main` 推送、`v*` tag 与手动 dispatch 时运行）；`Benchmark` quick 档只提示、不阻断合并。
+     请等 CI 全绿后再请人 review。
 
 ### 开发环境与系统依赖
 
