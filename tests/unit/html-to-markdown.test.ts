@@ -283,6 +283,34 @@ describe("htmlToMarkdown：表格", () => {
     ).toBe("| A\\|B | C |\n| --- | --- |\n| `x\\|y` | 一 二 三 四 |");
   });
 
+  it("单元格内链接/图片目标与标题中的 | 不拆裂列结构（#248）", () => {
+    expect(
+      md('<table><tr><th>a</th></tr><tr><td><a href="https://x.com/1|2">l</a></td></tr></table>'),
+    ).toBe("| a |\n| --- |\n| [l](https://x.com/1%7C2) |");
+    expect(
+      md('<table><tr><th>a</th></tr><tr><td><img src="https://x.com/3|4.png" alt="i"></td></tr></table>'),
+    ).toBe("| a |\n| --- |\n| ![i](https://x.com/3%7C4.png) |");
+    expect(
+      md('<table><tr><th>a</th></tr><tr><td><a href="https://x" title="t|u">l</a></td></tr></table>'),
+    ).toBe('| a |\n| --- |\n| [l](https://x "t\\|u") |');
+  });
+
+  it("单元格内图片 alt 中的 | 同样转义（#248 同类第三路径）", () => {
+    expect(
+      md('<table><tr><th>a</th></tr><tr><td><img src="https://x.com/i.png" alt="i|j"></td></tr></table>'),
+    ).toBe("| a |\n| --- |\n| ![i\\|j](https://x.com/i.png) |");
+    // 含反斜杠的输入：先既有的 \\ 转义、再补 \| —— 顺序对往返正确（a\|b → a\\\|b → 解析回 a\|b）
+    expect(
+      md('<table><tr><th>a</th></tr><tr><td><img src="https://x.com/i.png" alt="a\\|b"></td></tr></table>'),
+    ).toBe("| a |\n| --- |\n| ![a\\\\\\|b](https://x.com/i.png) |");
+  });
+
+  it("表格外的目标与标题保持原样（作用域仅限单元格，锁定边界）", () => {
+    expect(md('<p><a href="https://x.com/1|2" title="t|u">l</a></p>')).toBe('[l](https://x.com/1|2 "t|u")');
+    // alt 的转义同样只在单元格内生效
+    expect(md('<p><img src="https://x" alt="i|j"></p>')).toBe("![i|j](https://x)");
+  });
+
   it("单元格内的行内格式保留", () => {
     expect(md("<table><tr><th>h</th></tr><tr><td><b>粗</b> <a href='https://x'>链</a></td></tr></table>")).toBe(
       "| h |\n| --- |\n| **粗** [链](https://x) |",
