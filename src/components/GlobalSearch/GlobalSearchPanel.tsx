@@ -8,11 +8,7 @@ import type { Editor } from "@milkdown/kit/core";
 import { editorViewCtx } from "@milkdown/kit/core";
 import { TextSelection } from "@milkdown/kit/prose/state";
 import { useWorkspace } from "../../store/workspace";
-import {
-  searchInWorkspace,
-  nextGlobalSearchGeneration,
-  type SearchHit,
-} from "../../lib/fs";
+import { searchInWorkspace, type SearchHit } from "../../lib/fs";
 import { relativeToRoot } from "../../lib/path";
 import { IconFileText, IconX } from "../icons";
 import "./GlobalSearchPanel.css";
@@ -77,15 +73,14 @@ export function GlobalSearchPanel({ getEditor, onClose }: GlobalSearchPanelProps
     inputRef.current?.focus();
   }, []);
 
-  // 卸载时删除注册待执行的取消调用，让 Rust 侧在途搜索提前退出（#163）。
-  // 关闭面板（卸载）等价于发起一次「空查询、新代次」的搜索：
-  // 命令入口 fetch_max 登记新代次后空查询立即返回（不扫描），
-  // 在途旧扫描在检查点看到代次推进后提前退出。结果被丢弃，故 fire-and-forget。
+  // 关闭面板（卸载）等价于发起一次「空查询」的新请求：命令入口会分配新代次（由 Rust 侧分配，
+  // #241）后空查询立即返回（不扫描），在途旧扫描在检查点看到代次推进后提前退出（#163）。
+  // 结果被丢弃，故 fire-and-forget。
   // （rootPath 经 store getter 读取最新值，避免闭包捕获过期路径。）
   useEffect(() => {
     return () => {
       const root = useWorkspace.getState().rootPath;
-      void searchInWorkspace(root ?? "", "", false, false, nextGlobalSearchGeneration());
+      void searchInWorkspace(root ?? "", "", false, false);
     };
   }, []);
 
@@ -98,10 +93,10 @@ export function GlobalSearchPanel({ getEditor, onClose }: GlobalSearchPanelProps
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
 
-  // 防抖搜索：代次递增既作为竞态守卫（旧响应丢弃），也传给后端取消在途旧搜索（#163）
+  // 防抖搜索：本地序号只作 UI 竞态守卫（丢弃迟到响应）；「取消后端在途旧搜索」由 Rust 侧
+  // 代次负责（#241——每次请求在命令入口推进全局代次），前端不再维护、也不传递代次
   useEffect(() => {
-    const seq = nextGlobalSearchGeneration();
-    searchSeqRef.current = seq;
+    const seq = ++searchSeqRef.current;
     if (!query.trim()) {
       setHits([]);
       setTruncated(false);
@@ -118,7 +113,7 @@ export function GlobalSearchPanel({ getEditor, onClose }: GlobalSearchPanelProps
     setSearching(true);
     setError(null);
     const timer = setTimeout(() => {
-      searchInWorkspace(rootPath, query, caseSensitive, useRegex, seq)
+      searchInWorkspace(rootPath, query, caseSensitive, useRegex)
         .then((result) => {
           if (searchSeqRef.current !== seq) return;
           setHits(result.hits);

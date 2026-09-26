@@ -198,19 +198,18 @@ export interface SearchResult {
   truncated: boolean;
 }
 
-/** 搜索代次：每次发起递增，Rust 侧用它取消落后的在途搜索（#163） */
-let globalSearchGeneration = 0;
-export function nextGlobalSearchGeneration(): number {
-  return ++globalSearchGeneration;
-}
-
-/** 在工作区所有 .md 文件中搜索文本内容 */
+/**
+ * 在工作区所有 .md 文件中搜索文本内容
+ *
+ * **不传代次**：代次由 Rust 侧分配（#241——前端各窗口独立计数会让后开窗口的请求被永久判过期）。
+ * 「取消在途旧搜索」也由后端完成：任何一次新请求（含关闭面板时的空查询调用）都会在命令入口
+ * 推进全局代次，旧扫描在检查点提前退出（#163 的机制不变，只是代次改由服务端分配）。
+ */
 export async function searchInWorkspace(
   root: string,
   query: string,
   caseSensitive: boolean,
   useRegex: boolean,
-  generation = 0,
 ): Promise<SearchResult> {
   if (isTauri()) {
     return invoke<SearchResult>("search_in_workspace", {
@@ -218,11 +217,10 @@ export async function searchInWorkspace(
       query,
       caseSensitive,
       useRegex,
-      generation,
     });
   }
   // 浏览器 mock：扫描内存中的 mock 文件
-  // 空查询与 Rust 侧命令入口一致：登记代次后立即返回，不扫描（卸载取消调用会传空查询）
+  // 空查询立即返回（与 Rust 侧一致：卸载取消调用会传空查询；mock 无跨进程代次概念）
   if (!query) return { hits: [], truncated: false };
   const { MOCK_FILE_CONTENT } = await import("./mockFs");
   const hits: SearchHit[] = [];

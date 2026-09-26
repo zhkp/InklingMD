@@ -180,6 +180,30 @@ fn list_dir_shallow(path: &Path) -> Result<FileNode, String> {
     Ok(node)
 }
 
+// ---------------------------------------------------------------------------
+// 请求代次（搜索 / 文件索引共用）
+// ---------------------------------------------------------------------------
+
+/// 登记一次新请求的代次，返回该请求自己的代次
+///
+/// 由计数器 `fetch_add` 分配，故对任意并发请求严格单调递增。
+/// 抽成独立函数是为了能用**本地计数器**单测「严格单调」这一核心性质，而不必触碰全局状态
+/// （写全局的测试在多线程下会互相踩，见 `GENERATION_TEST_LOCK`）。
+///
+/// 代次必须由 **Rust 侧**分配（#241）：前端每个 webview 都是独立 JS 上下文、计数器各自从 0
+/// 开始，多窗口下后开窗口传来的小代次会被 `fetch_max` 挡在全局之外、**每一次**请求都被判过期；
+/// 服务端分配则对任意并发请求严格单调，跨窗口自然成立「最新请求胜出」，前端无需维护计数器。
+pub(crate) fn next_generation(counter: &AtomicU64) -> u64 {
+    counter.fetch_add(1, Ordering::Relaxed) + 1
+}
+
+/// 该代次是否已被更新的请求推进
+///
+/// 判定只读传入的计数器，因此同样可用本地计数器单测，无需写全局。
+pub(crate) fn is_stale_with(counter: &AtomicU64, generation: u64) -> bool {
+    counter.load(Ordering::Relaxed) > generation
+}
+
 /// 测试用串行锁：凡「写」全局代次（`SEARCH_GENERATION` / `INDEX_GENERATION`）的用例
 /// 都必须持有它。
 ///
