@@ -1,7 +1,7 @@
-// 全局搜索截断可见性（#160）与搜索代次（#163）单元测试
+// 全局搜索截断可见性（#160）单元测试
 // - 后端截断时面板状态栏必须展示「结果已截断」，未截断时不展示
 // - 浏览器 mock 分支返回 { hits, truncated } 结构且能真实命中
-// - 代次函数严格单调递增，保证后端可识别新旧搜索
+// （搜索代次自 #241 起由 Rust 侧分配，前端不再有 nextGlobalSearchGeneration）
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { render, screen, fireEvent, act } from "@testing-library/react";
@@ -77,7 +77,7 @@ describe("全局搜索截断提示（#160）", () => {
   });
 });
 
-describe("浏览器 mock 返回结构与代次（#160/#163）", () => {
+describe("浏览器 mock 返回结构（#160）", () => {
   it("searchInWorkspace 浏览器 mock 返回 { hits, truncated } 且真实命中", async () => {
     const result = await fsApi.searchInWorkspace("/mock/workspace", "mock", false, false);
     expect(result.truncated).toBe(false);
@@ -92,13 +92,5 @@ describe("浏览器 mock 返回结构与代次（#160/#163）", () => {
   it("非法正则时浏览器 mock 返回空结果而非抛错", async () => {
     const result = await fsApi.searchInWorkspace("/mock/workspace", "(", false, true);
     expect(result).toEqual({ hits: [], truncated: false });
-  });
-
-  it("nextGlobalSearchGeneration 严格单调递增", () => {
-    const a = fsApi.nextGlobalSearchGeneration();
-    const b = fsApi.nextGlobalSearchGeneration();
-    const c = fsApi.nextGlobalSearchGeneration();
-    expect(b).toBe(a + 1);
-    expect(c).toBe(b + 1);
   });
 });

@@ -5,8 +5,9 @@
 // 全部由 ignore_rules 模块提供，本模块只负责「代次 + 上限 + IPC 边界」。
 
 use super::ignore_rules::{self, WalkError};
+use super::{is_stale_with, next_generation};
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::AtomicU64;
 
 /// 单次索引最多返回的文件数，超出截断并置 truncated
 ///
@@ -23,7 +24,8 @@ pub const MAX_INDEX_FILES: usize = 50_000;
 ///
 /// 刻意**不复用** `SEARCH_GENERATION`：两者共用一个计数器会让「打开 Quick Open」
 /// 把在途的全局搜索取消掉，属可观察的行为耦合；复用是「机制」（代次 + 检查点提前退出），
-/// 不是变量。（搜索侧仍是前端计数器的写法，其多窗口缺陷另行跟踪，不在本 PR 范围内。）
+/// 不是变量。搜索侧（`SEARCH_GENERATION`）自 #241 起与索引侧同构：代次同样由 Rust 侧
+/// 分配（`commands::next_generation`），两侧各自维护独立计数器。
 pub static INDEX_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 /// 工作区文件索引结果
@@ -36,22 +38,6 @@ pub struct WorkspaceFileList {
     pub files: Vec<String>,
     /// 文件数达到上限被截断时为 true（与搜索结果的 truncated 语义相同）
     pub truncated: bool,
-}
-
-/// 登记一次新请求的代次，返回该请求自己的代次
-///
-/// 由计数器 `fetch_add` 分配，故对任意并发请求严格单调递增。
-/// 抽成独立函数是为了能用**本地计数器**单测「严格单调」这一核心性质，而不必触碰全局状态
-/// （写全局的测试在多线程下会互相踩，见 `commands::GENERATION_TEST_LOCK`）。
-fn next_generation(counter: &AtomicU64) -> u64 {
-    counter.fetch_add(1, Ordering::Relaxed) + 1
-}
-
-/// 该代次是否已被更新的请求推进
-///
-/// 判定只读传入的计数器，因此同样可用本地计数器单测，无需写全局。
-fn is_stale_with(counter: &AtomicU64, generation: u64) -> bool {
-    counter.load(Ordering::Relaxed) > generation
 }
 
 /// 索引被更新的索引取消
@@ -104,7 +90,7 @@ mod tests {
     use super::*;
     use std::fs;
     use std::path::{Path, PathBuf};
-    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     static NEXT_TEST_DIR: AtomicUsize = AtomicUsize::new(0);
@@ -119,7 +105,7 @@ mod tests {
                 .duration_since(UNIX_EPOCH)
                 .expect("system clock should be after Unix epoch")
                 .as_nanos();
-            let sequence = NEXT_TEST_DIR.fetch_add(1, AtomicOrdering::Relaxed);
+            let sequence = NEXT_TEST_DIR.fetch_add(1, Ordering::Relaxed);
             let path = std::env::temp_dir().join(format!(
                 "inklingmd-index-{label}-{}-{nonce}-{sequence}",
                 std::process::id()

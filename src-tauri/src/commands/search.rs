@@ -7,11 +7,12 @@
 // 文件扫描按 CPU 数分片并行；搜索代次（generation）推进时旧任务在周期间检查点提前退出。
 
 use super::ignore_rules;
+use super::{is_stale_with, next_generation};
 use regex::Regex;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::AtomicU64;
 
 /// 单条命中
 #[derive(Debug, serde::Serialize)]
@@ -46,7 +47,8 @@ const PREVIEW_MAX_MATCH_CHARS: usize = 200;
 /// 扫描行数达到该倍数时检查一次取消（摊薄原子读开销）
 const CANCEL_CHECK_LINE_INTERVAL: usize = 256;
 
-/// 搜索代次：每次新搜索登记自己的代次，在途旧任务发现代次推进后提前退出（#163）
+/// 搜索代次：每次新搜索在命令入口由 Rust 侧分配（#241），
+/// 在途旧任务发现代次推进后提前退出（#163）
 pub static SEARCH_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 /// 搜索被更新的搜索取消
@@ -56,7 +58,7 @@ fn cancelled_error() -> String {
 
 /// 当前代次是否已被更新的搜索推进
 fn is_stale(generation: u64) -> bool {
-    SEARCH_GENERATION.load(Ordering::Relaxed) > generation
+    is_stale_with(&SEARCH_GENERATION, generation)
 }
 
 /// 递归收集目录下所有 .md/.markdown 文件路径
@@ -183,16 +185,19 @@ fn scan_files(
 /// - `query`: 搜索词或正则
 /// - `case_sensitive`: 是否区分大小写
 /// - `use_regex`: 是否作为正则匹配
-/// - `generation`: 搜索代次，前端每次发起搜索递增；代次推进后在途旧任务提前退出（#163）
+///
+/// 代次由本命令在 **Rust 侧分配**（#241）：前端每个 webview 都是独立 JS 上下文、各自从 0
+/// 计数，多窗口下后开窗口的请求会被永久判过期；服务端 `fetch_add` 分配则对任意并发请求
+/// 严格单调，跨窗口自然成立「最新请求胜出」。命令入口先登记代次——在途旧任务在检查点
+/// 看到代次推进后提前退出（#163）。
 #[tauri::command]
 pub async fn search_in_workspace(
     root: String,
     query: String,
     case_sensitive: bool,
     use_regex: bool,
-    generation: u64,
 ) -> Result<SearchResult, String> {
-    SEARCH_GENERATION.fetch_max(generation, Ordering::Relaxed);
+    let generation = next_generation(&SEARCH_GENERATION);
     tauri::async_runtime::spawn_blocking(move || {
         search_in_workspace_sync(root, query, case_sensitive, use_regex, generation)
     })
@@ -298,7 +303,7 @@ mod tests {
     use super::*;
     use std::fs;
     use std::path::{Path, PathBuf};
-    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     static NEXT_TEST_DIR: AtomicUsize = AtomicUsize::new(0);
@@ -651,6 +656,34 @@ mod tests {
         )
         .unwrap();
         assert_eq!(result.hits.len(), 1);
+    }
+
+    #[test]
+    fn newest_allocated_generation_is_never_starved() {
+        // 多窗口场景回归（#241）：代次由 Rust 侧分配后，后发起的请求拿到更大代次并正常执行，
+        // 不会被其它窗口更早的请求挤成「永久过期」。写全局代次，须与其它同类用例互斥。
+        let _generations = crate::commands::lock_generations();
+
+        let temp = TestDir::new("allocated-generation");
+        write(&temp.path.join("a.md"), "needle\n");
+        let root = temp.path.to_string_lossy().into_owned();
+
+        // 归零后取代次，使断言不依赖其它用例留下的全局值（也避开 u64::MAX 绕回边界）
+        SEARCH_GENERATION.store(0, Ordering::Relaxed);
+        let token_a = crate::commands::next_generation(&SEARCH_GENERATION);
+        let token_b = crate::commands::next_generation(&SEARCH_GENERATION);
+        assert!(token_b > token_a, "后发起的请求必须拿到更大代次");
+
+        // 更早窗口的请求（token_a）在 token_b 登记后按预期被取消
+        let stale =
+            search_in_workspace_sync(root.clone(), "needle".to_string(), true, false, token_a);
+        assert!(stale.is_err(), "代次落后的搜索应被取消");
+        assert!(stale.unwrap_err().contains("取消"));
+
+        // 后开窗口的请求（token_b）自己就是全局最新——不再被饿死
+        let fresh = search_in_workspace_sync(root, "needle".to_string(), true, false, token_b)
+            .expect("最新代次的搜索必须成功");
+        assert_eq!(fresh.hits.len(), 1);
     }
 
     #[test]
