@@ -139,15 +139,21 @@ function collapseWhitespace(text: string): string {
   return text.replace(/[ \t\n\r\f\u00A0]+/g, " ");
 }
 
-function formatDestination(url: string): string {
-  const safe = encodeSentinels(url.replace(/[<>\n\r]/g, (c) => encodeURIComponent(c)));
+function formatDestination(url: string, inTable = false): string {
+  // 表格单元格内：GFM 在行内解析之前按未转义的 `|` 分列，目标里的裸 `|` 会把整行
+  // 拆裂成多列（#248）。URL 中 `|` 本就应编码为 %7C，这里直接归一化（表格外不动）。
+  const normalized = inTable ? url.replace(/\|/g, "%7C") : url;
+  const safe = encodeSentinels(normalized.replace(/[<>\n\r]/g, (c) => encodeURIComponent(c)));
   return /[\s()\\]/.test(safe) ? `<${safe}>` : safe;
 }
 
-function formatTitle(title: string | null): string {
+function formatTitle(title: string | null, inTable = false): string {
   const t = title?.trim();
   if (!t) return "";
-  return ` "${encodeSentinels(t.replace(/[\\"]/g, "\\$&").replace(/\s+/g, " "))}"`;
+  const escaped = t.replace(/[\\"]/g, "\\$&").replace(/\s+/g, " ");
+  // 标题中的裸 `|` 同样会被当成列分隔（#248）。标题不是 URL、不能百分号编码，
+  // 用反斜杠转义——CommonMark 在解析标题时会把 `\|` 还原为 `|`。
+  return ` "${encodeSentinels(inTable ? escaped.replace(/\|/g, "\\|") : escaped)}"`;
 }
 
 function codeSpan(raw: string, inTable: boolean): string {
@@ -195,7 +201,7 @@ function inlineOf(node: Node, ctx: InlineCtx): string {
       const alt = encodeSentinels(
         collapseWhitespace(el.getAttribute("alt") ?? "").trim().replace(/[\\[\]]/g, "\\$&"),
       );
-      return `![${alt}](${formatDestination(src)}${formatTitle(el.getAttribute("title"))})`;
+      return `![${alt}](${formatDestination(src, ctx.inTable)}${formatTitle(el.getAttribute("title"), ctx.inTable)})`;
     }
     case "input":
       // 任务列表复选框由列表项处理；其余位置无 Markdown 语义
@@ -212,7 +218,7 @@ function inlineOf(node: Node, ctx: InlineCtx): string {
       // 无可见内容的锚点（GitHub 标题旁的 permalink 图标）直接丢弃
       if (!inner.replace(SENTINEL_RE, "").trim()) return "";
       const m = /^([ \uE000]*)([\s\S]*?)([ \uE000]*)$/.exec(inner)!;
-      return `${m[1]}[${m[2]}](${formatDestination(href)}${formatTitle(el.getAttribute("title"))})${m[3]}`;
+      return `${m[1]}[${m[2]}](${formatDestination(href, ctx.inTable)}${formatTitle(el.getAttribute("title"), ctx.inTable)})${m[3]}`;
     }
     default:
       break;

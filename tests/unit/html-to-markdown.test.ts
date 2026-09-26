@@ -283,6 +283,22 @@ describe("htmlToMarkdown：表格", () => {
     ).toBe("| A\\|B | C |\n| --- | --- |\n| `x\\|y` | 一 二 三 四 |");
   });
 
+  it("单元格内链接/图片目标与标题中的 | 不拆裂列结构（#248）", () => {
+    expect(
+      md('<table><tr><th>a</th></tr><tr><td><a href="https://x.com/1|2">l</a></td></tr></table>'),
+    ).toBe("| a |\n| --- |\n| [l](https://x.com/1%7C2) |");
+    expect(
+      md('<table><tr><th>a</th></tr><tr><td><img src="https://x.com/3|4.png" alt="i"></td></tr></table>'),
+    ).toBe("| a |\n| --- |\n| ![i](https://x.com/3%7C4.png) |");
+    expect(
+      md('<table><tr><th>a</th></tr><tr><td><a href="https://x" title="t|u">l</a></td></tr></table>'),
+    ).toBe('| a |\n| --- |\n| [l](https://x "t\\|u") |');
+  });
+
+  it("表格外的目标与标题保持原样（作用域仅限单元格，锁定边界）", () => {
+    expect(md('<p><a href="https://x.com/1|2" title="t|u">l</a></p>')).toBe('[l](https://x.com/1|2 "t|u")');
+  });
+
   it("单元格内的行内格式保留", () => {
     expect(md("<table><tr><th>h</th></tr><tr><td><b>粗</b> <a href='https://x'>链</a></td></tr></table>")).toBe(
       "| h |\n| --- |\n| **粗** [链](https://x) |",
