@@ -60,8 +60,9 @@ const JPG = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 9, 9]);
 
 let h: Harness;
 
-async function setup(documentPath = DOC, deps: Partial<RemoteImageDeps> = {}) {
+async function setup(documentPath = DOC, deps: Partial<RemoteImageDeps> = {}, markdown = "") {
   h = await createHarness({
+    markdown,
     plugins: (parse) => [
       imageUploadPlugin(documentPath),
       smartPastePlugin({ parseMarkdown: parse }),
@@ -186,6 +187,68 @@ describe("远程图片落盘：成功路径", () => {
     h.undo();
     expect(imageSrcs()).toEqual([]);
     expect(h.view.state.doc.textContent).toBe("原文");
+  });
+
+  it("下载在途时 undo→redo：回放重新入队，落盘后完成本地化（#251 真实缺口）", async () => {
+    let release!: (v: unknown) => void;
+    downloadMock
+      .mockReturnValueOnce(new Promise((r) => (release = r)))
+      .mockResolvedValue({ data: PNG, mime: "image/png" });
+    await setup();
+    pasteHtml('<p><img src="https://a.example/x.png"></p>');
+    await settle();
+    // 仍在下载：图片保持远程引用
+    expect(imageSrcs()).toEqual(["https://a.example/x.png"]);
+
+    h.undo();
+    expect(imageSrcs()).toEqual([]);
+    h.redo();
+    expect(imageSrcs()).toEqual(["https://a.example/x.png"]);
+    // 回放引入的远程图片被重新入队 → 本地化完成（复用内容哈希去重）
+    await vi.waitFor(() => expect(imageSrcs()[0]).toMatch(/^assets\//));
+    // 迟到完成的老任务不会误改（其 pending 登记已随撤销清除）
+    release({ data: PNG, mime: "image/png" });
+    await settle();
+    expect(imageSrcs()[0]).toMatch(/^assets\//);
+  });
+
+  it("本地化完成后 undo→redo：回放保留本地路径，不触发多余下载（#251 边界）", async () => {
+    downloadMock.mockResolvedValue({ data: PNG, mime: "image/png" });
+    await setup();
+    pasteHtml('<p><img src="https://a.example/x.png"></p>');
+    await vi.waitFor(() => expect(imageSrcs()[0]).toMatch(/^assets\//));
+    const localized = imageSrcs()[0];
+
+    h.undo();
+    expect(imageSrcs()).toEqual([]);
+    h.redo();
+    // 探针实测：prosemirror-history 撤销时按当时的文档内容重建回放切片，本地路径随之保留
+    expect(imageSrcs()).toEqual([localized]);
+    await settle();
+    expect(downloadMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("文档自带的远程图片不会因 undo/redo 被自动下载（#251 边界）", async () => {
+    downloadMock.mockResolvedValue({ data: PNG, mime: "image/png" });
+    await setup(DOC, {}, "开头\n\n![图](https://a.example/loaded.png)\n");
+    h.cursorToEnd();
+    h.type("改");
+    h.undo();
+    await settle();
+    expect(downloadMock).not.toHaveBeenCalled();
+  });
+
+  it("未保存草稿：redo 恢复后同样保持远程引用、不下载（#251）", async () => {
+    downloadMock.mockResolvedValue({ data: PNG, mime: "image/png" });
+    await setup("untitled-1");
+    pasteHtml('<p><img src="https://a.example/x.png"></p>');
+    await settle();
+    expect(imageSrcs()).toEqual(["https://a.example/x.png"]);
+    h.undo();
+    h.redo();
+    await settle();
+    expect(imageSrcs()).toEqual(["https://a.example/x.png"]);
+    expect(downloadMock).not.toHaveBeenCalled();
   });
 });
 
