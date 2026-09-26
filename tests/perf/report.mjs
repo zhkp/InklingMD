@@ -694,6 +694,8 @@ function main() {
   // 落在范围内 = 与历史档位一致（只看是否"见过"）；超出上限 10% 才算环境异常。
   // 两轮对账的必要性见 sessionProbeOf 的注释：只看首轮会把"已在另一台机器复现的 FAIL"
   // 说成"请换 runner 重跑"，也会漏掉"复测机器慢导致的假 FAIL"。
+  // **「范围内」不等于排除环境（#259）**：代码零差异、两轮都落在双峰偏慢侧（+7.8% / +20.4%）
+  // 仍复现 FAIL——所以范围内分支必须披露**两轮**偏差，并把最终裁决交给"换 runner 重跑"。
   const probes = results
     .filter((r) => r.sessionProbe)
     .map((r) => ({ id: r.id, ...r.sessionProbe }));
@@ -736,11 +738,21 @@ function main() {
           : `首轮环境异常（${fmt(firstMed)} 超历史范围），但**本次没有复测轮**（应用指标未超阈值、未触发复测）` +
             `——环境异常不影响本次结论`;
     } else {
-      const deltaPct = typeof firstMed === "number" ? ((firstMed - baseRef) / baseRef) * 100 : 0;
+      // 两轮都要给出相对基线参考的偏差（#259）：只报首轮会在实录里漏掉关键证据——
+      // 同一份代码两轮都落在同档位偏慢侧（首轮 +7.8% / 复测 +20.4%）同样会复现 FAIL，
+      // 旧文案「机器档位不足以解释它（须看代码或 IO 侧）」会把人引向代码侧找不存在的回归。
+      const dev = (label, value) => {
+        // 缺采集（老产物 / 没跑标定）时写「无标定数据」，**不伪造 0%**（曾把首轮印成"慢 0.0%"）
+        if (typeof value !== "number") return `${label}无标定数据`;
+        const pct = ((value - baseRef) / baseRef) * 100;
+        return `${label}比基线参考${pct >= 0 ? "慢" : "快"} ${Math.abs(pct).toFixed(1)}%`;
+      };
       verdict =
-        `环境在历史范围内（**档位归因**：首轮比基线参考${deltaPct >= 0 ? "慢" : "快"} ` +
-        `${Math.abs(deltaPct).toFixed(1)}%）——标定负载覆盖 **CPU 与 DOM 构建/样式/布局**，不含 IO/网络；` +
-        `应用指标若同时变差，机器档位不足以解释它（须看代码或 IO 侧）；只有超出历史范围才判为环境异常`;
+        `环境在历史范围内（**档位归因**：${dev("首轮", firstMed)}` +
+        `${typeof retestMed === "number" ? ` / ${dev("复测", retestMed)}` : ""}）——` +
+        `标定负载覆盖 **CPU 与 DOM 构建/样式/布局**，不含 IO/网络；` +
+        `**范围内只说明「档位与历史见过的一致」，不能据此排除环境**：同档位偏慢的两轮会话` +
+        `同样能顶出假 FAIL（#259）；FAIL 是否成立以**换 runner 重跑**为准——代码性回归不会因换 runner 消失`;
     }
     lines.push(
       `- 会话标定（与代码无关的固定工作量，#236）：基线参考 ${baseRef}ms，历史范围 ${lo}–${hi}ms，` +
