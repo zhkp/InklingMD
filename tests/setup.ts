@@ -3,7 +3,8 @@
 // - 每个用例间清理 localStorage，避免 store 持久化串扰
 
 import "@testing-library/jest-dom/vitest";
-import { afterEach, beforeEach, vi } from "vitest";
+import { afterAll, afterEach, beforeEach, vi } from "vitest";
+import { drainHostedTimers, hostTimeouts } from "./fixtures/hostedTimers";
 
 // Node 26 exposes experimental storage properties whose values are undefined
 // unless --localstorage-file is supplied. That also shadows happy-dom's storage.
@@ -52,6 +53,11 @@ beforeEach(() => {
   window.localStorage.clear();
   window.sessionStorage.clear();
 });
+
+// 测试期定时器托管（#257）：milkdown 编辑器留下的 3s 超时在环境销毁后触发会调用裸全局
+// removeEventListener → 用例全绿但 `pnpm test` 随机 exit 1；文件结束时统一清掉。
+hostTimeouts();
+afterAll(() => drainHostedTimers());
 
 afterEach(() => {
   vi.restoreAllMocks();
