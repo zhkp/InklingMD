@@ -408,7 +408,7 @@ function blockOf(el: Element, ctx: BlockCtx): string[] {
     case "pre":
       return [codeBlock(el)];
     case "blockquote": {
-      const inner = blocksOf(el, ctx).join("\n\n");
+      const inner = joinBlocks(blocksOf(el, ctx));
       if (!inner) return [];
       return [inner.split("\n").map((l) => (l ? `> ${l}` : ">")).join("\n")];
     }
@@ -504,6 +504,29 @@ function formatList(items: ListItemMd[], ordered: boolean, start: number): strin
         .join("\n");
     })
     .join("\n");
+}
+
+/** 块首行呈现的列表类型；非列表块返回 null */
+function listBlockKind(block: string): "bullet" | "ordered" | null {
+  const first = block.split("\n", 1)[0];
+  if (/^(?:[-*+]) /.test(first)) return "bullet";
+  if (/^\d{1,9}[.)] /.test(first)) return "ordered";
+  return null;
+}
+
+/**
+ * 拼接块序列（空行分隔）。相邻两个**同为无序或同为有序**的列表之间插入 `<!-- -->`：
+ * CommonMark 会把空行分隔的同标记列表并成一个松散列表（列表边界丢失，有序列表还会
+ * 被重新编号），pandoc 同款做法（#249）。`<!-- -->` 经 Milkdown parse → serialize
+ * 幂等、不进入用户可见内容；异型列表本就不合并，无需插入。
+ */
+function joinBlocks(blocks: string[]): string {
+  return blocks.reduce((out, block, i) => {
+    if (i === 0) return block;
+    const prev = listBlockKind(blocks[i - 1]);
+    const separator = prev !== null && prev === listBlockKind(block) ? "\n\n<!-- -->\n\n" : "\n\n";
+    return out + separator + block;
+  }, "");
 }
 
 function wordList(paragraphs: Element[]): string {
@@ -629,5 +652,5 @@ function table(tableEl: Element, ctx: BlockCtx): string[] {
  * @param root sanitizeHTML(html, { mode: "paste" }) 的返回值（DocumentFragment）或任意元素
  */
 export function htmlToMarkdown(root: Node): string {
-  return blocksOf(root, { listDepth: 0 }).join("\n\n");
+  return joinBlocks(blocksOf(root, { listDepth: 0 }));
 }
