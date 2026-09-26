@@ -31,6 +31,7 @@ import {
   resolutionPct,
   suppressionReason,
 } from "./judgment.js";
+import { expectedScenarioIds, parseScenarioId, unmeasuredScenarios } from "./pw-coverage.js";
 
 // 四个目录都可用环境变量覆盖。RAW_DIR 原本就支持（复测轮要写到独立目录，
 // 否则同名文件会覆盖首轮采样）；OUT_DIR / RETEST_DIR / BASELINE_DIR 一并开放，
@@ -111,6 +112,27 @@ function readRun(dir) {
     map.set(raw.id, raw);
   }
   return map;
+}
+
+/**
+ * 读 playwright json 报告（方向 2，issue #247），用于核算「应测但未测量」的场景。
+ *
+ * 落点：优先 PERF_PW_REPORT（相对仓库根 cwd，与 config 的写入口径一致）；
+ * 否则取 OUT_DIR 下的 pw-report.json（默认 `.perf-output/pw-report.json`，与 config 默认一致，
+ * 同时在端到端测试里随 PERF_OUT_DIR 一起被重定向到临时目录）。
+ * 缺失 / JSON 畸形 → 返回 `{ report: null, reason }`，调用方回退现行为并打印原因——
+ * 读不到报告不能反过来改变判定（"没测到"与"测到没回归"必须区分）。
+ */
+function readPwReport() {
+  const file = process.env.PERF_PW_REPORT
+    ? resolve(process.cwd(), process.env.PERF_PW_REPORT)
+    : resolve(OUT_DIR, "pw-report.json");
+  if (!existsSync(file)) return { file, report: null, reason: "文件不存在" };
+  try {
+    return { file, report: JSON.parse(readFileSync(file, "utf8")), reason: null };
+  } catch (error) {
+    return { file, report: null, reason: `JSON 解析失败：${error.message}` };
+  }
 }
 
 /** baseline 路径：本地基线隔离在 local/ 下，避免与 CI 基线互相污染 */
@@ -434,6 +456,8 @@ function main() {
 
   const results = [];
   const retest = [];
+  // 方向 2（#247）：本次「应测但未测量」的场景 id，final 阶段统一报出并让整轮 exit 2
+  const unmeasuredIds = [];
 
   for (const [id, raw] of run1) {
     const env = raw.env;
@@ -566,6 +590,49 @@ function main() {
       // 会话标定（#236）：不参与判定，只供「环境归因」披露使用（首轮 + 复测两轮对账）
       sessionProbe: sessionProbeOf(raw, raw2, baseline),
     });
+  }
+
+  // 方向 2（issue #247）：把「应测但未测量」的场景合成进 results。
+  // 合成对象走既有「未参与相对判定」机制（baselineState !== "OK"），于是自动进入覆盖分母、
+  // notCompared 列表与报告表格（单列一行 UNMEASURED）；metrics 为空，故不会产出任何 FAIL/WARN 行。
+  // 只在 final 合成：check 阶段未测量场景本就没有 raw，天然不进复测嫌疑清单。
+  if (phase === "final") {
+    const first = [...run1.values()][0];
+    const pw = readPwReport();
+    if (!pw.report) {
+      console.log(
+        `[perf] 未读取到 playwright 报告（${pw.file}）：${pw.reason}——` +
+          `跳过「未测量场景」核算，按现行为出报告`,
+      );
+    } else {
+      const expected = expectedScenarioIds(pw.report);
+      // 差集基准是**首轮已经落盘的 raw id**：有 raw = 测到了，无论场景最终 PASS/WARN/FAIL
+      const missing = unmeasuredScenarios(expected, [...run1.keys()]);
+      for (const { id, status } of missing) {
+        const parsed = parseScenarioId(id);
+        results.push({
+          id,
+          scenario: parsed?.scenario ?? "unknown",
+          tier: parsed?.tier ?? "unknown",
+          kind: parsed?.kind ?? "unknown",
+          env: first.env,
+          profile: first.profile,
+          mode: first.mode ?? "unknown",
+          absoluteEnabled: false,
+          baselineState: `UNMEASURED(${status})`,
+          metrics: [],
+          overMetrics: [],
+          sessionProbe: null,
+        });
+        unmeasuredIds.push(id);
+      }
+      if (unmeasuredIds.length > 0) {
+        console.log(
+          `[perf] 未测量场景 ${unmeasuredIds.length} 个（来自 playwright 报告 ${pw.file}）：` +
+            unmeasuredIds.join(", "),
+        );
+      }
+    }
   }
 
   ensureDir(OUT_DIR);
@@ -835,6 +902,18 @@ function main() {
   );
 
   const coverageIncomplete = comparedRuns.length < results.length;
+
+  // 方向 2（issue #247）：未测量场景是「没测到」（单场景超时/失败、无采样落盘），
+  // 与覆盖不足同属"结论不完整"——exit 2 优先于 exit 1（已测场景的 FAIL 照常列在表格里）。
+  // 放在覆盖不足判定**之前**：未测量是更具体的成因，先把清单指名道姓地报出来。
+  if (unmeasuredIds.length > 0) {
+    console.error(
+      `[perf] 有 ${unmeasuredIds.length} 个场景未测量（timeout / 失败，无采样落盘）：${unmeasuredIds.join(", ")}\n` +
+        `        已测场景照常参与判定；未测量场景在报告里单列（UNMEASURED），不计入 FAIL / WARN。\n` +
+        `        本次结论**不完整**，请修复超时 / 失败后重跑（否则与"没回归"在退出码层面无法区分）。`,
+    );
+    process.exit(2);
+  }
   // PERF_REQUIRE_COMPARISON=1：要求本次必须完成比较（发版验证用）。
   // 没比上就退出码 2（infra 故障）——绝不允许"没比"伪装成"没回归"。
   //

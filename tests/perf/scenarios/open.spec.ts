@@ -24,6 +24,7 @@ import {
   kindsFor,
   readRunContext,
   shouldRun,
+  testTimeoutMs,
   writeRawFile,
 } from "../runner";
 
@@ -34,6 +35,8 @@ for (const tier of ctx.tiers) {
     const id = `open-${tier}-${kind}`;
 
     test(id, async ({ page }) => {
+      // 单测超时按档位（#247）：Playwright 的 test(details) 只认 tag/annotation，不认 timeout 选项
+      test.setTimeout(testTimeoutMs(tier));
       test.skip(!shouldRun(id, ctx), "不在本次运行范围（复测过滤）");
 
       const fixture = fixtureFor(tier, kind);
