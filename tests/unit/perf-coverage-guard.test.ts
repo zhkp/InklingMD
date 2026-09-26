@@ -433,3 +433,63 @@ describe("会话标定归因（#236）", () => {
     expect(report()).not.toMatch(/\| probeMs \|/); // 但不出现在判定表格里
   });
 });
+
+// 范围内偏慢会话的假 FAIL 披露（#259）：标定在历史范围内 ≠ 排除环境。
+// 实录：同一份代码（PR #253 只改 CI/文档）落在 runner 结构性双峰（30.95–50.85ms、参考 41.2ms）
+// 的偏慢侧两轮（+7.7% / +20%）→ 旧文案「机器档位不足以解释它（须看代码或 IO 侧）」
+// 把读者引向代码侧找不存在的回归。此处用该实录数字锁住两轮偏差的披露与结论订正。
+describe("范围内偏慢会话的归因披露（#259）", () => {
+  /** #259 实录基线：参考 41.2ms、历史范围 30.95–50.85ms（双峰） */
+  const probe259Baseline = {
+    frameMs: {
+      median: 16.8,
+      p95: 17.1,
+      max: 17.2,
+      n: 120,
+      history: [16.8, 16.8, 16.8],
+      historyP95: [17.1, 17.1, 17.1],
+    },
+    probeMs: { median: 41.2, p95: 41.2, max: 41.2, n: 3, history: [30.95, 50.85, 41.2] },
+  };
+
+  it("两轮都在范围内但均偏慢：两轮偏差都披露，且不再断言「机器档位不足以解释它」", () => {
+    writeBaseline(probe259Baseline);
+    writeRaw(ID, REGRESSED_FRAME_MS, { probeMs: 44.4 }); // 首轮 +7.8%（实录 44.4 / 参考 41.2）
+    writeRetest(ID, REGRESSED_FRAME_MS, { probeMs: 49.6 }); // 复测 +20.4%，两轮均未超历史范围
+
+    const result = runReport("final");
+
+    expect(result.status).toBe(1); // 判定语义不变：仍判 FAIL（本 issue 只订正归因披露）
+    expect(report()).toContain("环境在历史范围内");
+    expect(report()).toContain("基线参考 41.2ms"); // 展示值不带浮点噪声
+    expect(report()).toContain("首轮比基线参考慢 7.8%");
+    // 旧实现只报首轮，这条断言在旧文案下必红——复测那台更慢时漏掉的正是关键证据
+    expect(report()).toContain("复测比基线参考慢 20.4%");
+    expect(report()).toContain("不能据此排除环境");
+    expect(report()).toContain("换 runner 重跑");
+    expect(report()).not.toContain("机器档位不足以解释它");
+  });
+
+  it("首轮缺标定数据：不伪造首轮偏差，复测侧照常披露", () => {
+    writeBaseline(probe259Baseline);
+    writeRaw(ID, REGRESSED_FRAME_MS); // 老产物：没有 probeMs
+    writeRetest(ID, REGRESSED_FRAME_MS, { probeMs: 49.6 });
+
+    expect(runReport("final").status).toBe(1);
+    expect(report()).toContain("首轮无标定数据");
+    expect(report()).toContain("复测比基线参考慢 20.4%");
+  });
+
+  it("历史中位数是长浮点时展示值保留 ≤2 位小数（线上曾印出 41.224999999999994ms）", () => {
+    // 4 点历史的中位数取中间两点均值 → 41.225，直接插值会带出浮点噪声
+    writeBaseline({
+      ...probe259Baseline,
+      probeMs: { median: 41.2, p95: 41.2, max: 41.2, n: 4, history: [40, 41, 41.45, 42] },
+    });
+    writeRaw(ID, undefined, { probeMs: 100 });
+
+    expect(runReport("final").status).toBe(0);
+    expect(report()).not.toMatch(/基线参考 \d+\.\d{5,}ms/);
+    expect(report()).toContain("基线参考 41.23ms"); // 41.225 按 2 位小数四舍五入
+  });
+});
