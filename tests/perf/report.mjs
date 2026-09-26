@@ -707,7 +707,9 @@ function main() {
     const firstMed = pick("first").length > 0 ? median(pick("first")) : undefined;
     const retestMed = pick("retest").length > 0 ? median(pick("retest")) : undefined;
     const baseRef = median(probes.map((p) => p.base));
-    const fmt = (v) => (typeof v === "number" ? `${v}ms` : "—");
+    // fmt 统一保留 ≤2 位小数：baseRef 是历史中位数，直接插值会把浮点噪声原样印进报告
+    // （实测线上出现「基线参考 41.224999999999994ms」）
+    const fmt = (v) => (typeof v === "number" ? `${Math.round(v * 100) / 100}ms` : "—");
     const beyond = (v) => typeof v === "number" && v > hi * 1.1;
     const firstBad = beyond(firstMed);
     const retestBad = beyond(retestMed);
@@ -755,7 +757,7 @@ function main() {
         `同样能顶出假 FAIL（#259）；FAIL 是否成立以**换 runner 重跑**为准——代码性回归不会因换 runner 消失`;
     }
     lines.push(
-      `- 会话标定（与代码无关的固定工作量，#236）：基线参考 ${baseRef}ms，历史范围 ${lo}–${hi}ms，` +
+      `- 会话标定（与代码无关的固定工作量，#236）：基线参考 ${fmt(baseRef)}，历史范围 ${lo}–${hi}ms，` +
         `首轮 ${fmt(firstMed)}${typeof retestMed === "number" ? ` / 复测 ${fmt(retestMed)}` : ""}` +
         `（${probes.length} 个场景）→ ${verdict}`,
     );

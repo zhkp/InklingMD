@@ -461,6 +461,7 @@ describe("范围内偏慢会话的归因披露（#259）", () => {
 
     expect(result.status).toBe(1); // 判定语义不变：仍判 FAIL（本 issue 只订正归因披露）
     expect(report()).toContain("环境在历史范围内");
+    expect(report()).toContain("基线参考 41.2ms"); // 展示值不带浮点噪声
     expect(report()).toContain("首轮比基线参考慢 7.8%");
     // 旧实现只报首轮，这条断言在旧文案下必红——复测那台更慢时漏掉的正是关键证据
     expect(report()).toContain("复测比基线参考慢 20.4%");
@@ -477,5 +478,18 @@ describe("范围内偏慢会话的归因披露（#259）", () => {
     expect(runReport("final").status).toBe(1);
     expect(report()).toContain("首轮无标定数据");
     expect(report()).toContain("复测比基线参考慢 20.4%");
+  });
+
+  it("历史中位数是长浮点时展示值保留 ≤2 位小数（线上曾印出 41.224999999999994ms）", () => {
+    // 4 点历史的中位数取中间两点均值 → 41.225，直接插值会带出浮点噪声
+    writeBaseline({
+      ...probe259Baseline,
+      probeMs: { median: 41.2, p95: 41.2, max: 41.2, n: 4, history: [40, 41, 41.45, 42] },
+    });
+    writeRaw(ID, undefined, { probeMs: 100 });
+
+    expect(runReport("final").status).toBe(0);
+    expect(report()).not.toMatch(/基线参考 \d+\.\d{5,}ms/);
+    expect(report()).toContain("基线参考 41.23ms"); // 41.225 按 2 位小数四舍五入
   });
 });
