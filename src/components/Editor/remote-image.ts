@@ -6,11 +6,15 @@
 // - 位置跟踪：待替换节点的位置记在插件 state 里，随每个事务的 mapping 映射；
 //   替换前再校验「该位置仍是 src 相同的图片节点」，用户中途删改不会误伤其他内容
 // - 撤销语义：src 替换事务不进撤销历史（addToHistory=false），一次粘贴仍是一个撤销步
+// - 撤销/重做回放若重新引入远程图片（src 替换不在历史里，redo 后是远程 URL），自动重新入队
+//   本地化（#251）：只处理相对上一状态「多出来」的远程图片，文档自带（非粘贴而来）的
+//   远程引用不会因此被下载
 // - 失败降级：下载失败/超时/超限/403 时保留远程 URL（不产生空引用），汇总后一次性提示
 // - SVG 不下载（可含脚本），保持远程引用；未保存草稿没有 assets 目录，同样保持远程引用
 // - 去重：写盘走 saveImageAsset，assets/ 里已有相同内容时复用（重复粘贴不产生副本）
 
 import { Plugin, PluginKey } from "@milkdown/kit/prose/state";
+import { isHistoryTransaction } from "@milkdown/kit/prose/history";
 import type { EditorView } from "@milkdown/kit/prose/view";
 import type { Node as PMNode } from "@milkdown/kit/prose/model";
 import { downloadRemoteImage, mapRemoteImageError, type RemoteImage } from "../../lib/fs";
@@ -39,6 +43,8 @@ interface PendingImage {
 
 interface RemoteImageState {
   pending: PendingImage[];
+  /** 历史回放（撤销/重做）代数：仅在 `docChanged` 的历史事务上 +1，view.update 据此只处理一次 */
+  replaySeq: number;
 }
 
 interface RemoteImageMeta {
@@ -71,6 +77,20 @@ export function collectRemoteImages(doc: PMNode, from: number, to: number): { po
     return true;
   });
   return out;
+}
+
+/** 统计文档内远程图片 src 的出现次数（多集）：识别历史回放「新引入」了哪些图片 */
+function remoteSrcCounts(doc: PMNode): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const { src } of collectRemoteImages(doc, 0, doc.content.size)) {
+    counts.set(src, (counts.get(src) ?? 0) + 1);
+  }
+  return counts;
+}
+
+/** (位置, 地址) 复合键：同一地址可能在不同位置各有一份待替换节点 */
+function pendingKey(pos: number, src: string): string {
+  return `${pos}\u0000${src}`;
 }
 
 function shortUrl(url: string): string {
@@ -108,7 +128,14 @@ class Runner {
 
   enqueue(items: { pos: number; src: string }[]): Promise<void> {
     if (this.cancelled || isUntitledPath(this.deps.documentPath)) return Promise.resolve();
-    const candidates = items.filter((i) => isRemoteImageSrc(i.src) && !isSvgUrl(i.src));
+    // 粘贴路径与历史回放入口可能先后投递同一批图片：按 (位置, 地址) 去重——
+    // 已登记的 pending 不再重复入队（重复下载纯属浪费，内容哈希去重不能替代）
+    const registered = new Set(
+      (remoteImageKey.getState(this.view.state)?.pending ?? []).map((p) => pendingKey(p.pos, p.src)),
+    );
+    const candidates = items.filter(
+      (i) => isRemoteImageSrc(i.src) && !isSvgUrl(i.src) && !registered.has(pendingKey(i.pos, i.src)),
+    );
     const srcs = [...new Set(candidates.map((i) => i.src))].slice(0, MAX_REMOTE_IMAGES_PER_PASTE);
     const accepted = new Set(srcs);
     const add = candidates
@@ -208,7 +235,7 @@ export const remoteImagePlugin = (deps: RemoteImageDeps) => {
   return new Plugin<RemoteImageState>({
     key: remoteImageKey,
     state: {
-      init: () => ({ pending: [] }),
+      init: () => ({ pending: [], replaySeq: 0 }),
       apply: (tr, prev) => {
         let pending = prev.pending;
         if (tr.docChanged && pending.length > 0) {
@@ -223,13 +250,38 @@ export const remoteImagePlugin = (deps: RemoteImageDeps) => {
           const done = new Set(meta.done);
           pending = pending.filter((p) => !done.has(p.id));
         }
-        return pending === prev.pending ? prev : { pending };
+        const replaySeq = isHistoryTransaction(tr) && tr.docChanged ? prev.replaySeq + 1 : prev.replaySeq;
+        return pending === prev.pending && replaySeq === prev.replaySeq
+          ? prev
+          : { pending, replaySeq };
       },
     },
     view: (view) => {
       const runner = new Runner(view, resolved);
       runners.set(view, runner);
+      let lastReplaySeq = remoteImageKey.getState(view.state)?.replaySeq ?? 0;
       return {
+        update: (view, prevState) => {
+          const seq = remoteImageKey.getState(view.state)?.replaySeq ?? 0;
+          if (seq === lastReplaySeq) return;
+          lastReplaySeq = seq;
+          // 历史回放（撤销/重做）可能重新带回远程 URL 的图片：找出相对上一状态「多出来」的
+          // 远程图片重新入队（内容哈希去重 → 最多复用已有文件）。用计数差而非存在性判断，
+          // 同一地址被多次粘贴、只回放其中一份时也正确；文档自带的远程引用不会被误伤。
+          const remaining = remoteSrcCounts(prevState.doc);
+          const introduced: { pos: number; src: string }[] = [];
+          for (const item of collectRemoteImages(view.state.doc, 0, view.state.doc.content.size)) {
+            const left = remaining.get(item.src) ?? 0;
+            if (left > 0) remaining.set(item.src, left - 1);
+            else introduced.push(item);
+          }
+          // 在 update 内同步 dispatch 会重入 view.updateState，投递延后到微任务
+          if (introduced.length > 0) {
+            queueMicrotask(() => {
+              if (!runner.cancelled) void runner.enqueue(introduced);
+            });
+          }
+        },
         destroy: () => {
           runner.cancelled = true;
           runners.delete(view);
