@@ -2,6 +2,15 @@
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
+    <!--
+      G5/N1（#223/#224）：层序声明唯一落点。必须在任何样式之前由内联 <style> 建立，
+      禁止放到 App.css 首行（dev 下模块求值顺序会使 theme 先于 base 建立）。
+      release 下 Tauri 会给本标签注入 CSP nonce（见 #225 的注入协议：运行时
+      <style> 必须复用该 nonce，否则 style-src 的 nonce 策略会拦截无 nonce 样式）。
+    -->
+    <style id="inkling-layer-statement">
+      @layer base, theme, user;
+    </style>
     <link rel="icon" type="image/svg+xml" href="/vite.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>InklingMD</title>

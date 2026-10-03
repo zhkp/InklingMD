@@ -1,3 +1,6 @@
+/* #223/#224：本样式表统一入 @layer base（非缩进包裹，原因见 src/App.css 头注）。
+   存量色值已收敛为语义 token，S9 断言禁止新增散落硬编码色。 */
+@layer base {
 .table-toolbar {
   position: sticky;
   top: 0;
@@ -7,8 +10,8 @@
   gap: 0.25rem;
   flex-wrap: wrap;
   padding: 0.3rem 0.9rem;
-  background: var(--topbar-bg, #ffffff);
-  border-bottom: 1px solid var(--border, #d0d7de);
+  background: var(--topbar-bg);
+  border-bottom: 1px solid var(--border);
   font-size: 0.8rem;
 }
 
@@ -25,9 +28,9 @@
   gap: 0.3rem;
   padding: 0.22rem 0.5rem;
   border: 1px solid transparent;
-  border-radius: var(--radius-md, 6px);
+  border-radius: var(--radius-md);
   background: transparent;
-  color: var(--text-muted, #6e7681);
+  color: var(--text-muted);
   cursor: pointer;
   font-size: 0.78rem;
   line-height: 1.4;
@@ -35,17 +38,17 @@
 }
 
 .tt-btn:hover {
-  background: var(--btn-hover-bg, rgba(175, 184, 193, 0.2));
-  color: var(--text, #1f2328);
+  background: var(--btn-hover-bg);
+  color: var(--text);
 }
 
 .tt-btn:active {
-  background: var(--row-active-bg, rgba(9, 105, 218, 0.12));
+  background: var(--row-active-bg);
 }
 
 .tt-btn.tt-danger:hover {
-  background: rgba(207, 34, 46, 0.1);
-  color: var(--danger, #cf222e);
+  background: var(--shell-danger-subtle-hover);
+  color: var(--danger);
 }
 
 .tt-icon {
@@ -55,19 +58,19 @@
   min-width: 1.1rem;
   font-size: 0.9rem;
   line-height: 1;
-  color: var(--text-muted, #6e7681);
+  color: var(--text-muted);
 }
 .tt-btn:hover .tt-icon {
-  color: var(--accent, #0969da);
+  color: var(--accent);
 }
 .tt-btn.tt-danger:hover .tt-icon {
-  color: var(--danger, #cf222e);
+  color: var(--danger);
 }
 
 .tt-sep {
   width: 1px;
   height: 1rem;
-  background: var(--border, #d0d7de);
+  background: var(--border);
   margin: 0 0.3rem;
 }
 
@@ -78,11 +81,11 @@
   left: 0;
   z-index: 20;
   padding: 0.6rem;
-  background: var(--bg-elevated, #ffffff);
-  border: 1px solid var(--border, #d0d7de);
-  border-radius: var(--radius-lg, 10px);
-  box-shadow: var(--shadow-md, 0 4px 12px rgba(0, 0, 0, 0.12));
-  animation: menu-in 0.12s var(--ease, ease);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-md);
+  animation: menu-in 0.12s var(--ease);
 }
 
 .picker-grid {
@@ -96,7 +99,7 @@
   width: 1rem;
   height: 1rem;
   padding: 0;
-  border: 1px solid var(--border, #d0d7de);
+  border: 1px solid var(--border);
   background: transparent;
   cursor: pointer;
   border-radius: 2px;
@@ -104,8 +107,8 @@
 }
 
 .picker-cell.active {
-  background: var(--accent, #0969da);
-  border-color: var(--accent, #0969da);
+  background: var(--accent);
+  border-color: var(--accent);
 }
 
 .picker-label {
@@ -113,12 +116,12 @@
   text-align: center;
   font-size: 0.72rem;
   font-variant-numeric: tabular-nums;
-  color: var(--text-muted, #6e7681);
+  color: var(--text-muted);
 }
 
 /* 深色主题适配 */
 [data-theme="dark"] .tt-btn:hover {
-  background: rgba(139, 148, 158, 0.2);
-  color: var(--text, #e6edf3);
+  background: var(--content-table-toolbar-hover);
+  color: var(--text);
 }
-
+}

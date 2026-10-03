@@ -16,6 +16,8 @@ import {
 } from "@milkdown/kit/preset/gfm";
 import { history } from "@milkdown/kit/plugin/history";
 import { nord } from "@milkdown/theme-nord";
+// G5/N2（#223/#224）：vendor CSS 由 vite 插件 themeBaseLayerPlugin 统一包入 @layer base
+// （@import 类入口不能在源码侧整体包层；见 vite.config.ts）
 import "@milkdown/kit/prose/view/style/prosemirror.css";
 import "@milkdown/kit/prose/tables/style/tables.css";
 // TableToolbar 已提升到 App.tsx 的 topbar 下方作为固定非滚动行，

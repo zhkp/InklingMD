@@ -1,84 +1,84 @@
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
+import {
+  readFixture,
+  readSrc,
+  definitionUnion,
+  referencedTokens,
+  tokensInBlock,
+} from "../helpers/theme-css";
 
-const appCss = readFileSync(resolve(process.cwd(), "src/App.css"), "utf8");
-const linkDialogCss = readFileSync(
-  resolve(process.cwd(), "src/components/Editor/LinkDialog.css"),
-  "utf8",
-);
-const conflictDialogCss = readFileSync(
-  resolve(process.cwd(), "src/components/FileConflict/ConflictDialog.css"),
-  "utf8",
-);
-const deletedSnapshotsSource = readFileSync(
-  resolve(process.cwd(), "src/components/Sidebar/DeletedSnapshots.tsx"),
-  "utf8",
-);
+// #224 S1/S2/S5：断言能力与历史版本逐条对齐（不得弱化），
+// 但文件来源改由 tests/fixtures/theme-entries.json 驱动；
+// 切块解析改为花括号配平（#223 A-1，@layer 包裹+缩进后不再依赖「顶格 }」）。
+describe("Issue #180 theme contracts（#224 S1/S2/S5）", () => {
+  const fixture = readFixture();
+  const appCss = readSrc(fixture.themeBlocks.file);
+  const defined = definitionUnion(fixture);
 
-const definedTokens = new Set(
-  Array.from(appCss.matchAll(/^\s*(--[\w-]+)\s*:/gm), (match) => match[1]),
-);
-
-function tokensInBlock(selector: string): Set<string> {
-  const escapedSelector = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const block = appCss.match(new RegExp(`${escapedSelector}\\s*\\{([\\s\\S]*?)\\n\\}`))?.[1];
-  if (!block) return new Set();
-  return new Set(
-    Array.from(
-      block.matchAll(/^\s*(--[\w-]+)\s*:/gm),
-      (match) => match[1],
-    ),
-  );
-}
-
-function referencedTokens(source: string): string[] {
-  return Array.from(source.matchAll(/var\(\s*(--[\w-]+)/g), (match) => match[1]);
-}
-
-const lightTokens = tokensInBlock('[data-theme="light"]');
-const darkTokens = tokensInBlock('[data-theme="dark"]');
-const themeColorTokens = [
-  "--accent",
-  "--accent-hover",
-  "--accent-fg",
-  "--border",
-  "--text",
-  "--text-muted",
-  "--btn-bg",
-  "--bg-elevated",
-  "--bg-hover",
-  "--bg-subtle",
-  "--editor-bg",
-  "--danger",
-  "--success",
-  "--warning",
-  "--ring",
-];
-
-describe("Issue #180 theme contracts", () => {
-  it.each([
-    ["LinkDialog.css", linkDialogCss],
-    ["ConflictDialog.css", conflictDialogCss],
-    ["DeletedSnapshots.tsx", deletedSnapshotsSource],
-  ])("%s only references declared application tokens", (_name, source) => {
-    const missing = referencedTokens(source).filter((token) => !definedTokens.has(token));
-    expect([...new Set(missing)]).toEqual([]);
+  it.each(
+    fixture.sourceScanFiles
+      .map((rel) => [rel, readSrc(rel)] as [string, string])
+      // LinkDialog.css / ConflictDialog.css 的 var() 同样在 S1 覆盖范围内
+      .concat([
+        ["src/components/Editor/LinkDialog.css", readSrc("src/components/Editor/LinkDialog.css")],
+        ["src/components/FileConflict/ConflictDialog.css", readSrc("src/components/FileConflict/ConflictDialog.css")],
+      ]),
+  )("S1 %s 引用的每个 var(--x) 都能在清单定义并集中找到", (_name, source) => {
+    const missing = [...new Set(referencedTokens(source))].filter((t) => !defined.has(t));
+    expect(missing).toEqual([]);
   });
 
-  it("declares every theme-specific component token in both built-in themes", () => {
-    expect(themeColorTokens.filter((token) => !lightTokens.has(token))).toEqual([]);
-    expect(themeColorTokens.filter((token) => !darkTokens.has(token))).toEqual([]);
+  it("S2 themeColorTokens 在 light/dark 两块都声明", () => {
+    const lightTokens = tokensInBlock(appCss, fixture.themeBlocks.light);
+    const darkTokens = tokensInBlock(appCss, fixture.themeBlocks.dark);
+    expect(fixture.themeColorTokens.filter((t) => !lightTokens.has(t))).toEqual([]);
+    expect(fixture.themeColorTokens.filter((t) => !darkTokens.has(t))).toEqual([]);
   });
 
-  it("LinkDialog stylesheet defines every class used for its styled controls", () => {
-    for (const className of [
-      "link-dialog-modal",
-      "link-dialog-close",
-      "link-dialog-btn-cancel",
-      "link-dialog-btn-confirm",
-    ]) {
+  it("S5 LinkDialog.css 定义其样式控件用到的 4 个 class", () => {
+    const linkDialogCss = readSrc("src/components/Editor/LinkDialog.css");
+    for (const className of fixture.linkDialogClasses) {
       expect(linkDialogCss).toMatch(new RegExp(`\\.${className}\\b`));
     }
+  });
+});
+
+// #223 A-1：历史 tokensInBlock 依赖「顶格 }」正则，App.css 包进
+// @layer base { … }（且内部块缩进）后，light 块会被惰性匹配到文件尾，
+// 导致 light 侧断言恒真（静默弱化）。花括号配平解析必须对此免疫。
+describe("tokensInBlock 花括号配平解析（#223 A-1 回归）", () => {
+  it("在 @layer 包裹 + 统一缩进的形态下仍精确切出 light/dark 块", () => {
+    const wrapped = `@layer base {
+  :root,
+  [data-theme="light"] {
+    --a: 1;
+    --shared: 1;
+  }
+  .other { color: red; }
+  [data-theme="dark"] {
+    --a: 2;
+    --shared: 2;
+    --only-dark: 2;
+  }
+}`;
+    const light = tokensInBlock(wrapped, '[data-theme="light"]');
+    const dark = tokensInBlock(wrapped, '[data-theme="dark"]');
+    expect(light.has("--a")).toBe(true);
+    expect(light.has("--only-dark")).toBe(false);
+    expect(dark.has("--only-dark")).toBe(true);
+  });
+
+  it("负例：light 块缺某个 themeColorToken 时必须能检出（旧正则恒真，这里必须失败）", () => {
+    const broken = `@layer base {
+  :root,
+  [data-theme="light"] {
+    --other: 1;
+  }
+  [data-theme="dark"] {
+    --missing-in-light: 2;
+  }
+}`;
+    const light = tokensInBlock(broken, '[data-theme="light"]');
+    expect(light.has("--missing-in-light")).toBe(false);
   });
 });

@@ -1,0 +1,94 @@
+{
+  "//": "#224 主题样式断言入口清单（唯一真值源）。新增/删除 CSS 入口必须同步登记，否则 S13/未登记守卫失败。",
+  "tokenDefinitionFiles": [
+    "src/App.css",
+    "src/components/**/*.css"
+  ],
+  "themeBlocks": {
+    "file": "src/App.css",
+    "light": "[data-theme=\"light\"]",
+    "dark": "[data-theme=\"dark\"]"
+  },
+  "hardcodeScanFiles": [
+    "src/App.css",
+    "src/components/GlobalSearch/GlobalSearchPanel.css",
+    "src/components/QuickOpen/QuickOpenPanel.css"
+  ],
+  "forbiddenHardcodedColors": ["#cf222e"],
+  "sourceScanFiles": [
+    "src/components/Sidebar/DeletedSnapshots.tsx"
+  ],
+  "linkDialogClasses": [
+    "link-dialog-modal",
+    "link-dialog-close",
+    "link-dialog-btn-cancel",
+    "link-dialog-btn-confirm"
+  ],
+  "requiredTokens": [
+    "--ease",
+    "--duration",
+    "--mono-font",
+    "--radius-sm",
+    "--radius-md",
+    "--radius-lg",
+    "--bg-elevated",
+    "--bg-subtle",
+    "--editor-bg",
+    "--border",
+    "--text",
+    "--text-muted",
+    "--accent",
+    "--accent-hover",
+    "--success",
+    "--danger",
+    "--ring"
+  ],
+  "themeColorTokens": [
+    "--accent",
+    "--accent-hover",
+    "--accent-fg",
+    "--border",
+    "--text",
+    "--text-muted",
+    "--btn-bg",
+    "--bg-elevated",
+    "--bg-hover",
+    "--bg-subtle",
+    "--editor-bg",
+    "--danger",
+    "--success",
+    "--warning",
+    "--ring"
+  ],
+  "layers": {
+    "layerStatement": {
+      "file": "index.html",
+      "elementId": "inkling-layer-statement",
+      "order": ["base", "theme", "user"]
+    },
+    "base": [
+      { "entry": "src/App.css", "wrap": "source" },
+      { "entry": "src/components/**/*.css", "wrap": "source" },
+      { "entry": "@milkdown/prose/lib/style/prosemirror.css", "wrap": "plugin-transform" },
+      { "entry": "@milkdown/prose/lib/style/tables.css", "wrap": "plugin-transform" },
+      { "entry": "katex/dist/katex.min.css", "wrap": "plugin-transform" }
+    ],
+    "themeStyleElementId": "inkling-theme",
+    "userStyleElementId": "inkling-custom-theme"
+  },
+  "s9AllowMarkers": ["issue-i1"],
+  "injectionFunctions": [
+    { "file": "src/store/theme.ts", "names": ["applyCustomCSS"] }
+  ],
+  "innerHTMLAllowlist": [
+    "src/main.tsx",
+    "src/lib/exporter.ts",
+    "src/components/Editor/mermaid-view.ts",
+    "src/components/Editor/math.ts",
+    "src/components/Editor/html-view.ts"
+  ],
+  "buildAssets": {
+    "cssCount": 3,
+    "requiredChunks": ["index", "vendor_milkdown", "vendor_katex"]
+  }
+}

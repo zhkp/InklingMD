@@ -20,7 +20,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; img-src 'self' https: data: asset:; style-src 'self' 'unsafe-inline';",
+      "csp": "default-src 'self'; img-src 'self' https: data: asset: http://asset.localhost; font-src 'self' data: asset: http://asset.localhost; style-src 'self' 'unsafe-inline';",
       "assetProtocol": {
         "enable": true,
         "scope": [

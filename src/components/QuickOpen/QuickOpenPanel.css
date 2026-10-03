@@ -1,14 +1,17 @@
+/* #223/#224：本样式表统一入 @layer base（非缩进包裹，原因见 src/App.css 头注）。
+   存量色值已收敛为语义 token，S9 断言禁止新增散落硬编码色。 */
+@layer base {
 .qo-backdrop {
   position: fixed;
   inset: 0;
-  background: rgba(31, 35, 40, 0.45);
+  background: var(--shell-backdrop);
   backdrop-filter: blur(2px);
   display: flex;
   align-items: flex-start;
   justify-content: center;
   padding-top: 12vh;
   z-index: 150;
-  animation: backdrop-in 0.15s var(--ease, ease);
+  animation: backdrop-in 0.15s var(--ease);
 }
 
 /* 命令面板式弹层：从顶部轻微下滑 */
@@ -29,12 +32,12 @@
   max-height: 70vh;
   display: flex;
   flex-direction: column;
-  background: var(--bg-elevated, #ffffff);
-  border: 1px solid var(--border, #d0d7de);
-  border-radius: var(--radius-lg, 12px);
-  box-shadow: var(--shadow-lg, 0 8px 28px rgba(0, 0, 0, 0.2));
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
   overflow: hidden;
-  animation: qo-drop-in 0.18s var(--ease, ease);
+  animation: qo-drop-in 0.18s var(--ease);
 }
 
 .qo-header {
@@ -42,25 +45,25 @@
   align-items: center;
   gap: 0.5rem;
   padding: 0.65rem 0.85rem;
-  border-bottom: 1px solid var(--border, #eaeef2);
+  border-bottom: 1px solid var(--border);
 }
 
 .qo-input {
   flex: 1;
-  border: 1px solid var(--border, #d0d7de);
-  border-radius: var(--radius-md, 6px);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
   padding: 0.42rem 0.65rem;
   font-size: 0.9rem;
   font-family: inherit;
-  background: var(--editor-bg, #ffffff);
-  color: var(--text, #1f2328);
+  background: var(--editor-bg);
+  color: var(--text);
   outline: none;
   transition:
     border-color var(--duration) var(--ease),
     box-shadow var(--duration) var(--ease);
 }
 .qo-input:focus {
-  border-color: var(--accent, #2f81f7);
+  border-color: var(--accent);
   box-shadow: var(--ring);
 }
 
@@ -72,20 +75,20 @@
   height: 26px;
   border: none;
   background: transparent;
-  color: var(--text-muted, #6e7681);
+  color: var(--text-muted);
   cursor: pointer;
   padding: 0;
-  border-radius: var(--radius-md, 6px);
+  border-radius: var(--radius-md);
   line-height: 1;
 }
 .qo-close:hover {
-  background: var(--row-hover-bg, rgba(0, 0, 0, 0.06));
-  color: var(--text, #1f2328);
+  background: var(--row-hover-bg);
+  color: var(--text);
 }
 /* 键盘用户必须看得见焦点（与 #188 的约定一致） */
 .qo-close:focus-visible,
 .qo-retry:focus-visible {
-  outline: 2px solid var(--accent, #0969da);
+  outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
 
@@ -95,28 +98,28 @@
   gap: 0.5rem;
   padding: 0.3rem 0.8rem;
   font-size: 0.74rem;
-  color: var(--text-muted, #6e7681);
-  border-bottom: 1px solid var(--border, #eaeef2);
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--border);
 }
 
 .qo-error {
   /* 走主题变量：深色主题下 --danger 是 #f85149，硬编码 #cf222e 会在深色下偏暗
      （仓库主流写法，与 Sidebar/ConflictDialog/ShortcutsCustomize 一致） */
-  color: var(--danger, #cf222e);
+  color: var(--danger);
 }
 
 .qo-retry {
-  border: 1px solid var(--border, #d0d7de);
+  border: 1px solid var(--border);
   background: transparent;
-  color: var(--text, #1f2328);
+  color: var(--text);
   font-size: 0.74rem;
   font-family: inherit;
   padding: 0.1rem 0.5rem;
-  border-radius: var(--radius-md, 6px);
+  border-radius: var(--radius-md);
   cursor: pointer;
 }
 .qo-retry:hover {
-  background: var(--row-hover-bg, rgba(0, 0, 0, 0.05));
+  background: var(--row-hover-bg);
 }
 
 .qo-results {
@@ -130,28 +133,28 @@
   align-items: center;
   gap: 0.5rem;
   padding: 0.32rem 0.55rem;
-  border-radius: var(--radius-md, 6px);
+  border-radius: var(--radius-md);
   cursor: pointer;
   font-size: 0.84rem;
 }
 .qo-item:hover,
 .qo-item-active {
-  background: var(--accent-subtle, rgba(9, 105, 218, 0.08));
+  background: var(--accent-subtle);
 }
 .qo-item-active {
-  box-shadow: inset 2px 0 0 var(--accent, #0969da);
+  box-shadow: inset 2px 0 0 var(--accent);
 }
 
 .qo-item-icon {
   display: inline-flex;
   align-items: center;
-  color: var(--accent, #0969da);
+  color: var(--accent);
   flex-shrink: 0;
 }
 
 .qo-item-name {
   font-weight: 600;
-  color: var(--text, #1f2328);
+  color: var(--text);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -162,7 +165,7 @@
 .qo-item-dir {
   flex: 1;
   min-width: 0;
-  color: var(--text-muted, #6e7681);
+  color: var(--text-muted);
   font-size: 0.76rem;
   white-space: nowrap;
   overflow: hidden;
@@ -174,7 +177,7 @@
 .qo-empty {
   padding: 2rem 1rem;
   text-align: center;
-  color: var(--text-muted, #6e7681);
+  color: var(--text-muted);
   font-size: 0.85rem;
 }
 
@@ -184,11 +187,12 @@
   justify-content: space-between;
   gap: 0.75rem;
   padding: 0.35rem 0.8rem;
-  border-top: 1px solid var(--border, #eaeef2);
+  border-top: 1px solid var(--border);
   font-size: 0.72rem;
-  color: var(--text-muted, #6e7681);
+  color: var(--text-muted);
 }
 
 .qo-limit {
-  color: var(--accent, #0969da);
+  color: var(--accent);
+}
 }
