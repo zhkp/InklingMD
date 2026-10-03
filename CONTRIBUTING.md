@@ -438,6 +438,27 @@ tag 运行若因故只走到两轮（例如确认轮候选为空、或 retest2 j
    `WARN` 读成因，被噪声（3σ）或绝对地板挡下的**不是**回归。
 5. 汇报发版结果时**必须一并给出性能结论**，不得只报"发版成功"。
 
+## 样式改动与主题断言（Theme Epic #223/#224，S1–S16）
+
+所有样式都在级联层 `@layer base, theme, user` 内（层序声明在 [index.html](./index.html) 内联，是唯一落点）。改样式前先按下表选择防线：
+
+| 改动性质 | 必需防线 | 理由 |
+|---|---|---|
+| 变量 / 选择器结构变化（新增 token、拆文件、`data-theme` 块、改层包裹） | **源级静态断言**（`tests/styles/**`、`tests/components/*ThemeTokens`） | 跨平台稳定，结构变化用静态断言可精确表达，且不被运行时环境（dev/打包、浏览器/Tauri）干扰 |
+| 主题加载机制（层序、注入顺序、快照、首帧） | **E2E 行为断言**（dev server：S7/S8/S12/S13/S14，见 `tests/e2e/theme-layers.spec.ts`） | 机制正确性只能在真实样式表/DOM 上验证 |
+| 构建期分文件 / 压缩（manualChunks、@import 内联、esbuild 压缩、@font-face） | **产物级断言 S16**（`pnpm check:build-layers`，清空 dist → 构建 → `scripts/check-theme-build-assets.mjs`） | dev 与 build 的 CSS 分文件策略不同，产物正确性只在构建后成立 |
+| 视觉呈现变化（颜色值微调、间距、观感类） | 截图比对或**人工核对**（无截图基线时，PR 描述中写明人工核对步骤） | 静态断言无法覆盖像素级呈现 |
+
+硬规则（#224 关闭标准）：
+
+1. **任何样式改动至少留一条机器可验证断言**；确实无法机器验证的，必须在 PR 描述中显式声明人工核对步骤，观感类差异不得静默合入。
+2. **新增/删除 CSS 入口**必须同步登记 [tests/fixtures/theme-entries.json](./tests/fixtures/theme-entries.json)，未登记守卫会失败；所有应用样式必须在 `@layer base` 内（源码包裹或 `vite.config.ts` 的 `themeBaseLayerPlugin`），禁止残留未分层样式。
+3. **零散落硬编码色**：清单内文件剥注释后，`#hex` / `rgba()` 只允许出现在 `--token: <值>` 定义行（S9）；存量色值统一走语义 token，新增组件样式不得直接写色值。token 命名沿用现有名（不改名），新增外壳/内容 token 分别用 `--shell-*` / `--content-*` 前缀，白名单见 [src/theme/token-whitelist.json](./src/theme/token-whitelist.json)（与 App.css 自动对账）。
+4. 主题/自定义 CSS 注入 `<style>` 必须 `textContent` 或 CSSOM，**禁止 innerHTML/字符串拼接**（S15，函数级断言）；打包期还需复用层序声明标签上的 CSP nonce（release 下 `style-src` 含 nonce，见 #225）。
+5. CI 门禁三段固定为：① 静态/单测（`pnpm test`）→ ② E2E（`pnpm e2e`，dev server）→ ③ 清空 dist 后构建 + S16（`pnpm check:build-layers`）；不得对陈旧 `dist/` 断言。
+
+截图基线：本项目暂不引入截图比对（`@layer` 迁移等纯结构变化以源级断言 + S13/S16 兜底）；若未来引入，限定 chromium + 固定容器尺寸，并在 CI 连续无 flake 后再启用。
+
 ## 代码风格
 
 - TypeScript，优先使用类型而非 `any`。

@@ -1,11 +1,14 @@
+/* #223/#224：本样式表统一入 @layer base（非缩进包裹，原因见 src/App.css 头注）。
+   存量色值已收敛为语义 token，S9 断言禁止新增散落硬编码色。 */
+@layer base {
 .status-bar {
   display: flex;
   align-items: center;
   gap: 0.45rem;
   padding: 0.32rem 0.9rem;
-  border-top: 1px solid var(--border, #d0d7de);
-  background: var(--statusbar-bg, #f6f8fa);
-  color: var(--text-muted, #6e7681);
+  border-top: 1px solid var(--border);
+  background: var(--statusbar-bg);
+  color: var(--text-muted);
   font-size: 0.72rem;
   letter-spacing: 0.01em;
   flex-shrink: 0;
@@ -33,17 +36,18 @@
   background: transparent;
   color: inherit;
   cursor: pointer;
-  border-radius: var(--radius-sm, 4px);
+  border-radius: var(--radius-sm);
   font: inherit;
   font-variant-numeric: tabular-nums;
   line-height: 1.5;
 }
 .status-zoom:hover {
-  background: var(--row-hover-bg, rgba(0, 0, 0, 0.04));
-  color: var(--text, #1f2328);
+  background: var(--row-hover-bg);
+  color: var(--text);
 }
 /* 非 100% 时高亮提示用户当前处于缩放态 */
 .status-zoom-active {
-  color: var(--accent, #0969da);
+  color: var(--accent);
   font-weight: 600;
+}
 }

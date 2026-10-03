@@ -1,3 +1,6 @@
+/* #223/#224：本样式表统一入 @layer base（非缩进包裹，原因见 src/App.css 头注）。
+   存量色值已收敛为语义 token，S9 断言禁止新增散落硬编码色。 */
+@layer base {
 .tab-context-backdrop {
   position: fixed;
   inset: 0;
@@ -7,13 +10,13 @@
 .tab-context-menu {
   position: fixed;
   min-width: 152px;
-  background: var(--bg-elevated, #ffffff);
-  border: 1px solid var(--border, #d0d7de);
-  border-radius: var(--radius-lg, 10px);
-  box-shadow: var(--shadow-md, 0 4px 16px rgba(0, 0, 0, 0.15));
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-md);
   padding: 5px;
   z-index: 201;
-  animation: menu-in 0.12s var(--ease, ease);
+  animation: menu-in 0.12s var(--ease);
 }
 
 .tab-context-item {
@@ -21,27 +24,28 @@
   width: 100%;
   border: none;
   background: transparent;
-  color: var(--text, #1f2328);
+  color: var(--text);
   font-size: 0.8rem;
   padding: 0.4rem 0.65rem;
   text-align: left;
   cursor: pointer;
   font-family: inherit;
-  border-radius: var(--radius-md, 6px);
+  border-radius: var(--radius-md);
   transition: none;
 }
 .tab-context-item:hover:not(:disabled) {
-  background: var(--accent-subtle, rgba(9, 105, 218, 0.1));
-  color: var(--accent, #0969da);
+  background: var(--accent-subtle);
+  color: var(--accent);
 }
 .tab-context-item:disabled {
-  color: var(--text-muted, #8b949e);
+  color: var(--text-muted);
   cursor: default;
   opacity: 0.5;
 }
 
 .tab-context-sep {
   height: 1px;
-  background: var(--border, #eaeef2);
+  background: var(--border);
   margin: 5px 4px;
+}
 }

@@ -1,7 +1,10 @@
+/* #223/#224：本样式表统一入 @layer base（非缩进包裹，原因见 src/App.css 头注）。
+   存量色值已收敛为语义 token，S9 断言禁止新增散落硬编码色。 */
+@layer base {
 .tabs-bar {
   flex-shrink: 0;
-  background: var(--sidebar-bg, #f6f8fa);
-  border-bottom: 1px solid var(--border, #d0d7de);
+  background: var(--sidebar-bg);
+  border-bottom: 1px solid var(--border);
   /* 隐藏横向滚动条（避免占用垂直高度破坏边界对齐），滚轮滚动见 TabsBar.tsx */
   overflow-x: auto;
   overflow-y: hidden;
@@ -30,35 +33,35 @@
   margin-top: 4px;
   border: 1px solid transparent;
   border-bottom: none;
-  border-radius: var(--radius-md, 6px) var(--radius-md, 6px) 0 0;
+  border-radius: var(--radius-md) var(--radius-md) 0 0;
   background: transparent;
-  color: var(--text-muted, #6e7681);
+  color: var(--text-muted);
   cursor: pointer;
   font-size: 0.78rem;
   user-select: none;
   position: relative;
   flex-shrink: 0;
   transition:
-    background-color 0.12s var(--ease, ease),
-    color 0.12s var(--ease, ease);
+    background-color 0.12s var(--ease),
+    color 0.12s var(--ease);
 }
 .tab-disambiguated {
   max-width: 320px;
 }
 .tab:hover {
-  background: var(--row-hover-bg, rgba(0, 0, 0, 0.04));
+  background: var(--row-hover-bg);
 }
 /* #188：tab 可被键盘聚焦（role=tab + tabIndex），给出可见焦点环 */
 .tab:focus-visible {
-  outline: 2px solid var(--accent, #0969da);
+  outline: 2px solid var(--accent);
   outline-offset: -2px;
-  border-radius: var(--radius-md, 6px) var(--radius-md, 6px) 0 0;
+  border-radius: var(--radius-md) var(--radius-md) 0 0;
 }
 /* 活跃 tab：上浮卡片样式，与编辑区背景融为一体 */
 .tab-active {
-  background: var(--editor-bg, #ffffff);
-  color: var(--text, #1f2328);
-  border-color: var(--border, #d0d7de);
+  background: var(--editor-bg);
+  color: var(--text);
+  border-color: var(--border);
   position: relative;
 }
 /* 活跃 tab 底部遮住 tabs-bar 的分隔线，形成"连通"效果 */
@@ -69,7 +72,7 @@
   right: 0;
   bottom: -1px;
   height: 1px;
-  background: var(--editor-bg, #ffffff);
+  background: var(--editor-bg);
   z-index: 1;
 }
 /* 活跃 tab 顶部强调条 */
@@ -81,15 +84,15 @@
   top: 0;
   height: 2px;
   border-radius: 2px 2px 0 0;
-  background: var(--accent, #0969da);
+  background: var(--accent);
 }
 
 /* 拖拽悬停时的视觉反馈：左侧蓝色竖线 */
 .tab-drag-over {
-  box-shadow: -2px 0 0 0 var(--accent, #0969da);
+  box-shadow: -2px 0 0 0 var(--accent);
 }
 .tab.tab-drag-over {
-  background: var(--row-hover-bg, rgba(0, 0, 0, 0.06));
+  background: var(--row-hover-bg);
 }
 
 .tab-name {
@@ -104,7 +107,7 @@
   max-width: 160px;
 }
 .tab-description {
-  color: var(--text-muted, #6e7681);
+  color: var(--text-muted);
   flex: 1 1 auto;
   min-width: 36px;
   overflow: hidden;
@@ -114,7 +117,7 @@
 
 /* 未保存圆点：accent 色呼吸感 */
 .tab-dirty {
-  color: var(--accent, #0969da);
+  color: var(--accent);
   font-size: 0.6rem;
   flex-shrink: 0;
   line-height: 1;
@@ -130,11 +133,11 @@
 .tab-close {
   border: none;
   background: transparent;
-  color: var(--text-muted, #6e7681);
+  color: var(--text-muted);
   cursor: pointer;
   font-size: 0.7rem;
   padding: 2px;
-  border-radius: var(--radius-sm, 4px);
+  border-radius: var(--radius-sm);
   line-height: 1;
   flex-shrink: 0;
   display: flex;
@@ -144,9 +147,9 @@
   height: 18px;
   opacity: 0;
   transition:
-    opacity 0.12s var(--ease, ease),
-    background-color 0.12s var(--ease, ease),
-    color 0.12s var(--ease, ease);
+    opacity 0.12s var(--ease),
+    background-color 0.12s var(--ease),
+    color 0.12s var(--ease);
 }
 .tab:hover .tab-close,
 .tab-active .tab-close,
@@ -156,6 +159,7 @@
 }
 /* 有未保存标记时不隐藏关闭按钮（防止误关未保存文件） */
 .tab-close:hover {
-  background: var(--row-hover-bg, rgba(0, 0, 0, 0.1));
-  color: var(--text, #1f2328);
+  background: var(--row-hover-bg);
+  color: var(--text);
+}
 }
