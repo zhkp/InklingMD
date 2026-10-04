@@ -58,6 +58,7 @@ describe("S9 零硬编码色 + 入口登记守卫 + 白名单同步（#223/#224�
       base: string[];
       shell: string[];
       content: string[];
+      existingNamesByLayer: { shell: string[]; content: string[] };
     };
     const appCss = readSrc(fixture.themeBlocks.file);
     const appTokens = new Set(
@@ -74,16 +75,27 @@ describe("S9 零硬编码色 + 入口登记守卫 + 白名单同步（#223/#224�
     // 白名单不应有 App.css 未定义的幽灵 token
     const ghosts = [...listed].filter((t) => !appTokens.has(t));
     expect(ghosts, `白名单存在未定义 token：${ghosts.join(", ")}`).toEqual([]);
-    // 前缀分类自洽
-    for (const t of whitelist.shell) expect(t.startsWith("--shell-")).toBe(true);
+    // 分类自洽：shell 桶 = --shell-* 前缀 + existingNamesByLayer.shell（不改名的外壳层现有名）
+    const shellExisting = new Set(whitelist.existingNamesByLayer.shell);
+    for (const t of whitelist.shell) {
+      expect(
+        t.startsWith("--shell-") || shellExisting.has(t),
+        `shell 桶分类错误：${t}`,
+      ).toBe(true);
+    }
+    // content 桶 = --content-*/--code-block-* 前缀 + existingNamesByLayer.content
+    const contentExisting = new Set(whitelist.existingNamesByLayer.content);
     for (const t of whitelist.content) {
       expect(
-        t.startsWith("--content-") ||
-          t === "--editor-bg" ||
-          t.startsWith("--code-block-") ||
-          t.startsWith("--callout-"),
-        t,
+        t.startsWith("--content-") || t.startsWith("--code-block-") || contentExisting.has(t),
+        `content 桶分类错误：${t}`,
       ).toBe(true);
+    }
+    // 三桶互斥（同一 token 不得跨桶）
+    const seen = new Set<string>();
+    for (const t of [...whitelist.base, ...whitelist.shell, ...whitelist.content]) {
+      expect(seen.has(t), `token 跨界重复归属：${t}`).toBe(false);
+      seen.add(t);
     }
   });
 });

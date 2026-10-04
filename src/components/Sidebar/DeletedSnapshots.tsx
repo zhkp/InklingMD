@@ -156,14 +156,7 @@ export function DeletedSnapshots() {
                   </span>
                 </div>
                 <button
-                  className="sidebar-btn-icon"
-                  style={{
-                    fontSize: "11px",
-                    padding: "2px 6px",
-                    border: "1px solid var(--border, #444)",
-                    borderRadius: "3px",
-                    cursor: "pointer",
-                  }}
+                  className="sidebar-btn-icon snapshot-restore-btn"
                   onClick={() => handleRestore(snap)}
                   title="恢复为未命名新标签页"
                 >

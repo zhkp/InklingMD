@@ -403,4 +403,12 @@
 .snapshot-health-warning {
   color: var(--warning);
 }
+/* #223 C5：快照「恢复」按钮行内样式收拢（原行内 font-size/padding/border 含回退值） */
+.snapshot-restore-btn {
+  font-size: 11px;
+  padding: 2px 6px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  cursor: pointer;
+}
 }

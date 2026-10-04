@@ -91,9 +91,9 @@ const cmTheme = EditorView.theme({
   },
   ".cm-gutters": {
     backgroundColor: "transparent",
-    color: "var(--text-muted, #6e7681)",
+    color: "var(--text-muted)",
     border: "none",
-    borderRight: "1px solid var(--border, #d0d7de)",
+    borderRight: "1px solid var(--border)",
   },
   ".cm-content": { padding: "0.4rem 0" },
 });

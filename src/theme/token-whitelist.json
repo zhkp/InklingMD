@@ -1,11 +1,31 @@
 {
   "version": 1,
-  "description": "应用 token 白名单（#223 冻结，#306 G8 共用）。reject=base+shell（第三方 Typora 主题禁止覆盖）；content 允许任意主题覆盖。",
+  "description": "应用 token 白名单（#223 冻结，三层归属对齐 issue §C1/§C4；#306 G8 共用）。拒绝集 = base + shell（第三方 Typora 主题禁止覆盖）；content 允许任意主题覆盖。",
+  "existingNamesByLayer": {
+    "shell": [
+      "--topbar-bg",
+      "--sidebar-bg",
+      "--statusbar-bg",
+      "--btn-bg",
+      "--btn-hover-bg",
+      "--row-hover-bg",
+      "--row-active-bg",
+      "--outline-bg",
+      "--outline-hover-bg",
+      "--outline-active-bg",
+      "--accent-muted"
+    ],
+    "content": [
+      "--editor-bg",
+      "--callout-bg",
+      "--callout-accent",
+      "--editor-font"
+    ]
+  },
   "base": [
     "--accent",
     "--accent-fg",
     "--accent-hover",
-    "--accent-muted",
     "--accent-subtle",
     "--bg-elevated",
     "--bg-hover",
@@ -13,38 +33,35 @@
     "--border",
     "--border-strong",
     "--border-subtle",
-    "--btn-bg",
-    "--btn-hover-bg",
     "--danger",
     "--duration",
     "--ease",
-    "--editor-font",
     "--mono-font",
-    "--outline-active-bg",
-    "--outline-bg",
-    "--outline-hover-bg",
     "--radius-lg",
     "--radius-md",
     "--radius-sm",
     "--ring",
-    "--row-active-bg",
-    "--row-hover-bg",
     "--shadow-lg",
     "--shadow-md",
     "--shadow-sm",
-    "--sidebar-bg",
-    "--statusbar-bg",
     "--success",
     "--text",
     "--text-faint",
     "--text-muted",
-    "--topbar-bg",
     "--warning"
   ],
   "shellPrefixes": [
     "--shell-"
   ],
   "shell": [
+    "--accent-muted",
+    "--btn-bg",
+    "--btn-hover-bg",
+    "--outline-active-bg",
+    "--outline-bg",
+    "--outline-hover-bg",
+    "--row-active-bg",
+    "--row-hover-bg",
     "--shell-backdrop",
     "--shell-backdrop-strong",
     "--shell-capture-bg",
@@ -57,24 +74,23 @@
     "--shell-diff-add-border",
     "--shell-diff-add-fg",
     "--shell-diff-add-soft",
-    "--shell-diff-bg",
     "--shell-diff-remove-bg",
     "--shell-diff-remove-border",
     "--shell-diff-remove-fg",
     "--shell-diff-remove-soft",
-    "--shell-primary-hover",
     "--shell-scrollbar-thumb",
     "--shell-scrollbar-thumb-hover",
     "--shell-selection-bg",
-    "--shell-sidebar-active",
     "--shell-switch-bg",
     "--shell-switch-knob-bg",
     "--shell-switch-knob-shadow",
-    "--shell-toggle-active-bg",
     "--shell-warning-bg",
     "--shell-warning-border",
     "--shell-warning-fg",
-    "--shell-warning-highlight"
+    "--shell-warning-highlight",
+    "--sidebar-bg",
+    "--statusbar-bg",
+    "--topbar-bg"
   ],
   "contentPrefixes": [
     "--content-"
@@ -119,6 +135,7 @@
     "--content-table-selection-bg",
     "--content-table-toolbar-hover",
     "--content-toc-label-bg",
-    "--editor-bg"
+    "--editor-bg",
+    "--editor-font"
   ]
 }

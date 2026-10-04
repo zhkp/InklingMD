@@ -14,6 +14,7 @@ export interface ThemeEntries {
   hardcodeScanFiles: string[];
   forbiddenHardcodedColors: string[];
   sourceScanFiles: string[];
+  referencedUndefinedAllowlist: { token: string; reason: string }[];
   linkDialogClasses: string[];
   requiredTokens: string[];
   themeColorTokens: string[];
@@ -29,7 +30,7 @@ export interface ThemeEntries {
   };
   s9AllowMarkers: string[];
   injectionFunctions: { file: string; names: string[] }[];
-  innerHTMLAllowlist: string[];
+  innerHTMLAllowlist: { file: string; count: number; reason: string }[];
   buildAssets: { cssCount: number; requiredChunks: string[] };
 }
 

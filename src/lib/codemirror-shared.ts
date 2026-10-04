@@ -33,7 +33,9 @@ export const sharedCodeMirrorBaseTheme = EditorView.theme({
   "&": {
     fontSize: "0.85rem",
     backgroundColor: "transparent",
-    color: "var(--code-block-text, var(--text, #1f2328))",
+    // 双宿主复用：代码块内有 --code-block-* 元素级作用域；源代码模式下无，
+    // 回退到全局 --text（故最内层 hex 已随 #223 回退值清理移除）
+    color: "var(--code-block-text, var(--text))",
   },
   "&.cm-editor": {
     backgroundColor: "transparent",
@@ -44,9 +46,9 @@ export const sharedCodeMirrorBaseTheme = EditorView.theme({
   },
   ".cm-gutters": {
     backgroundColor: "transparent",
-    color: "var(--code-block-muted, var(--text-muted, #6e7681))",
+    color: "var(--code-block-muted, var(--text-muted))",
     border: "none",
-    borderRight: "1px solid var(--code-block-gutter-border, var(--border, #d0d7de))",
+    borderRight: "1px solid var(--code-block-gutter-border, var(--border))",
   },
   ".cm-activeLineGutter": {
     backgroundColor: "rgba(175, 184, 193, 0.15)",

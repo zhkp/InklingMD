@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   readFixture,
   readSrc,
+  expandEntries,
   definitionUnion,
   referencedTokens,
   tokensInBlock,
@@ -14,18 +15,31 @@ describe("Issue #180 theme contracts（#224 S1/S2/S5）", () => {
   const fixture = readFixture();
   const appCss = readSrc(fixture.themeBlocks.file);
   const defined = definitionUnion(fixture);
+  const allowedUndefined = new Set(fixture.referencedUndefinedAllowlist.map((e) => e.token));
 
-  it.each(
-    fixture.sourceScanFiles
-      .map((rel) => [rel, readSrc(rel)] as [string, string])
-      // LinkDialog.css / ConflictDialog.css 的 var() 同样在 S1 覆盖范围内
-      .concat([
-        ["src/components/Editor/LinkDialog.css", readSrc("src/components/Editor/LinkDialog.css")],
-        ["src/components/FileConflict/ConflictDialog.css", readSrc("src/components/FileConflict/ConflictDialog.css")],
-      ]),
-  )("S1 %s 引用的每个 var(--x) 都能在清单定义并集中找到", (_name, source) => {
-    const missing = [...new Set(referencedTokens(source))].filter((t) => !defined.has(t));
-    expect(missing).toEqual([]);
+  // S1 覆盖清单全量：tokenDefinitionFiles（CSS）+ sourceScanFiles（TSX），
+  // 不再只覆盖历史 3 个文件；`--bg` 等按 referencedUndefinedAllowlist 显式豁免。
+  const s1Files = [
+    ...expandEntries(fixture.tokenDefinitionFiles),
+    ...fixture.sourceScanFiles,
+  ].sort();
+
+  it.each(s1Files.map((rel) => [rel, readSrc(rel)] as [string, string]))(
+    "S1 %s 引用的每个 var(--x) 都能在清单定义并集中找到（阈值外例外见豁免清单）",
+    (_name, source) => {
+      const missing = [...new Set(referencedTokens(source))].filter(
+        (t) => !defined.has(t) && !allowedUndefined.has(t),
+      );
+      expect(missing).toEqual([]);
+    },
+  );
+
+  it("S1 豁免清单中的 token 确实仍处于「未定义」状态（避免豁免过期后长期挂着）", () => {
+    for (const { token } of fixture.referencedUndefinedAllowlist) {
+      expect(defined.has(token), `${token} 已有定义，请从 referencedUndefinedAllowlist 移除`).toBe(
+        false,
+      );
+    }
   });
 
   it("S2 themeColorTokens 在 light/dark 两块都声明", () => {

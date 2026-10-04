@@ -8,7 +8,8 @@
  * 检查项：
  *  ① dist/assets/*.css 恰好 3 个（index / vendor_milkdown / vendor_katex）；
  *  ② 每个资产用 postcss 解析后，顶层规则只能是 CSSLayerBlockRule /
- *     CSSLayerStatementRule（即「完全层化」，无未分层普通规则/@font-face）；
+ *     CSSLayerStatementRule，且**层名必须恰为 `base`**（防插件把 vendor 包成
+ *     `@layer vendor` 等其它名字——那样「未分层=0」仍成立却不满足 G5 层序）；
  *  ③ 不含残留 @charset / 外链 @import；
  *  ④ vendor_katex 单列存在、完全层化、层内含 @font-face（KaTeX 20 条同源字体）；
  *  ⑤ dist/index.html 的 @layer statement 位于所有样式表之前；
@@ -39,14 +40,18 @@ for (const chunk of ["index", "vendor_milkdown", "vendor_katex"]) {
   }
 }
 
-const layerBlockOrStatement = new Set(["atrule"]);
 for (const file of cssFiles) {
   const css = readFileSync(resolve(dist, "assets", file), "utf8");
   const ast = postcss.parse(css); {
-    // ② 顶层规则只能是带 layer 名的 @layer（块或 statement）
+    // ② 顶层规则只能是带 layer 名的 @layer（块或 statement），且层名必须恰为 base
     ast.each((node) => {
       if (node.type !== "atrule" || node.name !== "layer") {
         fail(`${file} 存在未分层顶层节点：${node.type} ${node.name ?? ""} ${node.selector ?? ""}`.trim());
+        return;
+      }
+      const layerNames = node.params.replace(/\s/g, "");
+      if (layerNames !== "base") {
+        fail(`${file} 存在非 base 层：@layer ${node.params}（G5 要求 base 入门清单全部包入 base）`);
       }
     });
     // ③ 残留 @charset / @import

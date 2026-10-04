@@ -87,8 +87,6 @@
   --shell-backdrop-strong: rgba(0, 0, 0, 0.4);
   --shell-danger-subtle: rgba(207, 34, 46, 0.08);
   --shell-danger-subtle-hover: rgba(207, 34, 46, 0.1);
-  --shell-sidebar-active: rgba(56, 139, 253, 0.15);
-  --shell-toggle-active-bg: rgba(47, 129, 247, 0.12);
   --shell-warning-highlight: rgba(210, 153, 34, 0.35);
   --shell-warning-bg: #fff8c5;
   --shell-warning-border: #e3b341;
@@ -99,9 +97,7 @@
   --shell-switch-bg: rgba(140, 149, 159, 0.45);
   --shell-switch-knob-bg: #ffffff;
   --shell-switch-knob-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
-  --shell-primary-hover: #0757b5;
   --shell-dialog-shadow: 0 10px 25px rgba(0, 0, 0, 0.2);
-  --shell-diff-bg: rgba(129, 139, 152, 0.06);
   --shell-diff-remove-bg: rgba(207, 34, 46, 0.12);
   --shell-diff-add-bg: rgba(26, 127, 55, 0.12);
   --shell-diff-remove-soft: rgba(207, 34, 46, 0.25);
@@ -1291,8 +1287,6 @@ button.save-indicator:focus-visible {
   --shell-backdrop-strong: rgba(0, 0, 0, 0.4);
   --shell-danger-subtle: rgba(207, 34, 46, 0.08);
   --shell-danger-subtle-hover: rgba(207, 34, 46, 0.1);
-  --shell-sidebar-active: rgba(56, 139, 253, 0.15);
-  --shell-toggle-active-bg: rgba(47, 129, 247, 0.12);
   --shell-warning-highlight: rgba(210, 153, 34, 0.35);
   --shell-warning-bg: #fff8c5;
   --shell-warning-border: #e3b341;
@@ -1303,9 +1297,7 @@ button.save-indicator:focus-visible {
   --shell-switch-bg: rgba(140, 149, 159, 0.45);
   --shell-switch-knob-bg: #ffffff;
   --shell-switch-knob-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
-  --shell-primary-hover: #0757b5;
   --shell-dialog-shadow: 0 10px 25px rgba(0, 0, 0, 0.2);
-  --shell-diff-bg: rgba(129, 139, 152, 0.06);
   --shell-diff-remove-bg: rgba(207, 34, 46, 0.12);
   --shell-diff-add-bg: rgba(26, 127, 55, 0.12);
   --shell-diff-remove-soft: rgba(207, 34, 46, 0.25);
@@ -1621,7 +1613,7 @@ button.save-indicator:focus-visible {
 /* 分屏面板：右侧第二面板，与主面板等宽 */
 .split-pane {
   flex: 1;
-  min-height: 0;
+  min-width: 0;
   display: flex;
   flex-direction: column;
   border-left: 1px solid var(--border);

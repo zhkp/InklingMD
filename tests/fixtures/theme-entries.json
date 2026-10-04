@@ -18,6 +18,10 @@
   "sourceScanFiles": [
     "src/components/Sidebar/DeletedSnapshots.tsx"
   ],
+  "//referencedUndefinedAllowlist": "S1 允许的「引用但全仓未定义」token；每条必须写明出处（评审：#223 只允许 I1 的 --bg）",
+  "referencedUndefinedAllowlist": [
+    { "token": "--bg", "reason": "issue-i1（#311）：Mermaid 工具栏按钮暗色白块，按 #223 裁决移出本批" }
+  ],
   "linkDialogClasses": [
     "link-dialog-modal",
     "link-dialog-close",
@@ -80,12 +84,13 @@
   "injectionFunctions": [
     { "file": "src/store/theme.ts", "names": ["applyCustomCSS"] }
   ],
+  "//innerHTMLAllowlist": "S15 点级豁免：file→允许的 innerHTML 赋值次数（新增一处即失败，须评审登记）",
   "innerHTMLAllowlist": [
-    "src/main.tsx",
-    "src/lib/exporter.ts",
-    "src/components/Editor/mermaid-view.ts",
-    "src/components/Editor/math.ts",
-    "src/components/Editor/html-view.ts"
+    { "file": "src/main.tsx", "count": 1, "reason": "崩溃页注入（#171）" },
+    { "file": "src/lib/exporter.ts", "count": 1, "reason": "导出离屏容器（PNG 长图）" },
+    { "file": "src/components/Editor/html-view.ts", "count": 1, "reason": "HTML 块渲染" },
+    { "file": "src/components/Editor/math.ts", "count": 3, "reason": "KaTeX 渲染产物" },
+    { "file": "src/components/Editor/mermaid-view.ts", "count": 4, "reason": "Mermaid 渲染产物/错误态" }
   ],
   "buildAssets": {
     "cssCount": 3,

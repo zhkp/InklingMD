@@ -319,7 +319,7 @@ CI 上 Benchmark **不阻断合并**，只上传 `.perf-output/` 产物并写入
 | 改动性质 | 必需防线 | 理由 |
 |---|---|---|
 | 变量 / 选择器结构变化（新增 token、拆文件、`data-theme` 块、改层包裹） | **源级静态断言**（`tests/styles/**`、`tests/components/*ThemeTokens`） | 跨平台稳定，结构变化用静态断言可精确表达，且不被运行时环境（dev/打包、浏览器/Tauri）干扰 |
-| 主题加载机制（层序、注入顺序、快照、首帧） | **E2E 行为断言**（dev server：S7/S8/S12/S13/S14，见 `tests/e2e/theme-layers.spec.ts`） | 机制正确性只能在真实样式表/DOM 上验证 |
+| 主题加载机制（层序、注入顺序、快照、首帧） | **E2E 行为断言**：已生效的 S12 层序 / S13 无未分层（dev server，见 `tests/e2e/theme-layers.spec.ts`）；S7 DOM 顺序冒烟 / S8 首帧 `data-theme` / S14 全局名称不泄漏**待 #225/#306 提供被断言对象后激活**（现以 `describe.skip` 显式登记，非遗漏） | 机制正确性只能在真实样式表/DOM 上验证 |
 | 构建期分文件 / 压缩（manualChunks、@import 内联、esbuild 压缩、@font-face） | **产物级断言 S16**（`pnpm check:build-layers`，清空 dist → 构建 → `scripts/check-theme-build-assets.mjs`） | dev 与 build 的 CSS 分文件策略不同，产物正确性只在构建后成立 |
 | 视觉呈现变化（颜色值微调、间距、观感类） | 截图比对或**人工核对**（无截图基线时，PR 描述中写明人工核对步骤） | 静态断言无法覆盖像素级呈现 |
 
