@@ -81,6 +81,40 @@
     "userStyleElementId": "inkling-custom-theme"
   },
   "s9AllowMarkers": ["issue-i1"],
+  "//runtimeStyleSources": "S13 运行时口径（#310 评审阻塞项 1）：未分层规则只允许来自这些「无法入层」的第三方运行时注入源；应用自身 18 入口必须 100% 在层内。detect 由 theme-layers.spec.ts 实现。",
+  "runtimeStyleSources": [
+    {
+      "id": "codemirror-style-mod",
+      "detect": "style-mod-class",
+      "reason": "CodeMirror 经 style-mod 运行时注入 <style>（插入 head 首位、未分层），第三方库不提供入层开关"
+    },
+    {
+      "id": "mermaid-svg",
+      "detect": "svg-owned",
+      "reason": "mermaid 把自己的样式 <style> 注入到图表 SVG 内部（mermaid.core.mjs:1302-1304），同样无法入层"
+    }
+  ],
+  "//cmHostTheme": "S17：CM 宿主外观的唯一交付点。应用 CSS 不得出现 .cm-* 选择器；被搬走的 token 必须仍被这些文件消费。",
+  "cmHostTheme": {
+    "files": [
+      "src/lib/codemirror-shared.ts",
+      "src/components/Editor/frontmatter.ts"
+    ],
+    "requiredRefs": [
+      "--editor-font",
+      "--code-block-bg",
+      "--code-block-gutter-bg",
+      "--code-block-gutter-border",
+      "--code-block-muted",
+      "--content-frontmatter-gutter-border"
+    ],
+    "placeholderFont": {
+      "cssFile": "src/App.css",
+      "selector": ".editor-scroll .milkdown .code-block-cm .code-block-placeholder",
+      "tsFile": "src/lib/codemirror-shared.ts",
+      "tsConst": "MONO_FONT_FAMILY"
+    }
+  },
   "injectionFunctions": [
     { "file": "src/store/theme.ts", "names": ["applyCustomCSS"] }
   ],

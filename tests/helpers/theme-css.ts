@@ -29,6 +29,17 @@ export interface ThemeEntries {
     userStyleElementId: string;
   };
   s9AllowMarkers: string[];
+  runtimeStyleSources: { id: string; detect: string; reason: string }[];
+  cmHostTheme: {
+    files: string[];
+    requiredRefs: string[];
+    placeholderFont: {
+      cssFile: string;
+      selector: string;
+      tsFile: string;
+      tsConst: string;
+    };
+  };
   injectionFunctions: { file: string; names: string[] }[];
   innerHTMLAllowlist: { file: string; count: number; reason: string }[];
   buildAssets: { cssCount: number; requiredChunks: string[] };

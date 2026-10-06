@@ -126,7 +126,11 @@
   --content-drop-indicator-shadow: 0 0 4px rgba(9, 105, 218, 0.5);
   --content-mark-bg: #fff8c5;
   --content-frontmatter-label-bg: rgba(175, 184, 193, 0.12);
-  --content-frontmatter-gutter-border: var(--code-block-gutter-border);
+  /* #310 评审必改项：这里原先引用 --code-block-gutter-border，而该 token 只定义在
+     `.code-block[data-code-theme=…]`（元素级）上 → 在 root 作用域引用属跨作用域，
+     消费时 IACVT（回退 currentColor）。light 下 frontmatter 行号栏边框的历史取值就是
+     `--border`（由 CM 主题的 var 兜底得来），故显式写成 var(--border)。 */
+  --content-frontmatter-gutter-border: var(--border);
   --content-toc-label-bg: transparent;
   --content-math: var(--text);
   --content-mermaid-bg: var(--bg-subtle);
@@ -466,14 +470,11 @@ button.save-indicator:focus-visible {
   min-height: 0;
 }
 
-.source-mode-cm-host .cm-editor {
-  height: 100%;
-}
-
-.source-mode-cm-host .cm-scroller {
-  overflow: auto;
-  font-family: var(--editor-font);
-}
+/* 源码模式编辑器的 CM 外观（字体 var(--editor-font)、高度、滚动）由
+ * src/lib/codemirror-shared.ts 的 sourceModeCodeMirrorTheme 承载 ——
+ * CodeMirror 用 style-mod 在运行时注入未分层样式，未分层恒胜 @layer base，
+ * 写在这里的 .cm-* 声明必然失效（#310 评审阻塞项 1 / S17 禁止）。
+ * 本选择器只保留应用自己的容器布局。 */
 
 .topbar-btn-active {
   background: var(--accent-muted);
@@ -759,8 +760,9 @@ button.save-indicator:focus-visible {
   overflow: auto;
 }
 /* 懒挂载纯文本占位（v2.3.4）：字体/行高/内边距/最大高度与 CodeMirror
-   主题（codemirror-shared.ts baseTheme）严格一致，未挂载时高度即接近
-   最终高度，消除打开大文档时逐块挂载的布局跳变（窗口抖动） */
+   主题（codemirror-shared.ts 的 cmHostTheme）严格一致，未挂载时高度即接近
+   最终高度，消除打开大文档时逐块挂载的布局跳变（窗口抖动）。
+   ⚠️ font-family 必须与 MONO_FONT_FAMILY 逐字符一致（S17 断言）。 */
 .editor-scroll .milkdown .code-block-cm .code-block-placeholder {
   margin: 0;
   max-height: 32rem;
@@ -775,18 +777,8 @@ button.save-indicator:focus-visible {
   /* 空代码块：CM 空文档仍占一行行高 */
   min-height: calc(0.85rem * 1.5 + 0.8rem);
 }
-.editor-scroll .milkdown .code-block-cm .cm-editor {
-  background: var(--code-block-bg);
-  color: var(--code-block-text);
-}
-.editor-scroll .milkdown .code-block-cm .cm-scroller {
-  overflow: auto;
-}
-.editor-scroll .milkdown .code-block-cm .cm-gutters {
-  background: var(--code-block-gutter-bg);
-  border-right: 1px solid var(--code-block-gutter-border);
-  color: var(--code-block-muted);
-}
+/* 代码块内的 CM 外观（底色 / 行号栏底色与边框色 / 滚动）由
+ * src/lib/codemirror-shared.ts 的 sharedCodeMirrorBaseTheme 承载（同 S17）。 */
 
 /* Mermaid 图表块 */
 .editor-scroll .milkdown .mermaid-block {
@@ -978,12 +970,8 @@ button.save-indicator:focus-visible {
   max-height: 24rem;
   overflow: auto;
 }
-.editor-scroll .milkdown .frontmatter-cm .cm-editor {
-  background: transparent;
-}
-.editor-scroll .milkdown .frontmatter-cm .cm-scroller {
-  overflow: auto;
-}
+/* frontmatter 宿主的 CM 外观（含行号栏边框色 --content-frontmatter-gutter-border）
+ * 由 src/components/Editor/frontmatter.ts 的 cmTheme 承载（同 S17）。 */
 
 /* [TOC] 目录块 */
 .editor-scroll .milkdown .toc-block {
@@ -1394,9 +1382,6 @@ button.save-indicator:focus-visible {
   color: var(--content-link);
 }
 
-[data-theme="dark"] .editor-scroll .milkdown .frontmatter-cm .cm-gutters {
-  border-right-color: var(--content-frontmatter-gutter-border);
-}
 
 /* ===== v0.8.0：图片缩放/对齐/行内 ===== */
 .milkdown-image-wrap {

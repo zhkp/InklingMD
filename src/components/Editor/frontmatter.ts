@@ -17,6 +17,7 @@ import {
 } from "@codemirror/language";
 import { yaml as yamlLegacy } from "@codemirror/legacy-modes/mode/yaml";
 import remarkFrontmatter from "remark-frontmatter";
+import { MONO_FONT_FAMILY } from "../../lib/codemirror-shared";
 
 // 提前实例化 YAML 语言支持，避免每个 frontmatter 节点重复创建
 const yamlSupport = new LanguageSupport(StreamLanguage.define(yamlLegacy));
@@ -81,19 +82,27 @@ export const remarkFrontmatterPlugin = $remark(
   "yaml",
 );
 
-/** CodeMirror 宿主主题：与正文代码块风格保持一致 */
+/**
+ * CodeMirror 宿主主题：与正文代码块风格保持一致。
+ *
+ * 与 `codemirror-shared.ts` 同理（#310 评审阻塞项 1）：CM 样式由 style-mod 以未分层
+ * <style> 运行时注入，未分层恒胜 @layer base，因此 frontmatter 宿主的一切外观（含
+ * 行号栏右边框的 `--content-frontmatter-gutter-border`）必须写在 CM 主题里，
+ * 不能留在 App.css —— 否则入层后必然被 CM 自身样式压掉。
+ */
 const cmTheme = EditorView.theme({
   "&": { fontSize: "0.82rem", backgroundColor: "transparent" },
   "&.cm-editor": { backgroundColor: "transparent" },
   ".cm-scroller": {
-    fontFamily: '"SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace',
+    fontFamily: MONO_FONT_FAMILY,
     lineHeight: "1.5",
+    overflow: "auto",
   },
   ".cm-gutters": {
     backgroundColor: "transparent",
     color: "var(--text-muted)",
     border: "none",
-    borderRight: "1px solid var(--border)",
+    borderRight: "1px solid var(--content-frontmatter-gutter-border, var(--border))",
   },
   ".cm-content": { padding: "0.4rem 0" },
 });
