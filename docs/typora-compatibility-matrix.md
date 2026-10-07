@@ -84,27 +84,29 @@
 输入：6 款真实 Typora 主题（`github` / `newsprint` / `night` / `pixyll` / `vue` / `vue-dark`，合计 666 条规则，其中 51 处 `!important`）。
 运行 `scripts/theme-compat-report.ts` 的结论：
 
-| 主题 | themeId | 规则（入→出） | 改写中位耗时 | 选择器丢弃 | 根级收敛 | `!important` 剥离 | `@import` 内联 | `@import` 丢弃 | URL 重写 |
-|---|---|---|---|---|---|---|---|---|---|
-| github.css | `user:github` | 81 → 63 | 4.40 ms | 44 | 10 | 1 | 0 | 0 | 4 |
-| newsprint.css | `user:newsprint` | 115 → 74 | 4.80 ms | 95 | 8 | 0 | 0 | 0 | 4 |
-| night.css | `user:night` | 182 → 92 | 7.69 ms | 228 | 20 | 0 | 3 | 1 | 0 |
-| pixyll.css | `user:pixyll` | 91 → 72 | 4.17 ms | 47 | 8 | 0 | 0 | 0 | 8 |
-| vue-dark.css | `user:vue-dark` | 155 → 79 | 4.67 ms | 172 | 26 | 0 | 1 | 12 | 0 |
-| vue.css | `user:vue` | 85 → 67 | 3.72 ms | 45 | 27 | 0 | 1 | 15 | 0 |
+| 主题 | themeId | 规则（入→出） | 改写中位耗时 | 根级收敛 | 选择器丢弃 | 变量拒绝 | 名称前缀（**声明侧**） | 引用重写 | URL 重写 | `@import` 内联 / 丢弃 | `!important` 剥离 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| github.css | `user:github` | 81 → 63 | 5.03 ms | 10 | 44 | 0 | 4 | 1 | 4 | 0 / 0 | 1 |
+| newsprint.css | `user:newsprint` | 115 → 74 | 4.52 ms | 8 | 95 | 0 | 4 | 2 | 4 | 0 / 0 | 0 |
+| night.css | `user:night` | 182 → 92 | 7.92 ms | 20 | 228 | 0 | 0 | 0 | 0 | 3 / 1 | 0 |
+| pixyll.css | `user:pixyll` | 91 → 72 | 4.69 ms | 8 | 47 | 0 | 8 | 4 | 8 | 0 / 0 | 0 |
+| vue-dark.css | `user:vue-dark` | 155 → 79 | 4.59 ms | 26 | 172 | 0 | 0 | 0 | 0 | 1 / 12 | 0 |
+| vue.css | `user:vue` | 85 → 67 | 3.49 ms | 27 | 45 | 0 | 0 | 0 | 0 | 1 / 15 | 0 |
 
 **§D1 体积与耗时（实测，非估算）**：
 
 | 项 | 数值 |
 |---|---|
 | 兼容层模块打包（postcss + selector/value parser + 本层全量，min） | **146 KB**（**42.3 KB gzip**） |
-| 单主题改写（7–17 KB 真实主题，含 `@import` 预读 I/O） | 中位 **3.7–7.7 ms** |
+| 单主题改写（7–17 KB 真实主题，含 `@import` 预读 I/O） | 中位 **3.5–7.9 ms** |
 | 大主题外推（256 KB 合成主题，仅解析） | 约 38 ms |
 
 > 结论：一次性改写成本可忽略（主题切换/启动时一次），体积 42.3 KB gzip 相对现有 `vendor_mermaid`（935 KB gzip）可接受；#225 需要时可按主题块做动态导入。
 
 
-**诊断分类合计**：`dropped-selector` 631 · `scoped-root` 99 · `private-token-scoped` 46 · `stripped-important` 29 · `rewritten-ref` 23 · `rewritten-url` 16 · `dropped-import` 5 · `dropped-at-rule` 4。
+**诊断分类合计**：`dropped-selector` 631 · `scoped-root` 99 · `private-token-scoped` 46 · `stripped-important` 29 · **`prefixed-name` 16**（声明侧重命名：`Open Sans`×4 / `PT Serif`×4 / `Merriweather`×4 / `Lato`×4）· `rewritten-ref` 7（引用侧：`font-family` 用法）· `rewritten-url` 16 · `dropped-import` 5 · `dropped-at-rule` 4。
+
+> 3 款带自定义字体的基线主题（github / newsprint / pixyll）**实测覆盖了 D9 的字体侧**：`@font-face` family 全部改名为 `t<themeHash8>-<原名>`，引用侧同步；通用族 / 系统族 / `local()` 一律不改名（单测负例③）。`@keyframes` / `@counter-style` 在 6 款基线主题中**未出现**，由自研合成主题 + 单测/E2E 覆盖（`sample-theme.css`：`fade-in` / `sample-dots`）。
 
 **丢弃构成**（矩阵行来源）：窗口级 UI 规则 ≈ 520 条、CodeMirror 专有规则 ≈ 45 条、专注模式装饰（`.md-focus`）38 条、其余为混合列表里不可映射项。
 
@@ -112,20 +114,53 @@
 
 > 说明：主题 CSS 只到**编辑区容器**级（`.editor-scroll .milkdown`），外壳（顶栏/标签栏/侧边栏/状态栏/弹层）无主题规则命中 —— 这是「作用域不外溢」的机器可查证据（E2E 亦断言三层一致，见 §6）。
 
-## 5. 已知差异与后续项（登记）
+### 4.1 基线主题集（设计集 `99` §5「实施时填入实际名称与来源」→ 本表回填）
 
-| # | 差异 | 处置 |
+设计集预留 B1/B2/B3 三档（明色 / 暗色 / **自带自定义字体**）。本轮实际纳入 **6 款**（来源：`theme.typora.io` 社区主题，实测时以原始未改动 `.css` 直接喂流水线；**第三方 CSS 不入库**，许可合规归 #308）：
+
+| 槽位 | 主题 | 明/暗 | 自带字体 | 体积 | 事实（实测） |
+|---|---|---|---|---|---|
+| B1 | `github` | light | 否 | 8.0 KB | `@font-face`×4（`Open Sans`，远程）；`url()`×5 |
+| B1 | `newsprint` | light | 否 | 10.3 KB | `@font-face`×4（`PT Serif`）；远程 `url()`×3 |
+| B1 | `pixyll` | light | 否 | 10.2 KB | `@font-face`×8（`Merriweather`+`Lato`）；本地+远程 `url()`×10 |
+| B2 | `night` | dark | 否 | 16.3 KB | `@import`×3（含**目标缺失**的 `night/mermaid.dark.css` → 降级路径实测） |
+| B2 | `vue-dark` | dark | 否 | 12.9 KB | `@import`×1；`!important`×12 |
+| B1 | `vue` | light | 否 | 6.8 KB | `@import`×1；`!important`×15 |
+| B3 | —— **待补** | —— | **是** | —— | 6 款均为「远程/自带字体经 `@font-face`」，无「随包字体文件」样本；字体**文件**侧由自研 `sample-theme.css`（`url("fonts/sample.woff2")`）覆盖单测，真机由 #307 主题包样本补齐 |
+
+**验收口径**：上述主题**未经任何修改**放入主题目录后，核心 Markdown 元素视觉与 Typora 一致，或差异已登记于 §5。
+
+## 5. 已知差异登记（编号沿用设计集 `99` §4；本表为**实施回填**）
+
+| 设计编号 | 差异 | 实施状态与证据 |
 |---|---|---|
-| D1 | `!important` 被剥离（G12） | 已知差异；仅 theme 层，`@layer user` 自定义 CSS 不受影响 |
-| D2 | `@property` 整个丢弃（N10） | 若主题依赖类型化属性动画会降级 |
-| D3 | `.md-task-list-item > input` 复选框样式不生效 | 本应用任务项 DOM 无 `input`；**后续项**：为任务项渲染等价复选框（新 issue） |
-| D4 | `.task-list` 容器样式不生效 | CSS 无父选择器；可用 `:has()` 增强（未启用） |
-| D5 | `:where()` 特异性仍为 0 | 与 Typora 一致，无需处置 |
-| D6 | 窗口级 UI 主题内容全部丢弃 | Epic 非目标 |
-| D7 | 远程字体/背景图被 CSP 拦 | 有意取舍；降级不报错；#307 §9 提示 + 预留离线开关 |
-| D8 | **N6 白名单碰撞扫描：零碰撞** | 6 款基线主题的全部 `--x` 声明 ∩ 应用白名单 = **0**（主题普遍用 `--xxx-color` 约定；`--font-monospace` ≠ `--mono-font`）→ G8 默认拒绝即可，**无需例外白名单** |
-| D9 | 全局名称前缀化 | 主题 `@keyframes` / `@font-face family` / `@counter-style` 一律加 `t<themeHash8>-` 前缀并同步重写引用（`@property` 丢弃）；应用侧 `fade-in` / `menu-in` / `modal-in` 等通用名不再被夺 |
-| D10 | 主题内 `@import` 目标缺失（真实主题常见：可选资源） | 丢弃该 `@import` 并登记（不报错、不白屏） |
+| D1 | 主题 CM5 语法高亮不生效 | **已实现**：`.cm-*` / `.CodeMirror*` 一律丢弃（G1）；6 款基线主题实测丢弃 CM 专有规则 ≈45 条 |
+| D2 | 远程字体/样式表不加载 | **已实现（降级）**：远程 `@import` 直接丢弃（不产生请求）；远程 `url()` 原样保留交由 CSP 拦，E2E 断言「不报错、不白屏」 |
+| D3 | 本地字体/背景图加载 | **已实现**：`url()` → `convertFileSrc` 绝对 URL（§C9），`local()` 保留、多候选 `src`/`format()`/`image-set()` 全覆盖；单测 5 类输入 × 全部位置 |
+| D4 | 根级背景不透出到外壳 | **已实现**：根级选择器收敛到 `.editor-scroll .milkdown`（6 款主题实测 99 处）；E2E 断言外壳四区计算样式逐项不变 |
+| D5 | `!important` 处置（N3 收窄） | **已实现**：仅 theme 层剥离（G12），实测 29 处；`@layer user` 不剥 |
+| D5b | 主题私有 `:root` 变量 | **已实现**：原样保留 + 作用域收敛（46 处 `private-token-scoped`），不改名 |
+| D5c | 本地 `@import` | **已实现**：读取并内联（实测 5 处）；目标缺失 → 丢弃 + 登记（5 处，见下 D10 追加项） |
+| D6 | 表格斑马纹 | 不属本层（#223 现状/#226 侧） |
+| D7 | Mermaid 内置色板 | 不属本层（#226） |
+| **D8** | 白名单通用名碰撞（N6） | **扫描完成 = 零碰撞**：6 款基线主题全部 `--x` 声明 ∩ 应用白名单 = **0** → G8 默认拒绝足够，**无需例外白名单** |
+| D9 | `@keyframes` / `@font-face` / `@property` 名称 | **已实现**：声明侧 16 处改名（`Open Sans`/`PT Serif`/`Merriweather`/`Lato` 实测）+ 引用侧 7 处同步；通用族/系统族/`local()` **不改名**（负例①③）；`@property` 整个丢弃；`@keyframes`/`@counter-style` 由合成主题 + 单测/E2E 覆盖（真实主题未使用） |
+| D10 | BOM / `@charset` / `@import` 表首语义 | **已实现**：第 0 步剥 BOM + `@charset`，LF 归一，hash 基于规范化文本；单测覆盖 |
+| D11 | `<style>` 写入方式 | 不属本层（#225，S15 兜底） |
+| D12 / D13 | 预装主题落地/升级/体积分档 | 不属本层（#307/#308） |
+| D14 / D15 | PNG 导出重复注入 / katex 懒加载 | 不属本层（#226 / #224 已交付） |
+| D16 / D17 | 预装清单载体 / 覆盖命中的回滚 | 不属本层（#308） |
+
+### 5.1 实施期新增登记（设计集 `99` §4「必须随实施补充」）
+
+| # | 差异 | 原因 | 处置 |
+|---|---|---|---|
+| D18 | `.md-task-list-item > input`（复选框样式）不生效 | 本应用任务项 DOM **不含 `input`**（勾选态在 `li[data-checked]`） | 登记为不支持；**建议新 issue**：为任务项渲染等价复选框（否则主题的勾选样式永远不命中） |
+| D19 | `.task-list`（任务列表**容器**）样式不生效 | CSS 无父选择器，容器节点无对应类 | 登记降级；可选增强：`:has()`（当前未启用，避免对老内核的兼容风险） |
+| D20 | `:where()` 参数前缀化后特异性仍为 0 | CSS 语义如此（与 Typora 行为一致） | 无需处置 |
+| D21 | 窗口级 UI 选择器（`#typora-sidebar`/`.outline-*`/`.btn*`/`.modal*` …）全部丢弃 | Epic 非目标（不实现窗口级 UI 皮肤） | 登记；实测 ≈520 条规则被丢弃 |
+| D22 | 主题内 `@import` 目标缺失（真实主题常见） | 主题包可选资源未随包提供（如 `night/mermaid.dark.css`） | 丢弃该 `@import` + 登记，不报错/不白屏（vue-dark 实测 12 处、vue 15 处、night 1 处） |
+| D23 | 主题自带 `@layer` / `@page` / `@namespace` / `@scope` 声明被丢弃 | `@layer` 会注入应用层命名空间、破坏 `base/theme/user` 层序（G5）；`@page`/`@namespace` 无对应宿主；`@scope` 归入「未登记 at-rule」 | 一律丢弃 + 登记（`@layer`/`@page`/`@namespace` 有具名原因，其余走「未登记 at-rule 保守丢弃」分支；实测共 4 处） |
 
 ## 6. 自动化边界（哪些能自动、哪些必须真机）
 

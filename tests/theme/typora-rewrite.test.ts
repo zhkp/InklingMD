@@ -248,6 +248,20 @@ describe("#306 §C10（I3/N9/N10）：全局名称前缀化 + 引用重写", () 
     expect(diagnostics.filter((d) => d.kind === "rewritten-ref").length).toBeGreaterThanOrEqual(3);
   });
 
+  it("诊断区分「声明侧重命名」与「引用侧重写」（矩阵列口径）", () => {
+    const { diagnostics } = run(css);
+    // 声明侧（@font-face family / @keyframes / @counter-style）→ prefixed-name
+    const declared = diagnostics.filter((d) => d.kind === "prefixed-name").map((d) => d.target);
+    expect(declared).toContain("@font-face font-family: DemoFont");
+    expect(declared).toContain("fade-in");
+    expect(declared).toContain("cube-spin");
+    expect(declared).toContain("demo-dots");
+    // 引用侧（font-family / font / animation 用法）→ rewritten-ref，两列互不混淆
+    const referenced = diagnostics.filter((d) => d.kind === "rewritten-ref").map((d) => d.target);
+    expect(referenced.some((t) => t.startsWith("font-family: DemoFont"))).toBe(true);
+    expect(referenced).not.toContain("@font-face font-family: DemoFont");
+  });
+
   it("font 简写里的族名同样改名", () => {
     const { css: out } = run(css);
     expect(out).toContain(`font: 12px/1.4 "${prefix}-DemoFont", serif`);

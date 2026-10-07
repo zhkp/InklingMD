@@ -100,8 +100,25 @@ export function prefixGlobalNames(
     }
   });
 
-  // @font-face 的 family 名（声明侧）+ font-family / font 的引用侧
+  // @font-face 的 family 名：**声明侧**重命名（诊断记 prefixed-name，与引用侧区分）
+  root.walkAtRules("font-face", (atRule) => {
+    atRule.walkDecls("font-family", (decl: Declaration) => {
+      decl.value = rewriteNameTokens(
+        decl.value,
+        sets.fontFamilies,
+        prefix,
+        report,
+        "@font-face font-family",
+        "font-family",
+        "prefixed-name",
+      );
+    });
+  });
+
+  // font-family / font / animation 的**引用侧**重写（跳过 @font-face 内部，已在上一段处理）
   root.walkDecls((decl: Declaration) => {
+    const parent = decl.parent as { type?: string; name?: string } | undefined;
+    if (parent?.type === "atrule" && parent.name === "font-face") return;
     const prop = decl.prop.toLowerCase();
     if (prop === "font-family") {
       decl.value = rewriteFamilyList(decl.value, sets.fontFamilies, prefix, report);
@@ -125,6 +142,8 @@ export function rewriteNameTokens(
   report: (d: ThemeDiagnostic) => void,
   prop: string,
   kind: "keyframes" | "font-family",
+  /** 诊断分类：声明侧重命名记 `prefixed-name`，引用侧重写记 `rewritten-ref`（矩阵列口径） */
+  diagKind: "prefixed-name" | "rewritten-ref" = "rewritten-ref",
 ): string {
   if (names.size === 0) return value;
   return value.replace(
@@ -133,12 +152,14 @@ export function rewriteNameTokens(
       const name = dq ?? sq ?? bare ?? "";
       if (!name || !names.has(name)) return match;
       report({
-        kind: "rewritten-ref",
+        kind: diagKind,
         target: `${prop}: ${name}`,
         reason:
-          kind === "keyframes"
-            ? `引用主题自身声明的 @keyframes（同名按文档顺序夺名）→ 同步加前缀 ${prefix}-；未声明的不改名`
-            : `引用主题自身声明的 @font-face family → 同步加前缀 ${prefix}-；回退链中的通用族/系统族保留`,
+          diagKind === "prefixed-name"
+            ? `主题自身声明了该 @font-face family → 声明侧加前缀 ${prefix}-（不夺应用侧字体名）`
+            : kind === "keyframes"
+              ? `引用主题自身声明的 @keyframes（同名按文档顺序夺名）→ 同步加前缀 ${prefix}-；未声明的不改名`
+              : `引用主题自身声明的 @font-face family → 同步加前缀 ${prefix}-；回退链中的通用族/系统族保留`,
       });
       // animation-name 取 <custom-ident>（**不能带引号**，带引号是非法值）；字体族名用引号形式更稳
       return kind === "keyframes" ? prefixedName(prefix, name) : `"${prefixedName(prefix, name)}"`;
