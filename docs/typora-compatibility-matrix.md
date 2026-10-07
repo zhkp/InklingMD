@@ -126,7 +126,7 @@
 | B2 | `night` | dark | 否 | 16.3 KB | `@import`×3（含**目标缺失**的 `night/mermaid.dark.css` → 降级路径实测） |
 | B2 | `vue-dark` | dark | 否 | 12.9 KB | `@import`×1；`!important`×12 |
 | B1 | `vue` | light | 否 | 6.8 KB | `@import`×1；`!important`×15 |
-| B3 | —— **待补** | —— | **是** | —— | 6 款均为「远程/自带字体经 `@font-face`」，无「随包字体文件」样本；字体**文件**侧由自研 `sample-theme.css`（`url("fonts/sample.woff2")`）覆盖单测，真机由 #307 主题包样本补齐 |
+| B3 | —— **待补** | —— | **是** | —— | 6 款均无「随包字体文件」（字体或远程、或 `local()` 系统族）→ 本轮以自研 `sample-theme.css`（`url("fonts/sample.woff2")` + `local()` 回退链）覆盖字体**文件**侧的单测，真机样本由 #307 主题包补齐 |
 
 **验收口径**：上述主题**未经任何修改**放入主题目录后，核心 Markdown 元素视觉与 Typora 一致，或差异已登记于 §5。
 
