@@ -50,6 +50,9 @@
     "html2canvas": "^1.4.1",
     "katex": "^0.18.1",
     "mermaid": "^11.16.0",
+    "postcss": "^8.5.28",
+    "postcss-selector-parser": "^7.1.6",
+    "postcss-value-parser": "^4.2.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
     "remark-frontmatter": "^5.0.0",
@@ -67,7 +70,6 @@
     "@types/react-dom": "^19.1.6",
     "@vitejs/plugin-react": "^4.6.0",
     "happy-dom": "^15.11.7",
-    "postcss": "^8.5.28",
     "typescript": "~5.8.3",
     "vite": "^7.0.4",
     "vitest": "^3.2.7"

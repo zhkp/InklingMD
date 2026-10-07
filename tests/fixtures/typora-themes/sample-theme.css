@@ -1,0 +1,146 @@
+/*
+ * #306 测试用「Typora 形态」合成主题（自研内容，非第三方主题，无许可问题）。
+ *
+ * 逐条覆盖真实 Typora 主题的构造：`#write` 根、裸标签、文档级 `.md-*` 类、
+ * 窗口级 UI 选择器、CM5 类、私有变量、对基础/外壳变量的越权赋值、`!important`、
+ * `@keyframes`/`@font-face`/`@property`/`@counter-style`、`@include-when-export`、
+ * 远程 `@import` 与远程 `url()`。
+ * 真实第三方主题 CSS 不入库（许可合规归 #308）；本文件只用于机器断言。
+ */
+
+@import url("https://fonts.googleapis.com/css?family=Roboto");
+
+/* 文档根与裸标签：必须被收敛/加前缀，不得命中外壳 */
+body {
+  background: #123456;
+  color: #222222;
+  font-family: "SampleFont", "Segoe UI", sans-serif;
+}
+
+#write {
+  background: #fdfdfd;
+  font-size: 17px;
+}
+
+#write h1 {
+  color: #ff0000 !important;
+  border-bottom: 2px solid #ff0000;
+}
+
+#write table thead th {
+  background: #eeeeee;
+}
+
+code,
+tt {
+  background: #fff8c5;
+}
+
+blockquote {
+  border-left: 4px solid #ff0000;
+}
+
+/* 主题私有变量：原样保留 + 作用域收敛 */
+:root {
+  --sample-accent: #ff0000;
+  --sample-bg: #fdfdfd;
+}
+
+/* 越权赋值：基础变量与 --shell-* 必须被拒绝 */
+:root {
+  --text: #ff00ff;
+  --shell-topbar-bg: #ff00ff;
+}
+
+#write p {
+  color: var(--sample-accent);
+  background: url("img/paper.png");
+}
+
+/* 文档级类名映射 */
+.md-fences {
+  background: #f0f0f0;
+  border: 1px solid #ff0000;
+}
+
+.md-lang {
+  color: #ff0000;
+}
+
+.md-toc {
+  border: 1px dashed #ff0000;
+}
+
+.md-inline-math {
+  color: #ff0000;
+}
+
+.md-task-list-item > input {
+  background: #ff0000;
+}
+
+/* CM5 类：一律丢弃（G1） */
+.cm-s-inner,
+.CodeMirror-lines {
+  color: #ff0000;
+}
+
+/* 窗口级 UI：非目标，丢弃 */
+#typora-sidebar,
+.outline-item,
+.btn-default {
+  color: #ff0000;
+}
+
+/* 全局名称：必须加前缀并同步重写引用 */
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@font-face {
+  font-family: "SampleFont";
+  src: local("SampleFont"), url("fonts/sample.woff2") format("woff2");
+}
+
+@counter-style sample-dots {
+  system: cyclic;
+  symbols: "•";
+}
+
+@property --sample-prop {
+  syntax: "<color>";
+  inherits: false;
+  initial-value: #000000;
+}
+
+#write h1:hover {
+  animation: 1s fade-in;
+  font-family: "SampleFont", "Segoe UI", sans-serif;
+}
+
+/* 条件规则与 Typora 专有导出块 */
+@media screen and (min-width: 600px) {
+  #write h2 {
+    color: #ff0000;
+  }
+}
+
+@include-when-export {
+  #write h3 {
+    color: #ff0000;
+  }
+}
+
+/* 远程与 data: 资源 */
+#write img {
+  background: url(https://example.com/remote.png);
+}
+
+#write hr {
+  border-image: url(data:image/png;base64,AAA) 1;
+}
