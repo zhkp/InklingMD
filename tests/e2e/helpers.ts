@@ -34,6 +34,21 @@ export async function openFile(page: Page, fileName: string) {
   await expect(page.locator(".ProseMirror")).toBeVisible({ timeout: 10_000 });
 }
 
+/**
+ * 新建草稿并用斜杠菜单插入一个代码块（会挂载一个 CodeMirror 实例）。
+ * S13-CM / S17 需要「已挂载 CM」的状态，供多个 spec 复用，避免各写一份。
+ */
+export async function insertCodeBlock(page: Page) {
+  await page.keyboard.press(`${MOD}+n`);
+  await expect(page.locator(".ProseMirror p")).toBeVisible({ timeout: 5_000 });
+  await page.locator(".ProseMirror p").first().click();
+  await page.keyboard.type("/");
+  await expect(page.locator(".slash-popup")).toBeVisible({ timeout: 5_000 });
+  await page.keyboard.type("代码");
+  await page.keyboard.press("Enter");
+  await expect(page.locator(".code-block")).toBeVisible({ timeout: 5_000 });
+}
+
 // 在编辑器末尾追加内容并保证落在可编辑段落
 export async function appendToEditor(page: Page, text: string) {
   await page.locator(".ProseMirror").click();

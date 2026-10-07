@@ -28,39 +28,92 @@ import { oneDark } from "@codemirror/theme-one-dark";
 import { replaceNext, search, searchKeymap } from "@codemirror/search";
 import type { CodeBlockTheme } from "../store/settings";
 
-/** CodeMirror 基础主题：编辑器外观、行号、字体 */
-export const sharedCodeMirrorBaseTheme = EditorView.theme({
-  "&": {
-    fontSize: "0.85rem",
-    backgroundColor: "transparent",
-    color: "var(--code-block-text, var(--text, #1f2328))",
-  },
-  "&.cm-editor": {
-    backgroundColor: "transparent",
-  },
-  ".cm-scroller": {
-    fontFamily: '"SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace',
-    lineHeight: "1.5",
-  },
-  ".cm-gutters": {
-    backgroundColor: "transparent",
-    color: "var(--code-block-muted, var(--text-muted, #6e7681))",
-    border: "none",
-    borderRight: "1px solid var(--code-block-gutter-border, var(--border, #d0d7de))",
-  },
-  ".cm-activeLineGutter": {
-    backgroundColor: "rgba(175, 184, 193, 0.15)",
-  },
-  ".cm-activeLine": {
-    backgroundColor: "rgba(175, 184, 193, 0.1)",
-  },
-  ".cm-content": {
-    padding: "0.4rem 0",
-    caretColor: "var(--code-block-focus, #528bff)",
-  },
-  ".cm-cursor, .cm-dropCursor": {
-    borderLeftColor: "var(--code-block-focus, #528bff)",
-  },
+/**
+ * 与 App.css `.code-block-placeholder` 保持一致的等宽字体族。
+ * 两处必须同步修改：占位文本在 CodeMirror 挂载前渲染，字体不同会造成可见跳变。
+ */
+export const MONO_FONT_FAMILY =
+  '"SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace';
+
+/**
+ * CM 宿主主题工厂（#310 评审阻塞项 1）。
+ *
+ * 为什么这些声明必须由 CM theme（style-mod 运行时注入）承载、不能写在 App.css：
+ * CodeMirror 的样式由 style-mod 在运行时以「未分层」<style> 注入到 <head> 首位
+ * （`node_modules/style-mod/src/style-mod.js:100,136-138`）。按级联层规则，同源普通
+ * 声明中未分层恒胜分层——与特异性无关。所以 #224 把 18 个样式入口放进 @layer base
+ * 之后，App.css 里任何 `.cm-*` 覆盖规则都会**必然失效**（字体、行号栏底色/颜色/右边框
+ * 全部反转）。故 CM 宿主的一切外观只允许经由本主题交付。
+ *
+ * 为什么部分选择器要自提特异性（`&.cm-editor …`）：
+ * CM 把主题模块按 `styleModules.concat(baseTheme).reverse()` 挂载，同特异性规则的
+ * 先后由**数组位置**决定；代码块宿主的扩展数组把高亮主题放在最前，于是高亮主题
+ * （oneDark 等）反而比宿主主题后挂载、优先级更高（`.cm-gutters { color: #7d8799 }`
+ * 会压掉应用的 `--code-block-muted: #5c6370`）。App.css 时代这些属性靠优先级胜出，
+ * 迁进主题后必须显式提升到 0-3-0 才能与迁移前逐项一致，而不是依赖挂载顺序。
+ * 仅「原由 App.css 覆盖」的属性做提升；`.cm-activeLine` / 光标 / 内边距等保持默认
+ * 特异性，继续让高亮主题按原有关系覆盖。
+ *
+ * 颜色一律走 `--code-block-*` 元素级 token + 兜底：代码块宿主（`.code-block` 上定义了
+ * 这些 token）取主题配色；源代码模式 / frontmatter 等无该 token 的宿主自动回退全局值。
+ */
+function cmHostTheme(
+  fontFamily: string,
+  rootExtra: Record<string, string> = {},
+): Extension {
+  return EditorView.theme({
+    "&": {
+      fontSize: "0.85rem",
+      backgroundColor: "transparent",
+      // 双宿主复用：代码块内有 --code-block-* 元素级作用域；源代码模式下无，
+      // 回退到全局 --text（故最内层 hex 已随 #223 回退值清理移除）
+      color: "var(--code-block-text, var(--text))",
+      ...rootExtra,
+    },
+    // 代码块容器底色（App.css `.code-block` 提供 --code-block-bg）；
+    // 无该 token 的宿主（源代码模式）保持透明
+    "&.cm-editor": {
+      backgroundColor: "var(--code-block-bg, transparent)",
+    },
+    "&.cm-editor .cm-scroller": {
+      fontFamily,
+      lineHeight: "1.5",
+      overflow: "auto",
+    },
+    // 行号栏：底色 / 文字色 / 右边框在迁移前都是应用级覆盖（#223 令牌落点），
+    // 必须压过任意代码高亮主题
+    "&.cm-editor .cm-gutters": {
+      backgroundColor: "var(--code-block-gutter-bg, transparent)",
+      color: "var(--code-block-muted, var(--text-muted))",
+      border: "none",
+      borderRight: "1px solid var(--code-block-gutter-border, var(--border))",
+    },
+    ".cm-activeLineGutter": {
+      backgroundColor: "rgba(175, 184, 193, 0.15)",
+    },
+    ".cm-activeLine": {
+      backgroundColor: "rgba(175, 184, 193, 0.1)",
+    },
+    ".cm-content": {
+      padding: "0.4rem 0",
+      caretColor: "var(--code-block-focus, #528bff)",
+    },
+    ".cm-cursor, .cm-dropCursor": {
+      borderLeftColor: "var(--code-block-focus, #528bff)",
+    },
+  });
+}
+
+/** 代码块宿主的共享基础主题（等宽字体） */
+export const sharedCodeMirrorBaseTheme = cmHostTheme(MONO_FONT_FAMILY);
+
+/**
+ * 源代码模式宿主主题：字体跟随 `--editor-font`（#223 新增的字体落点，供 #306 主题字体映射）。
+ * `height: 100%` 原为 App.css `.source-mode-cm-host .cm-editor`，随本批迁入以保持
+ * 「应用样式全在层内」。
+ */
+export const sourceModeCodeMirrorTheme = cmHostTheme("var(--editor-font)", {
+  height: "100%",
 });
 
 /** 根据主题名返回 CodeMirror 主题扩展 */
@@ -132,7 +185,8 @@ export function createSourceModeExtensions(opts: SourceModeExtensionOpts): Exten
     // （未选中匹配时打开面板，选中匹配时逐个替换）。
     search({ top: true }),
     keymap.of([...searchKeymap, { key: "Mod-r", run: replaceNext }]),
-    sharedCodeMirrorBaseTheme,
+    // 源码模式用带 --editor-font 的宿主主题；顺序无所谓（见 cmHostTheme 注释）
+    sourceModeCodeMirrorTheme,
     createMarkdownLanguageSupport(),
     EditorView.lineWrapping,
   ];

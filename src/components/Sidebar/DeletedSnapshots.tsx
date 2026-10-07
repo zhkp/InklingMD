@@ -84,19 +84,13 @@ export function DeletedSnapshots() {
           <span className="tree-icon">
             {expanded ? <IconChevronDown size={12} /> : <IconChevronRight size={12} />}
           </span>
-          <span className="recent-title" style={{ color: "var(--accent, #e5a50a)" }}>
+          <span className="recent-title snapshot-recoverable-title">
             可恢复文件 ({snapshots.length})
           </span>
           {health && !health.writable && (
             <span
               title="存储配额不足：下次删除文件时将无法创建恢复备份，建议尽快清理或恢复现有条目"
-              style={{
-                display: "inline-flex",
-                alignItems: "center",
-                marginLeft: 6,
-                color: "var(--danger, #e74c3c)",
-                fontSize: 12,
-              }}
+              className="snapshot-health-danger"
             >
               <IconAlertTriangle size={12} style={{ marginRight: 3 }} />
               备份存储空间不足
@@ -105,13 +99,7 @@ export function DeletedSnapshots() {
           {health && health.writable && health.sizeChars > 2 * 1024 * 1024 && (
             <span
               title="当前备份快照占用较大，建议及时清理以避免配额溢出"
-              style={{
-                display: "inline-flex",
-                alignItems: "center",
-                marginLeft: 6,
-                color: "var(--warning, #f39c12)",
-                fontSize: 12,
-              }}
+              className="snapshot-health-warning"
             >
               <IconAlertTriangle size={12} style={{ marginRight: 3 }} />
               备份占用较多
@@ -168,14 +156,7 @@ export function DeletedSnapshots() {
                   </span>
                 </div>
                 <button
-                  className="sidebar-btn-icon"
-                  style={{
-                    fontSize: "11px",
-                    padding: "2px 6px",
-                    border: "1px solid var(--border, #444)",
-                    borderRadius: "3px",
-                    cursor: "pointer",
-                  }}
+                  className="sidebar-btn-icon snapshot-restore-btn"
                   onClick={() => handleRestore(snap)}
                   title="恢复为未命名新标签页"
                 >

@@ -1,3 +1,17 @@
+/*
+ * App.css —— 应用主样式（外壳 + 编辑区基线）
+ *
+ * #223/#224（Theme Epic）：
+ * - 全部样式入口统一包入 @layer base（层序声明在 index.html 内联，唯一落点）。
+ * - 存量色值已全部收敛为 var(--x)；hex/rgba 只允许出现在 token 定义行（S9 断言）。
+ * - 本文件采用「顶格 @layer base { / 内部规则不缩进 / } 顶格闭合」的非缩进包裹：
+ *   入层前后除新增的包裹行外逐字符最小 diff，配合 Issue180ThemeTokens 的花括号配平解析，
+ *   不依赖「顶格 }」；如需重新排版可整体缩进，测试不会因此失效。
+ * - dark 散落的纯颜色覆盖规则本批仅把值 token 化、规则原样保留（S9 要求），
+ *   归并进变量块的删除作业属于 #225（输入清单见本批交付的 dark 规则拆分清单）。
+ * - 严格零视觉变化：新 token 均「只搬现值」，light/dark 两块分别取当前实际渲染值。
+ */
+@layer base {
 :root {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica,
     Arial, "Noto Sans CJK SC", "Microsoft YaHei", "PingFang SC", sans-serif;
@@ -10,21 +24,31 @@
   --duration: 0.15s;
   --mono-font: "SFMono-Regular", "SF Mono", Consolas, "Liberation Mono", Menlo,
     monospace;
+  /* #223 §3.1：内容区正文字体（源代码模式等），默认与系统字体栈一致，主题可覆盖 */
+  --editor-font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+    Helvetica, Arial, "Noto Sans CJK SC", "Microsoft YaHei", "PingFang SC",
+    sans-serif;
 }
 
 /* 浅色主题（默认） */
 :root,
 [data-theme="light"] {
   color-scheme: light;
-  color: #1f2328;
-  background-color: #ffffff;
+  color: var(--text);
+  background-color: var(--editor-bg);
   /* 品牌强调色：统一原先散落的 #0969da / #2f81f7 */
   --accent: #0969da;
   --accent-hover: #0550ae;
   --accent-subtle: rgba(9, 105, 218, 0.1);
   --accent-fg: #ffffff;
+  /* #223 §3.1：顶栏激活态底色（原 var(--accent-muted, rgba(88,166,255,.15)) 悬空引用） */
+  --accent-muted: rgba(88, 166, 255, 0.15);
   --border: #d8dee4;
   --border-strong: #c8d0d9;
+  /* #223 §3.1：h1 分隔线（等价原回退值 rgba(0,0,0,.06)，dark 现状同值，语义统一另立 issue） */
+  --border-subtle: rgba(0, 0, 0, 0.06);
+  /* h2 分隔线比 h1 更淡（等价原回退值 rgba(0,0,0,.04)） */
+  --content-heading-border-soft: rgba(0, 0, 0, 0.04);
   --text: #1f2328;
   --text-muted: #5f6b76;
   --text-faint: #8c959f;
@@ -57,6 +81,67 @@
   --radius-lg: 10px;
   /* 键盘聚焦环（focus-visible 专用，鼠标点击不触发） */
   --ring: 0 0 0 3px rgba(9, 105, 218, 0.3);
+
+  /* ===== #223 新增：外壳层 token（--shell-*，第三方 Typora 主题不可覆盖） ===== */
+  --shell-backdrop: rgba(31, 35, 40, 0.45);
+  --shell-backdrop-strong: rgba(0, 0, 0, 0.4);
+  --shell-danger-subtle: rgba(207, 34, 46, 0.08);
+  --shell-danger-subtle-hover: rgba(207, 34, 46, 0.1);
+  --shell-warning-highlight: rgba(210, 153, 34, 0.35);
+  --shell-warning-bg: #fff8c5;
+  --shell-warning-border: #e3b341;
+  --shell-warning-fg: #5d4204;
+  --shell-capture-bg: #fff8c5;
+  --shell-capture-border: #d4a72c;
+  --shell-capture-fg: #633c01;
+  --shell-switch-bg: rgba(140, 149, 159, 0.45);
+  --shell-switch-knob-bg: #ffffff;
+  --shell-switch-knob-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+  --shell-dialog-shadow: 0 10px 25px rgba(0, 0, 0, 0.2);
+  --shell-diff-remove-bg: rgba(207, 34, 46, 0.12);
+  --shell-diff-add-bg: rgba(26, 127, 55, 0.12);
+  --shell-diff-remove-soft: rgba(207, 34, 46, 0.25);
+  --shell-diff-add-soft: rgba(26, 127, 55, 0.25);
+  --shell-diff-remove-border: rgba(207, 34, 46, 0.5);
+  --shell-diff-add-border: rgba(26, 127, 55, 0.5);
+  --shell-diff-remove-fg: var(--danger);
+  --shell-diff-add-fg: var(--success);
+  --shell-scrollbar-thumb: rgba(140, 149, 159, 0.35);
+  --shell-scrollbar-thumb-hover: rgba(140, 149, 159, 0.55);
+  --shell-selection-bg: rgba(9, 105, 218, 0.22);
+
+  /* ===== #223 新增：内容层 token（--content-*，所有主题可覆盖），仅搬现值 ===== */
+  --content-heading: var(--text);
+  --content-body: var(--text);
+  --content-link: #0969da;
+  --content-inline-code-bg: rgba(175, 184, 193, 0.22);
+  --content-quote-border: var(--accent);
+  --content-quote-bg: var(--bg-subtle);
+  --content-table-head-bg: rgba(175, 184, 193, 0.18);
+  --content-table-selection-bg: rgba(9, 105, 218, 0.12);
+  --content-table-handle: var(--accent);
+  --content-table-toolbar-hover: var(--btn-hover-bg);
+  --content-block-handle: var(--text-faint);
+  --content-drop-indicator: var(--accent);
+  --content-drop-indicator-shadow: 0 0 4px rgba(9, 105, 218, 0.5);
+  --content-mark-bg: #fff8c5;
+  --content-frontmatter-label-bg: rgba(175, 184, 193, 0.12);
+  /* #310 评审必改项：这里原先引用 --code-block-gutter-border，而该 token 只定义在
+     `.code-block[data-code-theme=…]`（元素级）上 → 在 root 作用域引用属跨作用域，
+     消费时 IACVT（回退 currentColor）。light 下 frontmatter 行号栏边框的历史取值就是
+     `--border`（由 CM 主题的 var 兜底得来），故显式写成 var(--border)。 */
+  --content-frontmatter-gutter-border: var(--border);
+  --content-toc-label-bg: transparent;
+  --content-math: var(--text);
+  --content-mermaid-bg: var(--bg-subtle);
+  --content-mermaid-text: var(--text-muted);
+  --content-image-handle-bg: #2f81f7;
+  --content-image-handle-border: #ffffff;
+  --content-image-handle-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+  --content-search-match-bg: rgba(255, 213, 79, 0.45);
+  --content-search-match-ring: rgba(255, 193, 7, 0.25);
+  --content-search-current-bg: #ff9800;
+  --content-search-current-fg: #ffffff;
 }
 
 * {
@@ -81,13 +166,13 @@ body,
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: rgba(140, 149, 159, 0.35);
+  background: var(--shell-scrollbar-thumb);
   border-radius: 5px;
   border: 2px solid transparent;
   background-clip: padding-box;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(140, 149, 159, 0.55);
+  background: var(--shell-scrollbar-thumb-hover);
   background-clip: padding-box;
   border: 2px solid transparent;
 }
@@ -106,10 +191,10 @@ select:focus-visible,
 
 /* 文本选择颜色跟随强调色 */
 ::selection {
-  background: rgba(9, 105, 218, 0.22);
+  background: var(--shell-selection-bg);
 }
 [data-theme="dark"] ::selection {
-  background: rgba(47, 129, 247, 0.35);
+  background: var(--shell-selection-bg);
 }
 
 /* 交互控件通用过渡 */
@@ -155,8 +240,8 @@ button svg,
   align-items: center;
   justify-content: space-between;
   padding: 0.35rem 0.85rem;
-  border-bottom: 1px solid var(--border, #d0d7de);
-  background: var(--topbar-bg, #ffffff);
+  border-bottom: 1px solid var(--border);
+  background: var(--topbar-bg);
   flex-shrink: 0;
   min-height: 38px;
 }
@@ -172,7 +257,7 @@ button svg,
   font-size: 0.84rem;
   font-weight: 600;
   letter-spacing: 0.01em;
-  color: var(--text, #1f2328);
+  color: var(--text);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -180,14 +265,14 @@ button svg,
 
 .save-indicator {
   font-size: 0.74rem;
-  color: var(--text-muted, #6e7681);
+  color: var(--text-muted);
   flex-shrink: 0;
 }
 .save-indicator.save-ok {
-  color: var(--success, #1a7f37);
+  color: var(--success);
 }
 .save-indicator.save-error {
-  color: var(--danger, #cf222e);
+  color: var(--danger);
 }
 /* #188：冲突态指示器是真实 <button>，重置默认按钮样式并给出焦点环 */
 button.save-indicator {
@@ -199,7 +284,7 @@ button.save-indicator {
   text-align: left;
 }
 button.save-indicator:focus-visible {
-  outline: 2px solid var(--accent, #0969da);
+  outline: 2px solid var(--accent);
   outline-offset: 2px;
   border-radius: 3px;
 }
@@ -221,25 +306,25 @@ button.save-indicator:focus-visible {
   font-size: 0.78rem;
   padding: 0 0.35rem;
   border: none;
-  border-radius: var(--radius-md, 6px);
+  border-radius: var(--radius-md);
   background: transparent;
-  color: var(--text-muted, #6e7681);
+  color: var(--text-muted);
   cursor: pointer;
   font-family: inherit;
   flex-shrink: 0;
 }
 .topbar-btn:hover {
-  background: var(--btn-hover-bg, #e9edf1);
-  color: var(--text, #1f2328);
+  background: var(--btn-hover-bg);
+  color: var(--text);
 }
 .topbar-btn:active {
-  background: var(--row-active-bg, rgba(9, 105, 218, 0.12));
+  background: var(--row-active-bg);
 }
 /* 带文字标签的按钮（导出/主题）内边距略宽 */
 .topbar-btn-label {
   padding: 0 0.55rem;
   font-weight: 500;
-  color: var(--text, #1f2328);
+  color: var(--text);
 }
 
 .export-menu {
@@ -255,14 +340,14 @@ button.save-indicator:focus-visible {
   top: calc(100% + 6px);
   right: 0;
   min-width: 168px;
-  background: var(--bg-elevated, #ffffff);
-  border: 1px solid var(--border, #d0d7de);
-  border-radius: var(--radius-lg, 10px);
-  box-shadow: var(--shadow-md, 0 4px 12px rgba(0, 0, 0, 0.12));
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-md);
   z-index: 11;
   overflow: hidden;
   padding: 5px;
-  animation: menu-in 0.12s var(--ease, ease);
+  animation: menu-in 0.12s var(--ease);
 }
 /* 菜单弹出入场：轻微上移 + 淡入 */
 @keyframes menu-in {
@@ -282,36 +367,36 @@ button.save-indicator:focus-visible {
   width: 100%;
   border: none;
   background: transparent;
-  color: var(--text, #1f2328);
+  color: var(--text);
   font-size: 0.8rem;
   padding: 0.42rem 0.6rem;
   text-align: left;
   cursor: pointer;
   font-family: inherit;
-  border-radius: var(--radius-md, 6px);
+  border-radius: var(--radius-md);
   transition: none;
 }
 .export-item:hover {
-  background: var(--accent-subtle, rgba(9, 105, 218, 0.1));
-  color: var(--accent, #0969da);
+  background: var(--accent-subtle);
+  color: var(--accent);
 }
 .export-item svg {
-  color: var(--text-muted, #6e7681);
+  color: var(--text-muted);
 }
 .export-item:hover svg {
-  color: var(--accent, #0969da);
+  color: var(--accent);
 }
 .export-item-active {
-  color: var(--accent, #0969da);
+  color: var(--accent);
   font-weight: 500;
 }
 .export-item-muted {
-  color: var(--text-muted, #6e7681);
+  color: var(--text-muted);
   font-size: 0.75rem;
 }
 .export-sep {
   height: 1px;
-  background: var(--border, #d0d7de);
+  background: var(--border);
   margin: 5px 4px;
 }
 
@@ -326,8 +411,8 @@ button.save-indicator:focus-visible {
 .empty-state {
   margin: auto;
   text-align: center;
-  color: var(--text-muted, #6e7681);
-  animation: fade-in 0.3s var(--ease, ease);
+  color: var(--text-muted);
+  animation: fade-in 0.3s var(--ease);
 }
 @keyframes fade-in {
   from {
@@ -344,11 +429,7 @@ button.save-indicator:focus-visible {
   font-size: 1.6rem;
   font-weight: 700;
   letter-spacing: -0.02em;
-  background: linear-gradient(
-    135deg,
-    var(--text, #1f2328) 30%,
-    var(--accent, #0969da)
-  );
+  background: linear-gradient(135deg, var(--text) 30%, var(--accent));
   -webkit-background-clip: text;
   background-clip: text;
   -webkit-text-fill-color: transparent;
@@ -389,18 +470,15 @@ button.save-indicator:focus-visible {
   min-height: 0;
 }
 
-.source-mode-cm-host .cm-editor {
-  height: 100%;
-}
-
-.source-mode-cm-host .cm-scroller {
-  overflow: auto;
-  font-family: var(--editor-font, inherit);
-}
+/* 源码模式编辑器的 CM 外观（字体 var(--editor-font)、高度、滚动）由
+ * src/lib/codemirror-shared.ts 的 sourceModeCodeMirrorTheme 承载 ——
+ * CodeMirror 用 style-mod 在运行时注入未分层样式，未分层恒胜 @layer base，
+ * 写在这里的 .cm-* 声明必然失效（#310 评审阻塞项 1 / S17 禁止）。
+ * 本选择器只保留应用自己的容器布局。 */
 
 .topbar-btn-active {
-  background: var(--accent-muted, rgba(88, 166, 255, 0.15));
-  color: var(--accent, #58a6ff);
+  background: var(--accent-muted);
+  color: var(--accent);
 }
 
 /* 专注模式：弱化非当前块，聚焦块保持完整不透明。
@@ -429,7 +507,7 @@ button.save-indicator:focus-visible {
   width: 1.1rem;
   cursor: grab;
   user-select: none;
-  color: var(--text-faint, #bbb);
+  color: var(--content-block-handle);
   font-size: 0.85em;
   line-height: 1;
   opacity: 0;
@@ -448,12 +526,12 @@ button.save-indicator:focus-visible {
   width: 100%;
   height: 2px;
   border-radius: 1px;
-  background: var(--accent, #0969da);
+  background: var(--content-drop-indicator);
   margin: -1px 0;
-  box-shadow: 0 0 4px rgba(9, 105, 218, 0.5);
+  box-shadow: var(--content-drop-indicator-shadow);
 }
 [data-theme="dark"] .inkling-block-handle {
-  color: #555;
+  color: var(--content-block-handle);
 }
 
 /* Milkdown 编辑区容器样式 */
@@ -462,7 +540,7 @@ button.save-indicator:focus-visible {
   max-width: 800px;
   margin: 0 auto;
   padding: 2.5rem 2.8rem;
-  background: var(--editor-bg, #ffffff);
+  background: var(--editor-bg);
 }
 
 .editor-scroll .milkdown .editor {
@@ -476,7 +554,7 @@ button.save-indicator:focus-visible {
   font-weight: 700;
   letter-spacing: -0.02em;
   padding-bottom: 0.35rem;
-  border-bottom: 1px solid var(--border-subtle, rgba(0, 0, 0, 0.06));
+  border-bottom: 1px solid var(--border-subtle);
 }
 .editor-scroll .milkdown h2 {
   font-size: 1.45rem;
@@ -484,7 +562,7 @@ button.save-indicator:focus-visible {
   font-weight: 650;
   letter-spacing: -0.015em;
   padding-bottom: 0.2rem;
-  border-bottom: 1px solid var(--border-subtle, rgba(0, 0, 0, 0.04));
+  border-bottom: 1px solid var(--content-heading-border-soft);
 }
 .editor-scroll .milkdown h3 {
   font-size: 1.22rem;
@@ -496,11 +574,20 @@ button.save-indicator:focus-visible {
   margin: 1.2rem 0 0.4rem;
   font-weight: 600;
 }
+.editor-scroll .milkdown h1,
+.editor-scroll .milkdown h2,
+.editor-scroll .milkdown h3,
+.editor-scroll .milkdown h4,
+.editor-scroll .milkdown h5,
+.editor-scroll .milkdown h6 {
+  color: var(--content-heading);
+}
 
 /* 段落与列表：提升行高至 1.75 */
 .editor-scroll .milkdown p {
   margin: 0.8rem 0;
   line-height: 1.75;
+  color: var(--content-body);
 }
 .editor-scroll .milkdown ul,
 .editor-scroll .milkdown ol {
@@ -516,26 +603,26 @@ button.save-indicator:focus-visible {
 .editor-scroll .milkdown blockquote {
   margin: 1rem 0;
   padding: 0.5rem 1.1rem;
-  border-left: 3px solid var(--accent, #0969da);
-  border-radius: 0 var(--radius-sm, 4px) var(--radius-sm, 4px) 0;
-  color: var(--text-muted, #5f6b76);
-  background: var(--bg-subtle, rgba(0, 0, 0, 0.02));
+  border-left: 3px solid var(--content-quote-border);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  color: var(--text-muted);
+  background: var(--content-quote-bg);
 }
 
 /* 分割线 */
 .editor-scroll .milkdown hr {
   border: none;
-  border-top: 1px solid var(--border, #d0d7de);
+  border-top: 1px solid var(--border);
   margin: 1.5rem 0;
 }
 
 /* 代码 */
 .editor-scroll .milkdown code {
-  font-family: var(--mono-font, monospace);
+  font-family: var(--mono-font);
   font-size: 0.88em;
-  background: rgba(175, 184, 193, 0.22);
+  background: var(--content-inline-code-bg);
   padding: 0.15em 0.4em;
-  border-radius: var(--radius-sm, 4px);
+  border-radius: var(--radius-sm);
 }
 
 /* 表格 */
@@ -549,13 +636,13 @@ button.save-indicator:focus-visible {
 }
 .editor-scroll .milkdown th,
 .editor-scroll .milkdown td {
-  border: 1px solid var(--border, #d0d7de);
+  border: 1px solid var(--border);
   padding: 0.45rem 0.7rem;
   vertical-align: top;
   position: relative;
 }
 .editor-scroll .milkdown th {
-  background: rgba(175, 184, 193, 0.18);
+  background: var(--content-table-head-bg);
   font-weight: 600;
   text-align: left;
 }
@@ -570,7 +657,7 @@ button.save-indicator:focus-visible {
   top: 0;
   bottom: 0;
   width: 4px;
-  background: #0969da;
+  background: var(--content-table-handle);
   opacity: 0;
   z-index: 1;
   cursor: col-resize;
@@ -599,7 +686,7 @@ button.save-indicator:focus-visible {
   content: "";
   position: absolute;
   inset: 0;
-  background: rgba(9, 105, 218, 0.12);
+  background: var(--content-table-selection-bg);
   pointer-events: none;
 }
 
@@ -637,14 +724,14 @@ button.save-indicator:focus-visible {
   --code-block-focus: #0969da;
 }
 .editor-scroll .milkdown .code-block[data-code-theme="none"] {
-  --code-block-bg: var(--editor-bg, #ffffff);
-  --code-block-toolbar-bg: var(--bg-subtle, #f6f8fa);
-  --code-block-control-bg: var(--editor-bg, #ffffff);
-  --code-block-gutter-bg: var(--bg-subtle, #f6f8fa);
-  --code-block-border: var(--border, #d0d7de);
-  --code-block-gutter-border: var(--border, #d0d7de);
-  --code-block-text: var(--text, #1f2328);
-  --code-block-muted: var(--text-muted, #6e7681);
+  --code-block-bg: var(--editor-bg);
+  --code-block-toolbar-bg: var(--bg-subtle);
+  --code-block-control-bg: var(--editor-bg);
+  --code-block-gutter-bg: var(--bg-subtle);
+  --code-block-border: var(--border);
+  --code-block-gutter-border: var(--border);
+  --code-block-text: var(--text);
+  --code-block-muted: var(--text-muted);
   --code-block-focus: #2f81f7;
 }
 .editor-scroll .milkdown .code-block-toolbar {
@@ -673,8 +760,9 @@ button.save-indicator:focus-visible {
   overflow: auto;
 }
 /* 懒挂载纯文本占位（v2.3.4）：字体/行高/内边距/最大高度与 CodeMirror
-   主题（codemirror-shared.ts baseTheme）严格一致，未挂载时高度即接近
-   最终高度，消除打开大文档时逐块挂载的布局跳变（窗口抖动） */
+   主题（codemirror-shared.ts 的 cmHostTheme）严格一致，未挂载时高度即接近
+   最终高度，消除打开大文档时逐块挂载的布局跳变（窗口抖动）。
+   ⚠️ font-family 必须与 MONO_FONT_FAMILY 逐字符一致（S17 断言）。 */
 .editor-scroll .milkdown .code-block-cm .code-block-placeholder {
   margin: 0;
   max-height: 32rem;
@@ -685,27 +773,17 @@ button.save-indicator:focus-visible {
   line-height: 1.5;
   white-space: pre;
   background: var(--code-block-bg);
-  color: var(--code-block-text, var(--text, #1f2328));
+  color: var(--code-block-text);
   /* 空代码块：CM 空文档仍占一行行高 */
   min-height: calc(0.85rem * 1.5 + 0.8rem);
 }
-.editor-scroll .milkdown .code-block-cm .cm-editor {
-  background: var(--code-block-bg);
-  color: var(--code-block-text);
-}
-.editor-scroll .milkdown .code-block-cm .cm-scroller {
-  overflow: auto;
-}
-.editor-scroll .milkdown .code-block-cm .cm-gutters {
-  background: var(--code-block-gutter-bg);
-  border-right: 1px solid var(--code-block-gutter-border);
-  color: var(--code-block-muted);
-}
+/* 代码块内的 CM 外观（底色 / 行号栏底色与边框色 / 滚动）由
+ * src/lib/codemirror-shared.ts 的 sharedCodeMirrorBaseTheme 承载（同 S17）。 */
 
 /* Mermaid 图表块 */
 .editor-scroll .milkdown .mermaid-block {
-  background: var(--bg-subtle, #f6f8fa);
-  border: 1px solid var(--border, #d0d7de);
+  background: var(--content-mermaid-bg);
+  border: 1px solid var(--border);
   border-radius: 6px;
   padding: 12px;
   margin: 0.5em 0;
@@ -733,13 +811,13 @@ button.save-indicator:focus-visible {
 }
 .editor-scroll .milkdown .mermaid-render:empty[data-placeholder]::before {
   content: attr(data-placeholder);
-  color: var(--text-muted, #6e7681);
+  color: var(--content-mermaid-text);
   font-size: 0.85rem;
 }
 .editor-scroll .milkdown .mermaid-error {
   margin: 0;
   padding: 8px;
-  color: var(--danger, #cf222e);
+  color: var(--danger);
   font-family: "SFMono-Regular", Consolas, monospace;
   font-size: 0.8rem;
   white-space: pre-wrap;
@@ -765,16 +843,17 @@ button.save-indicator:focus-visible {
 .editor-scroll .milkdown .mermaid-toolbar button {
   padding: 2px 8px;
   font-size: 0.72rem;
-  border: 1px solid var(--border, #d0d7de);
+  border: 1px solid var(--border);
   border-radius: 4px;
+  /* s9-allow: issue-i1 —— --bg 为已登记存量 bug（暗色白块），#223 明确不补 token/不改引用 */
   background: var(--bg, #fff);
-  color: var(--text-muted, #6e7681);
+  color: var(--text-muted);
   cursor: pointer;
   line-height: 1.4;
 }
 .editor-scroll .milkdown .mermaid-toolbar button:hover {
-  background: var(--row-hover-bg, #f0f0f0);
-  color: var(--text, #1f2328);
+  background: var(--row-hover-bg);
+  color: var(--text);
 }
 /* Mermaid 缩放光标提示：Ctrl+滚轮可缩放 */
 .editor-scroll .milkdown .mermaid-render.zoomable {
@@ -783,7 +862,7 @@ button.save-indicator:focus-visible {
 .editor-scroll .milkdown .mermaid-render.zoomable:active {
   cursor: zoom-out;
 }
-/* Mermaid 平移：放大后可拖动，裁剪超出部分避免出现双滚动条 */
+/* Mermaid 平移：放大后可拖动，裁剪超出部分避免双滚动条 */
 .editor-scroll .milkdown .mermaid-render.pannable {
   cursor: grab;
   overflow: hidden;
@@ -803,23 +882,23 @@ button.save-indicator:focus-visible {
   font-family: "SFMono-Regular", Consolas, monospace;
   font-size: 0.85em;
   line-height: 1;
-  color: var(--text, #1f2328);
-  background: var(--bg-subtle, #f6f8fa);
-  border: 1px solid var(--border, #d0d7de);
+  color: var(--text);
+  background: var(--bg-subtle);
+  border: 1px solid var(--border);
   border-bottom-width: 2px;
   border-radius: 4px;
 }
 .editor-scroll .milkdown .html-inline mark {
-  background: #fff8c5;
+  background: var(--content-mark-bg);
   padding: 0 2px;
   border-radius: 2px;
 }
 .editor-scroll .milkdown .html-inline details {
   margin: 0.5em 0;
   padding: 8px 12px;
-  border: 1px solid var(--border, #d0d7de);
+  border: 1px solid var(--border);
   border-radius: 6px;
-  background: var(--bg-subtle, #f6f8fa);
+  background: var(--bg-subtle);
 }
 .editor-scroll .milkdown .html-inline summary {
   cursor: pointer;
@@ -829,11 +908,15 @@ button.save-indicator:focus-visible {
 .editor-scroll .milkdown .html-inline blockquote {
   margin: 0.5em 0;
   padding-left: 12px;
-  border-left: 3px solid var(--border, #d0d7de);
-  color: var(--text-muted, #6e7681);
+  border-left: 3px solid var(--border);
+  color: var(--text-muted);
 }
 
 /* KaTeX 数学公式 */
+.editor-scroll .milkdown .math-inline,
+.editor-scroll .milkdown .math-display {
+  color: var(--content-math);
+}
 .editor-scroll .milkdown .math-inline .katex {
   font-size: 1.05em;
 }
@@ -852,16 +935,16 @@ button.save-indicator:focus-visible {
   min-width: 80px;
   min-height: 1.5em;
   padding: 4px 10px;
-  border: 1px dashed var(--border, #d0d7de);
+  border: 1px dashed var(--border);
   border-radius: 4px;
-  background: var(--bg-subtle, #f6f8fa);
+  background: var(--bg-subtle);
 }
 .editor-scroll .milkdown .math-display.math-empty {
   display: block;
   text-align: center;
 }
 .editor-scroll .milkdown .math-placeholder {
-  color: var(--text-muted, #6e7681);
+  color: var(--text-muted);
   font-size: 0.85em;
   font-style: italic;
 }
@@ -869,47 +952,43 @@ button.save-indicator:focus-visible {
 /* YAML Front Matter 块 */
 .editor-scroll .milkdown .frontmatter-block {
   margin: 0.5rem 0 1.2rem;
-  border: 1px solid var(--border, #d0d7de);
+  border: 1px solid var(--border);
   border-radius: 6px;
   overflow: hidden;
-  background: var(--bg-subtle, #f6f8fa);
+  background: var(--bg-subtle);
 }
 .editor-scroll .milkdown .frontmatter-label {
   font-size: 0.7rem;
   letter-spacing: 0.04em;
   text-transform: uppercase;
-  color: var(--text-muted, #6e7681);
+  color: var(--text-muted);
   padding: 0.3rem 0.7rem;
-  background: rgba(175, 184, 193, 0.12);
-  border-bottom: 1px solid var(--border, #d0d7de);
+  background: var(--content-frontmatter-label-bg);
+  border-bottom: 1px solid var(--border);
 }
 .editor-scroll .milkdown .frontmatter-cm {
   max-height: 24rem;
   overflow: auto;
 }
-.editor-scroll .milkdown .frontmatter-cm .cm-editor {
-  background: transparent;
-}
-.editor-scroll .milkdown .frontmatter-cm .cm-scroller {
-  overflow: auto;
-}
+/* frontmatter 宿主的 CM 外观（含行号栏边框色 --content-frontmatter-gutter-border）
+ * 由 src/components/Editor/frontmatter.ts 的 cmTheme 承载（同 S17）。 */
 
 /* [TOC] 目录块 */
 .editor-scroll .milkdown .toc-block {
   margin: 0.8rem 0;
   padding: 0.6rem 1rem 0.7rem;
-  border: 1px dashed var(--border, #d0d7de);
+  border: 1px dashed var(--border);
   border-radius: 6px;
-  background: var(--bg-subtle, #f6f8fa);
+  background: var(--bg-subtle);
 }
 
 /* callout 提示框 */
 .editor-scroll .milkdown .callout-block {
   margin: 0.8rem 0;
   padding: 0.6rem 0.9rem;
-  border-left: 4px solid var(--callout-accent, #2f81f7);
+  border-left: 4px solid var(--callout-accent);
   border-radius: 4px;
-  background: var(--callout-bg, rgba(47, 129, 247, 0.08));
+  background: var(--callout-bg);
 }
 .editor-scroll .milkdown .callout-header {
   display: flex;
@@ -918,7 +997,7 @@ button.save-indicator:focus-visible {
   margin-bottom: 0.3rem;
   font-size: 0.85rem;
   font-weight: 600;
-  color: var(--callout-accent, #2f81f7);
+  color: var(--callout-accent);
 }
 .editor-scroll .milkdown .callout-icon {
   font-size: 0.95rem;
@@ -953,12 +1032,12 @@ button.save-indicator:focus-visible {
   z-index: 300;
   width: 248px;
   max-height: 320px;
-  background: var(--bg-elevated, #ffffff);
-  border: 1px solid var(--border, #d0d7de);
-  border-radius: var(--radius-lg, 10px);
-  box-shadow: var(--shadow-md, 0 6px 20px rgba(0, 0, 0, 0.18));
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-md);
   overflow: hidden;
-  animation: menu-in 0.12s var(--ease, ease);
+  animation: menu-in 0.12s var(--ease);
 }
 .slash-list {
   max-height: 320px;
@@ -970,17 +1049,17 @@ button.save-indicator:focus-visible {
   align-items: center;
   gap: 0.5rem;
   padding: 0.4rem 0.55rem;
-  border-radius: var(--radius-md, 6px);
+  border-radius: var(--radius-md);
   cursor: pointer;
   font-size: 0.82rem;
-  color: var(--text, #1f2328);
+  color: var(--text);
 }
 .slash-item:hover,
 .slash-item-active {
-  background: var(--accent-subtle, rgba(9, 105, 218, 0.1));
+  background: var(--accent-subtle);
 }
 .slash-item-active {
-  color: var(--accent, #0969da);
+  color: var(--accent);
 }
 .slash-icon {
   display: inline-flex;
@@ -988,17 +1067,17 @@ button.save-indicator:focus-visible {
   justify-content: center;
   width: 1.5rem;
   height: 1.5rem;
-  border-radius: var(--radius-sm, 4px);
-  background: var(--bg-subtle, #f6f8fa);
+  border-radius: var(--radius-sm);
+  background: var(--bg-subtle);
   text-align: center;
   font-size: 0.72rem;
   font-weight: 600;
-  color: var(--text-muted, #6e7681);
+  color: var(--text-muted);
   flex-shrink: 0;
 }
 .slash-item-active .slash-icon {
-  color: var(--accent, #0969da);
-  background: var(--bg-elevated, #ffffff);
+  color: var(--accent);
+  background: var(--bg-elevated);
 }
 .slash-label {
   overflow: hidden;
@@ -1015,7 +1094,7 @@ button.save-indicator:focus-visible {
   height: 100%;
   padding: 2rem;
   text-align: center;
-  color: var(--text, #1f2328);
+  color: var(--text);
 }
 .editor-error-icon {
   display: flex;
@@ -1025,8 +1104,8 @@ button.save-indicator:focus-visible {
   height: 56px;
   margin-bottom: 0.9rem;
   border-radius: 50%;
-  background: rgba(207, 34, 46, 0.08);
-  color: var(--danger, #cf222e);
+  background: var(--shell-danger-subtle);
+  color: var(--danger);
 }
 .editor-error-title {
   font-size: 1.05rem;
@@ -1035,17 +1114,17 @@ button.save-indicator:focus-visible {
 }
 .editor-error-desc {
   font-size: 0.85rem;
-  color: var(--text-muted, #6e7681);
+  color: var(--text-muted);
   max-width: 420px;
   line-height: 1.6;
   margin: 0 0 0.8rem;
 }
 .editor-error-detail {
   font-size: 0.75rem;
-  color: var(--danger, #cf222e);
-  background: var(--bg-subtle, #f6f8fa);
-  border: 1px solid var(--border, #eaeef2);
-  border-radius: var(--radius-md, 6px);
+  color: var(--danger);
+  background: var(--bg-subtle);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
   padding: 0.5rem 0.8rem;
   max-width: 520px;
   max-height: 120px;
@@ -1053,31 +1132,32 @@ button.save-indicator:focus-visible {
   text-align: left;
   white-space: pre-wrap;
   word-break: break-all;
-  font-family: var(--mono-font, monospace);
+  font-family: var(--mono-font);
 }
 .editor-error-actions {
   margin-top: 1rem;
 }
 .editor-error-btn {
   border: none;
-  background: var(--accent, #0969da);
-  color: var(--accent-fg, #ffffff);
+  background: var(--accent);
+  color: var(--accent-fg);
   font-size: 0.82rem;
   font-weight: 500;
   padding: 0.42rem 1.2rem;
-  border-radius: var(--radius-md, 6px);
+  border-radius: var(--radius-md);
   cursor: pointer;
   font-family: inherit;
 }
 .editor-error-btn:hover {
-  background: var(--accent-hover, #0550ae);
+  background: var(--accent-hover);
 }
 .editor-scroll .milkdown .toc-label {
   font-size: 0.72rem;
   letter-spacing: 0.04em;
   text-transform: uppercase;
-  color: var(--text-muted, #6e7681);
+  color: var(--text-muted);
   margin-bottom: 0.3rem;
+  background: var(--content-toc-label-bg);
 }
 .editor-scroll .milkdown .toc-list {
   margin: 0;
@@ -1087,10 +1167,10 @@ button.save-indicator:focus-visible {
 .editor-scroll .milkdown .toc-list .toc-item {
   margin: 0.15rem 0;
   line-height: 1.5;
-  color: var(--text, #1f2328);
+  color: var(--text);
 }
 .editor-scroll .milkdown .toc-list .toc-item a {
-  color: #0969da;
+  color: var(--content-link);
   text-decoration: none;
   cursor: pointer;
 }
@@ -1099,7 +1179,7 @@ button.save-indicator:focus-visible {
 }
 .editor-scroll .milkdown .toc-empty {
   margin: 0;
-  color: var(--text-muted, #6e7681);
+  color: var(--text-muted);
   font-size: 0.85rem;
 }
 
@@ -1110,7 +1190,7 @@ button.save-indicator:focus-visible {
   line-height: 0;
 }
 .editor-scroll .milkdown sup.footnote-ref a {
-  color: #0969da;
+  color: var(--content-link);
   text-decoration: none;
   padding: 0 0.15em;
 }
@@ -1123,13 +1203,13 @@ button.save-indicator:focus-visible {
 .editor-scroll .milkdown .footnote-definition {
   margin: 1.2rem 0 0.6rem;
   padding-top: 0.6rem;
-  border-top: 1px solid var(--border, #d0d7de);
+  border-top: 1px solid var(--border);
   font-size: 0.88em;
-  color: var(--text-muted, #6e7681);
+  color: var(--text-muted);
 }
 .editor-scroll .milkdown .footnote-definition .footnote-label {
   font-weight: 600;
-  color: var(--text, #1f2328);
+  color: var(--text);
   margin-right: 0.3em;
 }
 .editor-scroll .milkdown .footnote-definition .footnote-label::before {
@@ -1140,7 +1220,7 @@ button.save-indicator:focus-visible {
 }
 .editor-scroll .milkdown .footnote-definition .footnote-backref {
   margin-left: 0.4em;
-  color: #0969da;
+  color: var(--content-link);
   text-decoration: none;
 }
 .editor-scroll .milkdown .footnote-definition .footnote-backref::before {
@@ -1150,14 +1230,19 @@ button.save-indicator:focus-visible {
 /* 深色主题：通过 data-theme="dark" 切换，支持手动覆盖系统偏好 */
 [data-theme="dark"] {
   color-scheme: dark;
-  color: #e6edf3;
-  background-color: #0d1117;
+  color: var(--text);
+  background-color: var(--editor-bg);
   --accent: #2f81f7;
   --accent-hover: #58a6ff;
   --accent-subtle: rgba(47, 129, 247, 0.15);
   --accent-fg: #ffffff;
+  /* #223：与 light 同值（现状即如此，原悬空回退 rgba(88,166,255,.15)） */
+  --accent-muted: rgba(88, 166, 255, 0.15);
   --border: #2d333b;
   --border-strong: #3d444d;
+  /* h1 分隔线：等价原回退值（dark 现状即 rgba(0,0,0,.06)，近乎不可见，语义统一另立 issue） */
+  --border-subtle: rgba(0, 0, 0, 0.06);
+  --content-heading-border-soft: rgba(0, 0, 0, 0.04);
   --text: #e6edf3;
   --text-muted: #9198a1;
   --text-faint: #6e7681;
@@ -1184,7 +1269,67 @@ button.save-indicator:focus-visible {
   --shadow-lg:
     0 8px 24px rgba(0, 0, 0, 0.4), 0 16px 48px rgba(0, 0, 0, 0.5);
   --ring: 0 0 0 3px rgba(47, 129, 247, 0.35);
+
+  /* ===== #223 新增：外壳层 token（值 = dark 下当前实际渲染） ===== */
+  --shell-backdrop: rgba(31, 35, 40, 0.45);
+  --shell-backdrop-strong: rgba(0, 0, 0, 0.4);
+  --shell-danger-subtle: rgba(207, 34, 46, 0.08);
+  --shell-danger-subtle-hover: rgba(207, 34, 46, 0.1);
+  --shell-warning-highlight: rgba(210, 153, 34, 0.35);
+  --shell-warning-bg: #fff8c5;
+  --shell-warning-border: #e3b341;
+  --shell-warning-fg: #5d4204;
+  --shell-capture-bg: #4a3a00;
+  --shell-capture-border: #d4a72c;
+  --shell-capture-fg: #fff8c5;
+  --shell-switch-bg: rgba(140, 149, 159, 0.45);
+  --shell-switch-knob-bg: #ffffff;
+  --shell-switch-knob-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+  --shell-dialog-shadow: 0 10px 25px rgba(0, 0, 0, 0.2);
+  --shell-diff-remove-bg: rgba(207, 34, 46, 0.12);
+  --shell-diff-add-bg: rgba(26, 127, 55, 0.12);
+  --shell-diff-remove-soft: rgba(207, 34, 46, 0.25);
+  --shell-diff-add-soft: rgba(26, 127, 55, 0.25);
+  --shell-diff-remove-border: rgba(207, 34, 46, 0.5);
+  --shell-diff-add-border: rgba(26, 127, 55, 0.5);
+  --shell-diff-remove-fg: #f4a3ab;
+  --shell-diff-add-fg: #7ee29b;
+  --shell-scrollbar-thumb: rgba(110, 118, 129, 0.4);
+  --shell-scrollbar-thumb-hover: rgba(110, 118, 129, 0.6);
+  --shell-selection-bg: rgba(47, 129, 247, 0.35);
+
+  /* ===== #223 新增：内容层 token（值 = dark 下当前实际渲染；无 dark 覆盖者沿用现值） ===== */
+  --content-heading: var(--text);
+  --content-body: var(--text);
+  --content-link: #2f81f7;
+  --content-inline-code-bg: rgba(175, 184, 193, 0.22);
+  --content-quote-border: var(--border-strong);
+  --content-quote-bg: var(--bg-subtle);
+  --content-table-head-bg: rgba(139, 148, 158, 0.18);
+  --content-table-selection-bg: rgba(47, 129, 247, 0.18);
+  --content-table-handle: var(--accent);
+  --content-table-toolbar-hover: rgba(139, 148, 158, 0.2);
+  --content-block-handle: #555;
+  --content-drop-indicator: var(--accent);
+  --content-drop-indicator-shadow: 0 0 4px rgba(9, 105, 218, 0.5);
+  --content-mark-bg: #fff8c5;
+  --content-frontmatter-label-bg: rgba(139, 148, 158, 0.12);
+  --content-frontmatter-gutter-border: #30363d;
+  --content-toc-label-bg: rgba(139, 148, 158, 0.12);
+  --content-math: var(--text);
+  --content-mermaid-bg: var(--bg-subtle);
+  --content-mermaid-text: var(--text-muted);
+  --content-image-handle-bg: #2f81f7;
+  --content-image-handle-border: #ffffff;
+  --content-image-handle-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+  --content-search-match-bg: rgba(255, 213, 79, 0.35);
+  --content-search-match-ring: rgba(255, 193, 7, 0.25);
+  --content-search-current-bg: #ff9800;
+  --content-search-current-fg: #ffffff;
 }
+
+/* 以下为 [data-theme="dark"] 散落覆盖规则。#223 已将其中颜色值 token 化（规则保留）；
+   纯颜色覆盖规则的归并删除属于 #225（清单见本批交付）。 */
 
 [data-theme="dark"] .save-indicator.save-ok {
   color: var(--success);
@@ -1194,52 +1339,49 @@ button.save-indicator:focus-visible {
 }
 
 [data-theme="dark"] .editor-scroll .milkdown blockquote {
-  border-left-color: var(--border-strong, #3d444d);
-  background: var(--bg-subtle, #161b22);
+  border-left-color: var(--content-quote-border);
+  background: var(--content-quote-bg);
 }
 
 [data-theme="dark"] .editor-scroll .milkdown hr {
-  border-top-color: var(--border, #30363d);
+  border-top-color: var(--border);
 }
 
 /* 深色滚动条：轨道透明，滑块更亮 */
 [data-theme="dark"] ::-webkit-scrollbar-thumb {
-  background: rgba(110, 118, 129, 0.4);
+  background: var(--shell-scrollbar-thumb);
   border: 2px solid transparent;
   background-clip: padding-box;
 }
 [data-theme="dark"] ::-webkit-scrollbar-thumb:hover {
-  background: rgba(110, 118, 129, 0.6);
+  background: var(--shell-scrollbar-thumb-hover);
   border: 2px solid transparent;
   background-clip: padding-box;
 }
 
 [data-theme="dark"] .editor-scroll .milkdown th {
-  background: rgba(139, 148, 158, 0.18);
+  background: var(--content-table-head-bg);
 }
 
 [data-theme="dark"] .editor-scroll .milkdown .column-resize-handle {
-  background: #2f81f7;
+  background: var(--content-table-handle);
 }
 
 [data-theme="dark"] .editor-scroll .milkdown .selectedCell::after {
-  background: rgba(47, 129, 247, 0.18);
+  background: var(--content-table-selection-bg);
 }
 
 [data-theme="dark"] .editor-scroll .milkdown .frontmatter-label,
 [data-theme="dark"] .editor-scroll .milkdown .toc-label {
-  background: rgba(139, 148, 158, 0.12);
+  background: var(--content-frontmatter-label-bg);
 }
 
 [data-theme="dark"] .editor-scroll .milkdown .toc-list .toc-item a,
 [data-theme="dark"] .editor-scroll .milkdown sup.footnote-ref a,
 [data-theme="dark"] .editor-scroll .milkdown .footnote-definition .footnote-backref {
-  color: #2f81f7;
+  color: var(--content-link);
 }
 
-[data-theme="dark"] .editor-scroll .milkdown .frontmatter-cm .cm-gutters {
-  border-right-color: #30363d;
-}
 
 /* ===== v0.8.0：图片缩放/对齐/行内 ===== */
 .milkdown-image-wrap {
@@ -1270,13 +1412,13 @@ button.save-indicator:focus-visible {
   bottom: -4px;
   width: 12px;
   height: 12px;
-  background: #2f81f7;
-  border: 2px solid #fff;
+  background: var(--content-image-handle-bg);
+  border: 2px solid var(--content-image-handle-border);
   border-radius: 50%;
   cursor: nwse-resize;
   opacity: 0;
   transition: opacity 0.15s;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+  box-shadow: var(--content-image-handle-shadow);
   z-index: 5;
 }
 .milkdown-image-wrap:hover .image-resize-handle {
@@ -1286,13 +1428,13 @@ button.save-indicator:focus-visible {
 .image-context-menu {
   position: fixed;
   min-width: 132px;
-  background: var(--bg-elevated, #fff);
-  border: 1px solid var(--border, #d0d7de);
-  border-radius: var(--radius-lg, 10px);
-  box-shadow: var(--shadow-md, 0 8px 24px rgba(0, 0, 0, 0.18));
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-md);
   padding: 5px;
   z-index: 1000;
-  animation: menu-in 0.12s var(--ease, ease);
+  animation: menu-in 0.12s var(--ease);
 }
 .image-context-item {
   display: block;
@@ -1302,19 +1444,19 @@ button.save-indicator:focus-visible {
   border: none;
   text-align: left;
   cursor: pointer;
-  border-radius: var(--radius-md, 6px);
+  border-radius: var(--radius-md);
   color: inherit;
   font-size: 13px;
   transition: none;
 }
 .image-context-item:hover {
-  background: var(--accent-subtle, rgba(9, 105, 218, 0.1));
-  color: var(--accent, #0969da);
+  background: var(--accent-subtle);
+  color: var(--accent);
 }
 .image-context-sep {
   height: 1px;
+  background: var(--border);
   margin: 5px 4px;
-  background: var(--border, #e1e4e8);
 }
 
 /* 编辑器降级模式：Milkdown 加载失败时的只读 textarea */
@@ -1323,10 +1465,10 @@ button.save-indicator:focus-visible {
 }
 .md-editor-fallback-banner {
   padding: 10px 14px;
-  background: #fff8c5;
-  border: 1px solid #e3b341;
+  background: var(--shell-warning-bg);
+  border: 1px solid var(--shell-warning-border);
   border-radius: 6px;
-  color: #5d4204;
+  color: var(--shell-warning-fg);
   font-size: 13px;
   margin-bottom: 12px;
 }
@@ -1335,10 +1477,10 @@ button.save-indicator:focus-visible {
 .md-editor-slow-hint {
   padding: 8px 14px;
   margin: 8px 16px 0;
-  background: #fff8c5;
-  border: 1px solid #e3b341;
+  background: var(--shell-warning-bg);
+  border: 1px solid var(--shell-warning-border);
   border-radius: 6px;
-  color: #5d4204;
+  color: var(--shell-warning-fg);
   font-size: 13px;
   display: inline-block;
 }
@@ -1349,10 +1491,10 @@ button.save-indicator:focus-visible {
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
   font-size: 14px;
   line-height: 1.6;
-  border: 1px solid var(--border, #d0d7de);
+  border: 1px solid var(--border);
   border-radius: 6px;
-  background: var(--bg-elevated, #fff);
-  color: var(--text, #1f2328);
+  background: var(--bg-elevated);
+  color: var(--text);
   resize: vertical;
   outline: none;
 }
@@ -1367,11 +1509,11 @@ button.save-indicator:focus-visible {
   font-size: 0.85rem;
   font-weight: 500;
   font-family: inherit;
-  background: var(--accent, #0969da);
+  background: var(--accent);
   border: none;
-  border-radius: var(--radius-md, 6px);
+  border-radius: var(--radius-md);
   cursor: pointer;
-  color: var(--accent-fg, #ffffff);
+  color: var(--accent-fg);
   box-shadow: var(--shadow-sm);
   transition:
     background var(--duration) var(--ease),
@@ -1379,7 +1521,7 @@ button.save-indicator:focus-visible {
     box-shadow var(--duration) var(--ease);
 }
 .empty-state-open-sidebar:hover {
-  background: var(--accent-hover, #0550ae);
+  background: var(--accent-hover);
   transform: translateY(-1px);
   box-shadow: var(--shadow-md);
 }
@@ -1409,7 +1551,7 @@ button.save-indicator:focus-visible {
   margin-left: auto;
   background: none;
   border: none;
-  color: var(--text-muted, #8b949e);
+  color: var(--text-muted);
   cursor: pointer;
   font-size: 12px;
   padding: 0 6px;
@@ -1421,7 +1563,7 @@ button.save-indicator:focus-visible {
   opacity: 1;
 }
 .tree-row-side:hover {
-  color: var(--danger, #cf222e);
+  color: var(--danger);
 }
 .tree-row-main {
   flex: 1;
@@ -1459,16 +1601,16 @@ button.save-indicator:focus-visible {
   min-width: 0;
   display: flex;
   flex-direction: column;
-  border-left: 1px solid var(--border, #d0d7de);
-  background: var(--editor-bg, #ffffff);
+  border-left: 1px solid var(--border);
+  background: var(--editor-bg);
 }
 .split-pane-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
   padding: 0.3rem 0.9rem;
-  border-bottom: 1px solid var(--border, #d0d7de);
-  background: var(--topbar-bg, #ffffff);
+  border-bottom: 1px solid var(--border);
+  background: var(--topbar-bg);
   flex-shrink: 0;
   min-height: 38px;
 }
@@ -1488,11 +1630,11 @@ button.save-indicator:focus-visible {
   max-width: 820px;
   margin: 0 auto;
   padding: 2.5rem 3rem;
-  background: var(--editor-bg, #ffffff);
+  background: var(--editor-bg);
 }
 /* 深色主题下分屏分隔线 */
 [data-theme="dark"] .split-pane {
-  border-left-color: var(--border, #30363d);
+  border-left-color: var(--border);
 }
 
 /* ===== 响应式视口适配 ===== */
@@ -1509,4 +1651,5 @@ button.save-indicator:focus-visible {
   .editor-topbar {
     padding: 0.35rem 0.5rem;
   }
+}
 }

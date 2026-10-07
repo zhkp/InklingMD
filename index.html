@@ -2,6 +2,23 @@
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
+    <!--
+      G5/N1（#223/#224）：层序声明唯一落点。必须在任何样式之前由内联 <style> 建立，
+      禁止放到 App.css 首行（dev 下模块求值顺序会使 theme 先于 base 建立）。
+
+      ⚠️ 本标签会改变 release 的 CSP 形态（#310 评审阻塞项 2）：Tauri 的 codegen 只要
+      在 index.html 里发现任何 <style>，就会为该元素注入 nonce 占位符，运行期
+      `replace_csp_nonce` 随即把 `'nonce-…'` 追加进 style-src —— 而按 CSP3，指令中一旦
+      出现 nonce，`'unsafe-inline'` 即失效，于是**所有运行时注入的 <style> 都会被拦**：
+      CodeMirror（style-mod）、自定义 CSS（store/theme.ts）、mermaid（SVG 内 <style>，
+      无 nonce 接口，源码已核实）。
+      故 tauri.conf.json 用 `security.dangerousDisableAssetCspModification: ["style-src"]`
+      显式关掉 style-src 的 nonce 注入，保持 `'unsafe-inline'` 生效（= 本 PR 之前的
+      release 行为）。script-src 的注入保持默认开启。改本标签前请先看 S10 断言。
+    -->
+    <style id="inkling-layer-statement">
+      @layer base, theme, user;
+    </style>
     <link rel="icon" type="image/svg+xml" href="/vite.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>InklingMD</title>

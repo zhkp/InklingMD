@@ -1,14 +1,17 @@
+/* #223/#224：本样式表统一入 @layer base（非缩进包裹，原因见 src/App.css 头注）。
+   存量色值已收敛为语义 token，S9 断言禁止新增散落硬编码色。 */
+@layer base {
 .gs-backdrop {
   position: fixed;
   inset: 0;
-  background: rgba(31, 35, 40, 0.45);
+  background: var(--shell-backdrop);
   backdrop-filter: blur(2px);
   display: flex;
   align-items: flex-start;
   justify-content: center;
   padding-top: 10vh;
   z-index: 150;
-  animation: backdrop-in 0.15s var(--ease, ease);
+  animation: backdrop-in 0.15s var(--ease);
 }
 
 /* 命令面板式弹层：从顶部轻微下滑 */
@@ -29,12 +32,12 @@
   max-height: 76vh;
   display: flex;
   flex-direction: column;
-  background: var(--bg-elevated, #ffffff);
-  border: 1px solid var(--border, #d0d7de);
-  border-radius: var(--radius-lg, 12px);
-  box-shadow: var(--shadow-lg, 0 8px 28px rgba(0, 0, 0, 0.2));
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
   overflow: hidden;
-  animation: gs-drop-in 0.18s var(--ease, ease);
+  animation: gs-drop-in 0.18s var(--ease);
 }
 
 .gs-header {
@@ -42,25 +45,25 @@
   align-items: center;
   gap: 0.5rem;
   padding: 0.65rem 0.85rem;
-  border-bottom: 1px solid var(--border, #eaeef2);
+  border-bottom: 1px solid var(--border);
 }
 
 .gs-input {
   flex: 1;
-  border: 1px solid var(--border, #d0d7de);
-  border-radius: var(--radius-md, 6px);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
   padding: 0.42rem 0.65rem;
   font-size: 0.9rem;
   font-family: inherit;
-  background: var(--editor-bg, #ffffff);
-  color: var(--text, #1f2328);
+  background: var(--editor-bg);
+  color: var(--text);
   outline: none;
   transition:
     border-color var(--duration) var(--ease),
     box-shadow var(--duration) var(--ease);
 }
 .gs-input:focus {
-  border-color: var(--accent, #2f81f7);
+  border-color: var(--accent);
   box-shadow: var(--ring);
 }
 
@@ -75,18 +78,18 @@
   align-items: center;
   gap: 0.2rem;
   font-size: 0.78rem;
-  color: var(--text-muted, #6e7681);
+  color: var(--text-muted);
   cursor: pointer;
   padding: 0.24rem 0.45rem;
-  border: 1px solid var(--border, #d0d7de);
-  border-radius: var(--radius-md, 6px);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
   transition:
     background-color var(--duration) var(--ease),
     border-color var(--duration) var(--ease),
     color var(--duration) var(--ease);
 }
 .gs-toggle:hover {
-  background: var(--row-hover-bg, rgba(0, 0, 0, 0.05));
+  background: var(--row-hover-bg);
 }
 /* #188：原 display:none 使 checkbox 无法聚焦，键盘用户无法切换；
    visually-hidden 保留焦点可达性，视觉上等效隐藏。 */
@@ -104,14 +107,14 @@
 }
 /* 键盘聚焦到隐藏 checkbox 时给出可见焦点环 */
 .gs-toggle input:focus-visible + span {
-  outline: 2px solid var(--accent, #0969da);
+  outline: 2px solid var(--accent);
   outline-offset: 3px;
   border-radius: 3px;
 }
 .gs-toggle:has(input:checked) {
-  background: var(--accent-subtle, rgba(47, 129, 247, 0.12));
-  border-color: var(--accent, #2f81f7);
-  color: var(--accent, #2f81f7);
+  background: var(--accent-subtle);
+  border-color: var(--accent);
+  color: var(--accent);
 }
 
 .gs-close {
@@ -122,28 +125,28 @@
   height: 26px;
   border: none;
   background: transparent;
-  color: var(--text-muted, #6e7681);
+  color: var(--text-muted);
   cursor: pointer;
   font-size: 0.9rem;
   padding: 0;
-  border-radius: var(--radius-md, 6px);
+  border-radius: var(--radius-md);
   line-height: 1;
 }
 .gs-close:hover {
-  background: var(--row-hover-bg, rgba(0, 0, 0, 0.06));
-  color: var(--text, #1f2328);
+  background: var(--row-hover-bg);
+  color: var(--text);
 }
 
 .gs-status {
   padding: 0.3rem 0.8rem;
   font-size: 0.74rem;
-  color: var(--text-muted, #6e7681);
-  border-bottom: 1px solid var(--border, #eaeef2);
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--border);
 }
 
 .gs-error {
   /* 同 #228：改为主题变量，避免深色主题下错误色偏暗（本 PR 已动过本文件，顺手对齐） */
-  color: var(--danger, #cf222e);
+  color: var(--danger);
 }
 
 .gs-results {
@@ -163,14 +166,14 @@
   padding: 0.35rem 0.55rem;
   font-size: 0.8rem;
   font-weight: 600;
-  color: var(--text, #1f2328);
+  color: var(--text);
 }
 
 .gs-file-icon {
   display: inline-flex;
   align-items: center;
   font-size: 0.85rem;
-  color: var(--accent, #0969da);
+  color: var(--accent);
 }
 
 .gs-file-name {
@@ -181,8 +184,8 @@
 }
 
 .gs-count {
-  background: var(--accent-subtle, rgba(9, 105, 218, 0.1));
-  color: var(--accent, #0969da);
+  background: var(--accent-subtle);
+  color: var(--accent);
   font-size: 0.7rem;
   padding: 0.1rem 0.45rem;
   border-radius: 10px;
@@ -199,19 +202,19 @@
   background: transparent;
   text-align: left;
   padding: 0.28rem 0.55rem 0.28rem 1.6rem;
-  border-radius: var(--radius-md, 6px);
+  border-radius: var(--radius-md);
   cursor: pointer;
   font-family: inherit;
-  transition: background-color 0.1s var(--ease, ease);
+  transition: background-color 0.1s var(--ease);
 }
 .gs-hit:hover,
 .gs-hit-active {
-  background: var(--accent-subtle, rgba(9, 105, 218, 0.08));
+  background: var(--accent-subtle);
 }
 
 .gs-line {
   font-size: 0.72rem;
-  color: var(--text-muted, #6e7681);
+  color: var(--text-muted);
   flex-shrink: 0;
   width: 3rem;
   padding-top: 0.1rem;
@@ -220,7 +223,7 @@
 .gs-preview {
   flex: 1;
   font-size: 0.8rem;
-  color: var(--text, #1f2328);
+  color: var(--text);
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
   white-space: pre-wrap;
   word-break: break-all;
@@ -232,7 +235,7 @@
 }
 
 .gs-highlight {
-  background: rgba(210, 153, 34, 0.35);
+  background: var(--shell-warning-highlight);
   color: inherit;
   border-radius: 2px;
   padding: 0 1px;
@@ -241,6 +244,7 @@
 .gs-empty {
   padding: 2rem 1rem;
   text-align: center;
-  color: var(--text-muted, #6e7681);
+  color: var(--text-muted);
   font-size: 0.85rem;
+}
 }

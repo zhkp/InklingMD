@@ -1,19 +1,8 @@
 // E2E：主题切换与设置面板
 // 覆盖：明暗切换、data-theme 属性、localStorage 持久化、设置项开关、代码高亮主题、恢复默认、关闭方式
 
-import { test, expect, type Page } from "@playwright/test";
-import { openMockWorkspace, openFile, openSettings, MOD } from "./helpers";
-
-async function insertCodeBlock(page: Page) {
-  await page.keyboard.press(`${MOD}+n`);
-  await expect(page.locator(".ProseMirror p")).toBeVisible({ timeout: 5_000 });
-  await page.locator(".ProseMirror p").first().click();
-  await page.keyboard.type("/");
-  await expect(page.locator(".slash-popup")).toBeVisible({ timeout: 5_000 });
-  await page.keyboard.type("代码");
-  await page.keyboard.press("Enter");
-  await expect(page.locator(".code-block")).toBeVisible({ timeout: 5_000 });
-}
+import { test, expect } from "@playwright/test";
+import { openMockWorkspace, openFile, openSettings, insertCodeBlock } from "./helpers";
 
 test.describe("主题切换", () => {
   test.beforeEach(async ({ page }) => {

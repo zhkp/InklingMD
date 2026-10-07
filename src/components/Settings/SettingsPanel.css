@@ -1,13 +1,16 @@
+/* #223/#224：本样式表统一入 @layer base（非缩进包裹，原因见 src/App.css 头注）。
+   存量色值已收敛为语义 token，S9 断言禁止新增散落硬编码色。 */
+@layer base {
 .settings-backdrop {
   position: fixed;
   inset: 0;
-  background: rgba(31, 35, 40, 0.45);
+  background: var(--shell-backdrop);
   backdrop-filter: blur(2px);
   display: flex;
   align-items: center;
   justify-content: center;
   z-index: 100;
-  animation: backdrop-in 0.15s var(--ease, ease);
+  animation: backdrop-in 0.15s var(--ease);
 }
 /* 模态遮罩淡入 */
 @keyframes backdrop-in {
@@ -36,12 +39,12 @@
   max-height: 80vh;
   display: flex;
   flex-direction: column;
-  background: var(--bg-elevated, #ffffff);
-  border: 1px solid var(--border, #d0d7de);
-  border-radius: var(--radius-lg, 12px);
-  box-shadow: var(--shadow-lg, 0 8px 28px rgba(0, 0, 0, 0.2));
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
   overflow: hidden;
-  animation: modal-in 0.18s var(--ease, ease);
+  animation: modal-in 0.18s var(--ease);
 }
 
 .settings-header {
@@ -49,14 +52,14 @@
   align-items: center;
   justify-content: space-between;
   padding: 0.75rem 1.1rem;
-  border-bottom: 1px solid var(--border, #d0d7de);
+  border-bottom: 1px solid var(--border);
 }
 
 .settings-title {
   font-size: 0.95rem;
   font-weight: 600;
   letter-spacing: 0.01em;
-  color: var(--text, #1f2328);
+  color: var(--text);
 }
 
 .settings-close {
@@ -67,16 +70,16 @@
   height: 26px;
   border: none;
   background: transparent;
-  color: var(--text-muted, #6e7681);
+  color: var(--text-muted);
   cursor: pointer;
   font-size: 0.9rem;
   padding: 0;
-  border-radius: var(--radius-md, 6px);
+  border-radius: var(--radius-md);
   line-height: 1;
 }
 .settings-close:hover {
-  background: var(--row-hover-bg, rgba(0, 0, 0, 0.06));
-  color: var(--text, #1f2328);
+  background: var(--row-hover-bg);
+  color: var(--text);
 }
 
 .settings-body {
@@ -91,7 +94,7 @@
   justify-content: space-between;
   gap: 1rem;
   padding: 0.75rem 0;
-  border-bottom: 1px solid var(--border, #eaeef2);
+  border-bottom: 1px solid var(--border);
   cursor: pointer;
 }
 .settings-row:last-child {
@@ -108,12 +111,12 @@
 .settings-name {
   font-size: 0.88rem;
   font-weight: 500;
-  color: var(--text, #1f2328);
+  color: var(--text);
 }
 
 .settings-desc {
   font-size: 0.74rem;
-  color: var(--text-muted, #6e7681);
+  color: var(--text-muted);
   line-height: 1.5;
 }
 
@@ -126,10 +129,10 @@
   height: 20px;
   margin: 0;
   border-radius: 10px;
-  background: rgba(140, 149, 159, 0.45);
+  background: var(--shell-switch-bg);
   cursor: pointer;
   flex-shrink: 0;
-  transition: background-color 0.2s var(--ease, ease);
+  transition: background-color 0.2s var(--ease);
 }
 .settings-toggle::after {
   content: "";
@@ -139,12 +142,12 @@
   width: 16px;
   height: 16px;
   border-radius: 50%;
-  background: #ffffff;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
-  transition: transform 0.2s var(--ease, ease);
+  background: var(--shell-switch-knob-bg);
+  box-shadow: var(--shell-switch-knob-shadow);
+  transition: transform 0.2s var(--ease);
 }
 .settings-toggle:checked {
-  background: var(--accent, #0969da);
+  background: var(--accent);
 }
 .settings-toggle:checked::after {
   transform: translateX(14px);
@@ -159,10 +162,10 @@
 
 .settings-select {
   padding: 0.32rem 0.55rem;
-  border: 1px solid var(--border, #d0d7de);
-  border-radius: var(--radius-md, 6px);
-  background: var(--btn-bg, #ffffff);
-  color: var(--text, #1f2328);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--btn-bg);
+  color: var(--text);
   font-size: 0.82rem;
   font-family: inherit;
   cursor: pointer;
@@ -172,32 +175,33 @@
     box-shadow var(--duration) var(--ease);
 }
 .settings-select:hover {
-  border-color: var(--border-strong, #c8d0d9);
+  border-color: var(--border-strong);
 }
 .settings-select:focus {
   outline: none;
-  border-color: var(--accent, #0969da);
+  border-color: var(--accent);
   box-shadow: var(--ring);
 }
 
 .settings-footer {
   padding: 0.65rem 1.1rem;
-  border-top: 1px solid var(--border, #d0d7de);
+  border-top: 1px solid var(--border);
   display: flex;
   justify-content: flex-end;
 }
 
 .settings-reset {
-  border: 1px solid var(--border, #d0d7de);
-  background: var(--bg-elevated, #ffffff);
-  color: var(--text, #1f2328);
+  border: 1px solid var(--border);
+  background: var(--bg-elevated);
+  color: var(--text);
   font-size: 0.8rem;
   padding: 0.36rem 0.9rem;
-  border-radius: var(--radius-md, 6px);
+  border-radius: var(--radius-md);
   cursor: pointer;
   font-family: inherit;
 }
 .settings-reset:hover {
-  background: var(--btn-hover-bg, #e9edf1);
-  border-color: var(--border-strong, #c8d0d9);
+  background: var(--btn-hover-bg);
+  border-color: var(--border-strong);
+}
 }

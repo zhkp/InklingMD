@@ -1,0 +1,133 @@
+{
+  "//": "#224 主题样式断言入口清单（唯一真值源）。新增/删除 CSS 入口必须同步登记，否则 S13/未登记守卫失败。",
+  "tokenDefinitionFiles": [
+    "src/App.css",
+    "src/components/**/*.css"
+  ],
+  "themeBlocks": {
+    "file": "src/App.css",
+    "light": "[data-theme=\"light\"]",
+    "dark": "[data-theme=\"dark\"]"
+  },
+  "hardcodeScanFiles": [
+    "src/App.css",
+    "src/components/GlobalSearch/GlobalSearchPanel.css",
+    "src/components/QuickOpen/QuickOpenPanel.css"
+  ],
+  "forbiddenHardcodedColors": ["#cf222e"],
+  "sourceScanFiles": [
+    "src/components/Sidebar/DeletedSnapshots.tsx"
+  ],
+  "//referencedUndefinedAllowlist": "S1 允许的「引用但全仓未定义」token；每条必须写明出处（评审：#223 只允许 I1 的 --bg）",
+  "referencedUndefinedAllowlist": [
+    { "token": "--bg", "reason": "issue-i1（#311）：Mermaid 工具栏按钮暗色白块，按 #223 裁决移出本批" }
+  ],
+  "linkDialogClasses": [
+    "link-dialog-modal",
+    "link-dialog-close",
+    "link-dialog-btn-cancel",
+    "link-dialog-btn-confirm"
+  ],
+  "requiredTokens": [
+    "--ease",
+    "--duration",
+    "--mono-font",
+    "--radius-sm",
+    "--radius-md",
+    "--radius-lg",
+    "--bg-elevated",
+    "--bg-subtle",
+    "--editor-bg",
+    "--border",
+    "--text",
+    "--text-muted",
+    "--accent",
+    "--accent-hover",
+    "--success",
+    "--danger",
+    "--ring"
+  ],
+  "themeColorTokens": [
+    "--accent",
+    "--accent-hover",
+    "--accent-fg",
+    "--border",
+    "--text",
+    "--text-muted",
+    "--btn-bg",
+    "--bg-elevated",
+    "--bg-hover",
+    "--bg-subtle",
+    "--editor-bg",
+    "--danger",
+    "--success",
+    "--warning",
+    "--ring"
+  ],
+  "layers": {
+    "layerStatement": {
+      "file": "index.html",
+      "elementId": "inkling-layer-statement",
+      "order": ["base", "theme", "user"]
+    },
+    "base": [
+      { "entry": "src/App.css", "wrap": "source" },
+      { "entry": "src/components/**/*.css", "wrap": "source" },
+      { "entry": "@milkdown/prose/lib/style/prosemirror.css", "wrap": "plugin-transform" },
+      { "entry": "@milkdown/prose/lib/style/tables.css", "wrap": "plugin-transform" },
+      { "entry": "katex/dist/katex.min.css", "wrap": "plugin-transform" }
+    ],
+    "themeStyleElementId": "inkling-theme",
+    "userStyleElementId": "inkling-custom-theme"
+  },
+  "s9AllowMarkers": ["issue-i1"],
+  "//runtimeStyleSources": "S13 运行时口径（#310 评审阻塞项 1）：未分层规则只允许来自这些「无法入层」的第三方运行时注入源；应用自身 18 入口必须 100% 在层内。detect 由 theme-layers.spec.ts 实现。",
+  "runtimeStyleSources": [
+    {
+      "id": "codemirror-style-mod",
+      "detect": "style-mod-class",
+      "reason": "CodeMirror 经 style-mod 运行时注入 <style>（插入 head 首位、未分层），第三方库不提供入层开关"
+    },
+    {
+      "id": "mermaid-svg",
+      "detect": "svg-owned",
+      "reason": "mermaid 把自己的样式 <style> 注入到图表 SVG 内部（mermaid.core.mjs:1302-1304），同样无法入层"
+    }
+  ],
+  "//cmHostTheme": "S17：CM 宿主外观的唯一交付点。应用 CSS 不得出现 .cm-* 选择器；被搬走的 token 必须仍被这些文件消费。",
+  "cmHostTheme": {
+    "files": [
+      "src/lib/codemirror-shared.ts",
+      "src/components/Editor/frontmatter.ts"
+    ],
+    "requiredRefs": [
+      "--editor-font",
+      "--code-block-bg",
+      "--code-block-gutter-bg",
+      "--code-block-gutter-border",
+      "--code-block-muted",
+      "--content-frontmatter-gutter-border"
+    ],
+    "placeholderFont": {
+      "cssFile": "src/App.css",
+      "selector": ".editor-scroll .milkdown .code-block-cm .code-block-placeholder",
+      "tsFile": "src/lib/codemirror-shared.ts",
+      "tsConst": "MONO_FONT_FAMILY"
+    }
+  },
+  "injectionFunctions": [
+    { "file": "src/store/theme.ts", "names": ["applyCustomCSS"] }
+  ],
+  "//innerHTMLAllowlist": "S15 点级豁免：file→允许的 innerHTML 赋值次数（新增一处即失败，须评审登记）",
+  "innerHTMLAllowlist": [
+    { "file": "src/main.tsx", "count": 1, "reason": "崩溃页注入（#171）" },
+    { "file": "src/lib/exporter.ts", "count": 1, "reason": "导出离屏容器（PNG 长图）" },
+    { "file": "src/components/Editor/html-view.ts", "count": 1, "reason": "HTML 块渲染" },
+    { "file": "src/components/Editor/math.ts", "count": 3, "reason": "KaTeX 渲染产物" },
+    { "file": "src/components/Editor/mermaid-view.ts", "count": 4, "reason": "Mermaid 渲染产物/错误态" }
+  ],
+  "buildAssets": {
+    "cssCount": 3,
+    "requiredChunks": ["index", "vendor_milkdown", "vendor_katex"]
+  }
+}

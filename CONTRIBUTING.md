@@ -438,6 +438,29 @@ tag 运行若因故只走到两轮（例如确认轮候选为空、或 retest2 j
    `WARN` 读成因，被噪声（3σ）或绝对地板挡下的**不是**回归。
 5. 汇报发版结果时**必须一并给出性能结论**，不得只报"发版成功"。
 
+## 样式改动与主题断言（Theme Epic #223/#224，S1–S17）
+
+所有样式都在级联层 `@layer base, theme, user` 内（层序声明在 [index.html](./index.html) 内联，是唯一落点）。改样式前先按下表选择防线：
+
+| 改动性质 | 必需防线 | 理由 |
+|---|---|---|
+| 变量 / 选择器结构变化（新增 token、拆文件、`data-theme` 块、改层包裹） | **源级静态断言**（`tests/styles/**`、`tests/components/*ThemeTokens`） | 跨平台稳定，结构变化用静态断言可精确表达，且不被运行时环境（dev/打包、浏览器/Tauri）干扰 |
+| 主题加载机制（层序、注入顺序、快照、首帧） | **E2E 行为断言**：已生效的 S12 层序 / S13 无未分层（dev server，见 `tests/e2e/theme-layers.spec.ts`）；S7 DOM 顺序冒烟 / S8 首帧 `data-theme` / S14 全局名称不泄漏**待 #225/#306 提供被断言对象后激活**（现以 `describe.skip` 显式登记，非遗漏） | 机制正确性只能在真实样式表/DOM 上验证 |
+| CodeMirror 宿主外观（`.cm-*`：字体、行号栏底色/边框色、编辑器底色） | **只能写在 `EditorView.theme`**（`src/lib/codemirror-shared.ts` / `src/components/Editor/frontmatter.ts`），由 **S17 源级**（`tests/styles/theme-s17-cm-host.test.ts`）+ **行为级**（`tests/e2e/theme-cm-host.spec.ts`，探针比对计算样式）双向锁定 | CodeMirror 用 style-mod 在运行时把样式以**未分层** `<style>` 注入 `<head>` 首位（`style-mod.js:100,136-138`）；未分层恒胜 `@layer base`（与特异性无关），写在应用 CSS 里的 `.cm-*` 声明必然失效（#310 评审阻塞项 1） |
+| 构建期分文件 / 压缩（manualChunks、@import 内联、esbuild 压缩、@font-face） | **产物级断言 S16**（`pnpm check:build-layers`，清空 dist → 构建 → `scripts/check-theme-build-assets.mjs`） | dev 与 build 的 CSS 分文件策略不同，产物正确性只在构建后成立 |
+| 视觉呈现变化（颜色值微调、间距、观感类） | 截图比对或**人工核对**（无截图基线时，PR 描述中写明人工核对步骤） | 静态断言无法覆盖像素级呈现 |
+
+硬规则（#224 关闭标准）：
+
+1. **任何样式改动至少留一条机器可验证断言**；确实无法机器验证的，必须在 PR 描述中显式声明人工核对步骤，观感类差异不得静默合入。
+2. **新增/删除 CSS 入口**必须同步登记 [tests/fixtures/theme-entries.json](./tests/fixtures/theme-entries.json)，未登记守卫会失败；所有应用样式必须在 `@layer base` 内（源码包裹或 `vite.config.ts` 的 `themeBaseLayerPlugin`）。唯一的未分层例外是**无法入层的第三方运行时注入源**，必须登记进同一清单的 `runtimeStyleSources`（当前：CodeMirror style-mod、mermaid 的 SVG 内 `<style>`），由 S13-CM 断言守住；应用自身样式一律不得出现未分层规则。
+3. **零散落硬编码色**：清单内文件剥注释后，`#hex` / `rgba()` 只允许出现在 `--token: <值>` 定义行（S9）；存量色值统一走语义 token，新增组件样式不得直接写色值。token 命名沿用现有名（不改名），新增外壳/内容 token 分别用 `--shell-*` / `--content-*` 前缀，白名单见 [src/theme/token-whitelist.json](./src/theme/token-whitelist.json)（与 App.css 自动对账）。
+4. 主题/自定义 CSS 注入 `<style>` 必须 `textContent` 或 CSSOM，**禁止 innerHTML/字符串拼接**（S15，函数级断言）。**CSP 口径（#310 阻塞项 2）**：release 下 `style-src` 必须停留在 `'unsafe-inline'` 模式 —— 只要 `index.html` 里存在内联 `<style>`（层序声明），Tauri codegen 就会给它注入 nonce 占位符、运行期把 `'nonce-…'` 追加进 `style-src`，而 CSP3 规定指令含 nonce 时 `'unsafe-inline'` 失效，会让 CodeMirror / 自定义 CSS / mermaid 的运行时 `<style>` 全部被拦（且 dev/E2E 无 CSP 测不出）。因此 `src-tauri/tauri.conf.json` 用 `security.dangerousDisableAssetCspModification: ["style-src"]` 显式关闭该指令的自动修改，S10 断言锁定；script-src 的注入保持默认开启。
+5. **CodeMirror 宿主外观不得写在应用 CSS**：`.cm-*` 选择器在 `@layer base` 内必然被运行时注入样式压掉，一切 CM 外观只允许由 `EditorView.theme` 交付（S17）。其中「原先由 App.css 靠特异性胜出」的属性必须用 `&.cm-editor …` 提升到 0-3-0，不能依赖 style-mod 的模块挂载顺序（高亮主题 oneDark 等会晚于宿主主题挂载）。被搬走的 token（`--editor-font`、`--content-frontmatter-gutter-border` 等）必须继续被 CM 主题消费，否则会变成死 token（S17 反向断言）。
+6. CI 门禁三段固定为：① 静态/单测（`pnpm test`）→ ② E2E（`pnpm e2e`，dev server）→ ③ 清空 dist 后构建 + S16（`pnpm check:build-layers`）；不得对陈旧 `dist/` 断言。
+
+截图基线：本项目暂不引入截图比对（`@layer` 迁移等纯结构变化以源级断言 + S13/S16 兜底）；若未来引入，限定 chromium + 固定容器尺寸，并在 CI 连续无 flake 后再启用。
+
 ## 代码风格
 
 - TypeScript，优先使用类型而非 `any`。

@@ -1,7 +1,10 @@
+/* #223/#224：本样式表统一入 @layer base（非缩进包裹，原因见 src/App.css 头注）。
+   存量色值已收敛为语义 token，S9 断言禁止新增散落硬编码色。 */
+@layer base {
 .link-dialog-backdrop {
   position: fixed;
   inset: 0;
-  background-color: rgba(0, 0, 0, 0.4);
+  background-color: var(--shell-backdrop-strong);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -10,12 +13,12 @@
 }
 
 .link-dialog-modal {
-  background: var(--bg-elevated, #ffffff);
-  border: 1px solid var(--border, #e1e4e8);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
   border-radius: 8px;
   width: 420px;
   max-width: 90vw;
-  box-shadow: 0 10px 25px rgba(0, 0, 0, 0.2);
+  box-shadow: var(--shell-dialog-shadow);
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -38,14 +41,14 @@
   align-items: center;
   justify-content: space-between;
   padding: 14px 18px;
-  border-bottom: 1px solid var(--border, #e1e4e8);
+  border-bottom: 1px solid var(--border);
 }
 
 .link-dialog-header h3 {
   margin: 0;
   font-size: 15px;
   font-weight: 600;
-  color: var(--text, #24292e);
+  color: var(--text);
 }
 
 .link-dialog-close {
@@ -53,15 +56,15 @@
   border: none;
   font-size: 18px;
   line-height: 1;
-  color: var(--text-muted, #586069);
+  color: var(--text-muted);
   cursor: pointer;
   padding: 2px 6px;
   border-radius: 4px;
 }
 
 .link-dialog-close:hover {
-  background: var(--bg-hover, #f3f4f6);
-  color: var(--text, #24292e);
+  background: var(--bg-hover);
+  color: var(--text);
 }
 
 .link-dialog-form {
@@ -80,22 +83,22 @@
 .link-dialog-field label {
   font-size: 13px;
   font-weight: 500;
-  color: var(--text-muted, #586069);
+  color: var(--text-muted);
 }
 
 .link-dialog-field input {
   padding: 8px 10px;
   font-size: 13px;
-  border: 1px solid var(--border, #d1d5db);
+  border: 1px solid var(--border);
   border-radius: 6px;
-  background: var(--editor-bg, #ffffff);
-  color: var(--text, #24292e);
+  background: var(--editor-bg);
+  color: var(--text);
   outline: none;
 }
 
 .link-dialog-field input:focus {
-  border-color: var(--accent, #58a6ff);
-  box-shadow: var(--ring, 0 0 0 2px rgba(88, 166, 255, 0.2));
+  border-color: var(--accent);
+  box-shadow: var(--ring);
 }
 
 .link-dialog-actions {
@@ -115,19 +118,19 @@
 }
 
 .link-dialog-btn-cancel {
-  background: var(--btn-bg, #f6f8fa);
-  border: 1px solid var(--border, #d1d5db);
-  color: var(--text, #24292e);
+  background: var(--btn-bg);
+  border: 1px solid var(--border);
+  color: var(--text);
 }
 
 .link-dialog-btn-cancel:hover {
-  background: var(--bg-hover, #e5e7eb);
+  background: var(--bg-hover);
 }
 
 .link-dialog-btn-confirm {
-  background: var(--accent, #0969da);
+  background: var(--accent);
   border: 1px solid transparent;
-  color: var(--accent-fg, #ffffff);
+  color: var(--accent-fg);
 }
 
 .link-dialog-btn-confirm:hover:not(:disabled) {
@@ -137,4 +140,5 @@
 .link-dialog-btn-confirm:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
 }

@@ -15,7 +15,8 @@
     "test:coverage": "vitest run --coverage",
     "e2e": "playwright test",
     "e2e:install": "playwright install --with-deps chromium",
-    "benchmark": "node tests/perf/benchmark.mjs"
+    "benchmark": "node tests/perf/benchmark.mjs",
+    "check:build-layers": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\" && vite build && node scripts/check-theme-build-assets.mjs"
   },
   "dependencies": {
     "@codemirror/commands": "^6.10.4",
@@ -66,6 +67,7 @@
     "@types/react-dom": "^19.1.6",
     "@vitejs/plugin-react": "^4.6.0",
     "happy-dom": "^15.11.7",
+    "postcss": "^8.5.28",
     "typescript": "~5.8.3",
     "vite": "^7.0.4",
     "vitest": "^3.2.7"

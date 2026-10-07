@@ -19,6 +19,7 @@ function loadKatex(): Promise<KatexModule> {
     katexPromise = (async () => {
       const [katexMod] = await Promise.all([
         import("katex"),
+        // G5/N17：懒加载 katex 样式由 themeBaseLayerPlugin 包入 @layer base（产物 vendor_katex.css）
         import("katex/dist/katex.min.css"),
         // mhchem 扩展：支持 \ce{} 等化学方程式（副作用模块，须在渲染前加载）
         // @ts-ignore - contrib 模块无类型声明

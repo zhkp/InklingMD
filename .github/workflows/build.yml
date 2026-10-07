@@ -86,6 +86,11 @@ jobs:
       - name: Run E2E tests
         run: pnpm e2e
 
+      # #224 A-5：门禁第三段——清空 dist 后重新构建，再做 S16 产物级层化断言
+      # （不得对陈旧 dist 断言；check:build-layers 内部先删 dist 再 vite build）
+      - name: Build frontend and verify layered CSS assets (S16)
+        run: pnpm check:build-layers
+
       - name: Upload Playwright report
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v7

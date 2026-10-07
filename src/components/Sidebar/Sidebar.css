@@ -1,10 +1,13 @@
+/* #223/#224：本样式表统一入 @layer base（非缩进包裹，原因见 src/App.css 头注）。
+   存量色值已收敛为语义 token，S9 断言禁止新增散落硬编码色。 */
+@layer base {
 .sidebar {
   width: 248px;
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
-  border-right: 1px solid var(--border, #d0d7de);
-  background: var(--sidebar-bg, #f6f8fa);
+  border-right: 1px solid var(--border);
+  background: var(--sidebar-bg);
   height: 100%;
 }
 
@@ -13,7 +16,7 @@
   align-items: center;
   justify-content: space-between;
   padding: 0 0.75rem;
-  border-bottom: 1px solid var(--border, #d0d7de);
+  border-bottom: 1px solid var(--border);
   gap: 0.5rem;
   height: 40px;
 }
@@ -23,7 +26,7 @@
   font-weight: 700;
   letter-spacing: 0.04em;
   text-transform: uppercase;
-  color: var(--text-muted, #6e7681);
+  color: var(--text-muted);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -32,15 +35,15 @@
 .sidebar-btn {
   font-size: 0.75rem;
   padding: 0.2rem 0.6rem;
-  border: 1px solid var(--border, #d0d7de);
+  border: 1px solid var(--border);
   border-radius: 4px;
-  background: var(--btn-bg, #ffffff);
-  color: var(--text, #1f2328);
+  background: var(--btn-bg);
+  color: var(--text);
   cursor: pointer;
   flex-shrink: 0;
 }
 .sidebar-btn:hover {
-  background: var(--btn-hover-bg, #e9ecef);
+  background: var(--btn-hover-bg);
 }
 
 /* 侧边栏头部图标按钮组（打开文件夹 / 打开文件） */
@@ -59,7 +62,7 @@
   border: none;
   border-radius: 5px;
   background: transparent;
-  color: var(--text-muted, #6e7681);
+  color: var(--text-muted);
   cursor: pointer;
   font-size: 0.95rem;
   line-height: 1;
@@ -67,11 +70,11 @@
   transition: background 0.12s ease, color 0.12s ease;
 }
 .sidebar-btn-icon:hover {
-  background: var(--btn-hover-bg, #e9ecef);
-  color: var(--text, #1f2328);
+  background: var(--btn-hover-bg);
+  color: var(--text);
 }
 .sidebar-btn-icon:active {
-  background: var(--row-active-bg, rgba(56, 139, 253, 0.15));
+  background: var(--row-active-bg);
 }
 
 .sidebar-tree {
@@ -112,7 +115,7 @@
 .sidebar-empty {
   padding: 1rem 0.75rem;
   font-size: 0.8rem;
-  color: var(--text-muted, #6e7681);
+  color: var(--text-muted);
   line-height: 1.5;
 }
 
@@ -128,20 +131,20 @@
   width: calc(100% - 8px);
   border: none;
   background: transparent;
-  color: var(--text, #1f2328);
+  color: var(--text);
   font-size: 0.82rem;
   padding: 0.24rem 0.5rem;
   margin: 0 4px;
   text-align: left;
   cursor: pointer;
   font-family: inherit;
-  border-radius: var(--radius-md, 6px);
+  border-radius: var(--radius-md);
   transition:
-    background-color 0.1s var(--ease, ease),
-    color 0.1s var(--ease, ease);
+    background-color 0.1s var(--ease),
+    color 0.1s var(--ease);
 }
 .tree-row:hover {
-  background: var(--row-hover-bg, rgba(0, 0, 0, 0.04));
+  background: var(--row-hover-bg);
 }
 .tree-row-dir {
   font-weight: 500;
@@ -151,7 +154,7 @@
 }
 .tree-row-file-disabled {
   cursor: default;
-  color: var(--text-muted, #8b949e);
+  color: var(--text-muted);
   opacity: 0.6;
 }
 .tree-row-file-disabled:hover {
@@ -159,7 +162,7 @@
 }
 
 .tree-row-status {
-  color: var(--text-muted, #6e7681);
+  color: var(--text-muted);
   cursor: default;
 }
 
@@ -168,21 +171,21 @@
 }
 
 .tree-row-error {
-  color: var(--danger, #cf222e);
+  color: var(--danger);
   cursor: pointer;
 }
 
 .tree-row-error:hover {
-  background: rgba(207, 34, 46, 0.08);
+  background: var(--shell-danger-subtle);
 }
 /* 活跃文件：Subtle Pill 胶囊选中态，柔和圆角与 accent 背景 */
 .tree-row-active {
-  background: var(--row-active-bg, rgba(9, 105, 218, 0.12));
-  color: var(--accent, #0969da);
+  background: var(--row-active-bg);
+  color: var(--accent);
   font-weight: 500;
 }
 .tree-row-active .tree-icon {
-  color: var(--accent, #0969da);
+  color: var(--accent);
 }
 
 .tree-icon {
@@ -193,11 +196,11 @@
   width: 1rem;
   flex-shrink: 0;
   text-align: center;
-  color: var(--text-muted, #6e7681);
+  color: var(--text-muted);
 }
 /* 书签字体的星标使用 accent 色，与普通文件图标区分 */
 .tree-icon-star {
-  color: var(--accent, #0969da);
+  color: var(--accent);
 }
 
 .tree-name {
@@ -211,7 +214,7 @@
   width: 6px;
   height: 6px;
   border-radius: 50%;
-  background: var(--accent, #2f81f7);
+  background: var(--accent);
   flex-shrink: 0;
   margin-left: auto;
   margin-right: 4px;
@@ -240,11 +243,11 @@
 }
 
 .tree-file-opening {
-  color: var(--text-muted, #6e7681);
+  color: var(--text-muted);
 }
 
 .tree-file-error {
-  color: var(--danger, #cf222e);
+  color: var(--danger);
 }
 
 @keyframes tree-file-spin {
@@ -266,7 +269,7 @@
   min-height: 26px;
   max-height: 35%;
   overflow-y: auto;
-  border-bottom: 1px solid var(--border, #eaeef2);
+  border-bottom: 1px solid var(--border);
   padding-bottom: 0.3rem;
   margin-bottom: 0.3rem;
 }
@@ -279,7 +282,7 @@
   margin: 0 4px;
   border: none;
   background: transparent;
-  color: var(--text-muted, #6e7681);
+  color: var(--text-muted);
   font-size: 0.7rem;
   font-weight: 700;
   padding: 0.3rem 0.5rem 0.25rem;
@@ -288,11 +291,11 @@
   font-family: inherit;
   text-transform: uppercase;
   letter-spacing: 0.06em;
-  border-radius: var(--radius-md, 6px);
-  transition: background-color 0.1s var(--ease, ease);
+  border-radius: var(--radius-md);
+  transition: background-color 0.1s var(--ease);
 }
 .recent-header:hover {
-  background: var(--row-hover-bg, rgba(0, 0, 0, 0.04));
+  background: var(--row-hover-bg);
 }
 
 .recent-title {
@@ -310,15 +313,15 @@
 .rename-input {
   flex: 1;
   min-width: 0;
-  border: 1px solid var(--accent, #2f81f7);
-  border-radius: var(--radius-sm, 4px);
-  background: var(--editor-bg, #ffffff);
-  color: var(--text, #1f2328);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+  background: var(--editor-bg);
+  color: var(--text);
   font-size: 0.82rem;
   font-family: inherit;
   padding: 0.14rem 0.35rem;
   outline: none;
-  box-shadow: 0 0 0 2px var(--accent-subtle, rgba(47, 129, 247, 0.2));
+  box-shadow: 0 0 0 2px var(--accent-subtle);
 }
 .tree-row-rename,
 .tree-row-new {
@@ -339,46 +342,73 @@
 .tree-context-menu {
   position: fixed;
   min-width: 156px;
-  background: var(--bg-elevated, #ffffff);
-  border: 1px solid var(--border, #d0d7de);
-  border-radius: var(--radius-lg, 10px);
-  box-shadow: var(--shadow-md, 0 4px 16px rgba(0, 0, 0, 0.15));
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-md);
   padding: 5px;
   z-index: 201;
-  animation: menu-in 0.12s var(--ease, ease);
+  animation: menu-in 0.12s var(--ease);
 }
 .tree-context-item {
   display: block;
   width: 100%;
   border: none;
   background: transparent;
-  color: var(--text, #1f2328);
+  color: var(--text);
   font-size: 0.8rem;
   padding: 0.4rem 0.6rem;
   text-align: left;
   cursor: pointer;
   font-family: inherit;
-  border-radius: var(--radius-md, 6px);
+  border-radius: var(--radius-md);
   transition: none;
 }
 .tree-context-item:hover:not(:disabled) {
-  background: var(--accent-subtle, rgba(9, 105, 218, 0.1));
-  color: var(--accent, #0969da);
+  background: var(--accent-subtle);
+  color: var(--accent);
 }
 .tree-context-item:disabled {
-  color: var(--text-muted, #8b949e);
+  color: var(--text-muted);
   cursor: default;
   opacity: 0.5;
 }
 .tree-context-danger {
-  color: var(--danger, #cf222e);
+  color: var(--danger);
 }
 .tree-context-danger:hover:not(:disabled) {
-  background: rgba(207, 34, 46, 0.1);
-  color: var(--danger, #cf222e);
+  background: var(--shell-danger-subtle-hover);
+  color: var(--danger);
 }
 .tree-context-sep {
   height: 1px;
-  background: var(--border, #eaeef2);
+  background: var(--border);
   margin: 5px 4px;
+}
+
+/* #223 C5：快照健康状态由行内 var() 收拢为 class + token */
+.snapshot-recoverable-title {
+  color: var(--accent);
+}
+.snapshot-health-danger,
+.snapshot-health-warning {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 6px;
+  font-size: 12px;
+}
+.snapshot-health-danger {
+  color: var(--danger);
+}
+.snapshot-health-warning {
+  color: var(--warning);
+}
+/* #223 C5：快照「恢复」按钮行内样式收拢（原行内 font-size/padding/border 含回退值） */
+.snapshot-restore-btn {
+  font-size: 11px;
+  padding: 2px 6px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  cursor: pointer;
+}
 }
