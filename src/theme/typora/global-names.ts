@@ -126,6 +126,18 @@ export function prefixGlobalNames(
       decl.value = rewriteFamilyList(decl.value, sets.fontFamilies, prefix, report, true);
     } else if (prop === "animation" || prop === "animation-name") {
       decl.value = rewriteWordList(decl.value, sets.keyframes, prefix, report, prop);
+    } else if (decl.prop.startsWith("--")) {
+      // N1：主题私有变量**原样保留变量名**（P0-5），但其**值**里属「主题自身名称集合」的
+      // font-family / keyframes 名必须同步改名，否则 `font-family: var(--my-font)` 会静默回退。
+      decl.value = rewriteNameTokens(
+        decl.value,
+        sets.fontFamilies,
+        prefix,
+        report,
+        decl.prop,
+        "font-family",
+      );
+      decl.value = rewriteNameTokens(decl.value, sets.keyframes, prefix, report, decl.prop, "keyframes");
     }
   });
 }

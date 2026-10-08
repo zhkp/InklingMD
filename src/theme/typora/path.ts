@@ -26,14 +26,16 @@ export function dirname(p: string): string {
   return (head.length > 1 ? head.replace(/\/$/, "") : head).replace(/\//g, sep);
 }
 
-/** 折叠 `.` / `..`（先统一为 `/`，再按需还原分隔符）。 */
+/** 折叠 `.` / `..`（先统一为 `/`，再按需还原分隔符）。UNC（`\\srv\share`）双前导斜杠必须保留。 */
 export function normalizePath(p: string): string {
   const sep = p.includes("\\") ? "\\" : "/";
   const n = p.replace(/\\/g, "/");
   const drive = /^([a-zA-Z]:)(\/|$)/.exec(n);
-  const prefix = drive ? drive[1] : "";
-  const rest = drive ? n.slice(drive[1].length) : n;
-  const isAbs = !drive && rest.startsWith("/");
+  // UNC：`//srv/share/...`（`//` 之后必须是主机名，不能是路径分隔的残留）
+  const unc = !drive && /^\/\/[^/]/.test(n);
+  const prefix = drive ? drive[1] : unc ? "//" : "";
+  const rest = drive ? n.slice(drive[1].length) : unc ? n.slice(2) : n;
+  const isAbs = !drive && (unc || rest.startsWith("/"));
   const out: string[] = [];
   for (const seg of rest.split("/")) {
     if (seg === "" || seg === ".") continue;
@@ -45,9 +47,34 @@ export function normalizePath(p: string): string {
     out.push(seg);
   }
   const joined = out.join("/");
-  const head = prefix + (isAbs || prefix ? "/" : "");
+  // 盘符 → `C:/…`；UNC → `//srv/…`（双斜杠已是前缀本体，不再补 `/`）；POSIX 绝对 → `/…`
+  const head = drive ? `${prefix}/` : unc ? prefix : isAbs ? "/" : "";
   const result = (head + joined) || "/";
   return sep === "\\" ? result.replace(/\//g, "\\") : result;
+}
+
+/** 路径是否按 Windows 语义比较（盘符 / UNC / 反斜杠分隔）——Windows 大小写不敏感，POSIX 敏感。 */
+function usesWindowsSemantics(p: string): boolean {
+  return /^[a-zA-Z]:/.test(p) || p.startsWith("\\\\") || p.includes("\\");
+}
+
+/**
+ * §C9 越界判据：`abs` 是否**在根内**（含根本身）。必须是**路径边界比较**而不是前缀比较：
+ * `C:\themes\dark-extra\x.png` 以前缀 `C:\themes\dark` 开头，但它**不在**该根内。
+ * 大小写口径按路径形态判定（Windows 语义不敏感 / POSIX 敏感），不依赖运行平台，
+ * 保证同一输入的判定在任何 CI 平台上一致。
+ */
+export function isWithinRoot(abs: string, root: string): boolean {
+  const fold = usesWindowsSemantics(root) || usesWindowsSemantics(abs);
+  // 规范化 + 统一为正斜杠再比较（否则 `C:/x` 与 `C:\x` 这类同义写法会误判为越界）
+  const canon = (p: string) => {
+    const s = normalizePath(p).replace(/\\/g, "/");
+    return fold ? s.toLowerCase() : s;
+  };
+  const a = canon(abs);
+  const r = canon(root);
+  if (a === r) return true;
+  return a.startsWith(r.endsWith("/") ? r : `${r}/`);
 }
 
 /**

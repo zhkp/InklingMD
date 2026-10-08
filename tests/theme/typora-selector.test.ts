@@ -25,9 +25,18 @@ describe("#306 S11 选择器三分类前缀收敛（§C1/§C2）", () => {
   describe("分类 A：可加前缀（含裸标签、#write 后代、文档级类名映射）", () => {
     const cases: [string, string | null][] = [
       ["#write h1", `${EDITOR_PREFIX} h1`],
-      ["#write > h1", `${EDITOR_PREFIX} > h1`],
+      // §4.3 直系子翻译：Typora 的 `#write` 就是内容块的父亲，本应用 `.milkdown` 与内容块之间
+      // 还隔着内容根 `.ProseMirror`（真实 DOM）→ `> X` 翻译为 `> * > X`（=「内容根的直系子」）
+      ["#write > h1", `${EDITOR_PREFIX} > * > h1`],
+      ["#write > h1:first-child", `${EDITOR_PREFIX} > * > h1:first-child`],
+      ["#write > *", `${EDITOR_PREFIX} > * > *`],
+      ["#write > ul > li", `${EDITOR_PREFIX} > * > ul > li`],
       // 紧凑写法（`#write>h3`）归一为「前缀 + 空格 + `>`」形态，与带空格写法输出一致
-      ["#write>h3:before", `${EDITOR_PREFIX} >h3:before`],
+      ["#write>h3:before", `${EDITOR_PREFIX} > * > h3:before`],
+      // `:has()` 内层是相对选择器：不加前缀，但 `>` 同样做真实内容根翻译
+      ["#write:has(> table)", `${EDITOR_PREFIX}:has(> * > table)`],
+      ["#write:has(table)", `${EDITOR_PREFIX}:has(table)`],
+      ["#write:has(> table) > p", `${EDITOR_PREFIX}:has(> * > table) > * > p`],
       ["#write p", `${EDITOR_PREFIX} p`],
       ["#write ol li", `${EDITOR_PREFIX} ol li`],
       ["#write table thead th", `${EDITOR_PREFIX} table thead th`],
@@ -137,12 +146,51 @@ describe("#306 S11 选择器三分类前缀收敛（§C1/§C2）", () => {
     });
   });
 
+  describe("§4.3 直系子语义（`>` 不允许静默失效或误命中内容根）", () => {
+    it("`#write > X` 不再打到内容根（`.milkdown` 的直系子）", () => {
+      const { out } = rewrite("#write > div");
+      expect(out).toBe(`${EDITOR_PREFIX} > * > div`);
+      // 反例形态（评审实测的误命中原型）：`.milkdown > div` 会命中内容根 `.ProseMirror`
+      expect(out).not.toBe(`${EDITOR_PREFIX} > div`);
+    });
+
+    it("翻译只发生在 `>`，`+` / `~` / 后代组合子保持原样", () => {
+      expect(rewrite("#write + p").out).toBe(`${EDITOR_PREFIX} + p`);
+      expect(rewrite("#write ~ p").out).toBe(`${EDITOR_PREFIX} ~ p`);
+      expect(rewrite("#write p").out).toBe(`${EDITOR_PREFIX} p`);
+    });
+
+    it("翻译必须留下诊断（矩阵登记来源，不允许静默）", () => {
+      const { diags } = rewrite("#write > h1");
+      const hit = diags.filter(
+        (d) => d.kind === "scoped-root" && d.reason.includes("§4.3 直系子翻译"),
+      );
+      expect(hit.length).toBeGreaterThanOrEqual(1);
+      expect(hit[0].target).toBe("#write > h1");
+    });
+
+    it("`> *` 形态：`#write > *` 映射为内容根的直系子（仍是「一层」语义）", () => {
+      expect(rewrite("#write > *").out).toBe(`${EDITOR_PREFIX} > * > *`);
+    });
+
+    it("`:has()` 内层不加前缀（相对选择器），但 `>` 做同一翻译并登记", () => {
+      expect(rewrite("#write:has(> table)").out).toBe(`${EDITOR_PREFIX}:has(> * > table)`);
+      expect(rewrite("#write:has(p)").out).toBe(`${EDITOR_PREFIX}:has(p)`);
+      const { diags } = rewrite("#write:has(> table)");
+      expect(diags.some((d) => d.reason.includes("§4.3 直系子翻译（`:has()` 内层相对选择器）"))).toBe(
+        true,
+      );
+    });
+  });
+
   describe("I1 不变量（G6）：输出前缀恒为 2 段，且特异性不超过基线形态", () => {
     const inputs = [
       "#write",
       "body",
       "html body h1",
       "#write > h3:before",
+      "#write > h1",
+      "#write:has(> table)",
       ".md-fences",
       "table",
       "#write table thead th",
@@ -154,8 +202,9 @@ describe("#306 S11 选择器三分类前缀收敛（§C1/§C2）", () => {
       expect(out).not.toBeNull();
       expect(out!).not.toContain(".editor ");
       expect(out!).not.toContain(".ProseMirror");
-      // 前缀后必须紧跟空白或组合子（`#write>h3` 这类紧凑写法会产出 `prefix>h3`）
-      expect(out === EDITOR_PREFIX || /^\.editor-scroll \.milkdown[\s>+~]/.test(out!)).toBe(true);
+      // 前缀后必须紧跟空白 / 组合子 / 伪类
+      // （`#write>h3` 这类紧凑写法产出 `prefix>h3`；`#write:has(...)` 产出 `prefix:has(...)`）
+      expect(out === EDITOR_PREFIX || /^\.editor-scroll \.milkdown[\s>+~:]/.test(out!)).toBe(true);
       // 前缀只有两个 class（.editor-scroll .milkdown）
       const prefixSegments = out!.slice(0, EDITOR_PREFIX.length).split(/\s+/);
       expect(prefixSegments).toEqual([".editor-scroll", ".milkdown"]);

@@ -119,23 +119,43 @@ interface LeadingStripResult {
   strippedRoots: number;
   /** 被丢弃的根级附加条件（如 `body.typora-export` 里的 `.typora-export` 之外的杂项） */
   droppedExtras: string[];
+  /** 需要**随根一起搬到前缀上**的 `:has()` 条件（`#write:has(> table)`，见 §4.3） */
+  carriedHas: string[];
+  /** 剥离后紧接着的是 `>` 直系子组合子（需要按 §4.3 做「真实内容根」翻译） */
+  directChildAfterRoot: boolean;
 }
 
 /**
- * 判断一个 compound 是否「纯根级别名」。
+ * 判断一个 compound 是否「纯根级别名」。`#write:has(> table)` 里的 `:has()` 不阻止判定，
+ * 而是作为「根的条件」被搬到前缀上（`carriedHas`）。
  * 注意：裸 `*` 只在**整条选择器仅此一个 compound** 时才算根级别名（分类 B）；
  * `#write *` 这类「后代通配」必须保留 `*`，否则语义从「所有后代」退化为「仅容器本身」。
  */
-function compoundIsRootAlias(nodes: selectorParser.Node[], soleCompound: boolean): boolean {
-  if (nodes.length === 0) return false;
-  return nodes.every((node) => {
-    if (node.type === "tag") return ROOT_ALIAS_TAGS.has(node.value.toLowerCase());
-    if (node.type === "id") return ROOT_ALIAS_IDS.has(node.value);
-    if (node.type === "universal") return soleCompound;
-    if (node.type === "pseudo") return node.toString() === ":root";
-    if (node.type === "class") return ROOT_ALIAS_CLASSES.has(node.value);
-    return false;
-  });
+function leadingCompoundIsRoot(
+  nodes: selectorParser.Node[],
+  soleCompound: boolean,
+): { isRoot: boolean; hasPseudos: selectorParser.Pseudo[] } {
+  const hasPseudos: selectorParser.Pseudo[] = [];
+  if (nodes.length === 0) return { isRoot: false, hasPseudos };
+  let isRoot = true;
+  for (const node of nodes) {
+    if (node.type === "tag") {
+      if (!ROOT_ALIAS_TAGS.has(node.value.toLowerCase())) isRoot = false;
+    } else if (node.type === "id") {
+      if (!ROOT_ALIAS_IDS.has(node.value)) isRoot = false;
+    } else if (node.type === "universal") {
+      if (!soleCompound) isRoot = false;
+    } else if (node.type === "pseudo") {
+      if (node.toString() === ":root") continue;
+      if (node.value === ":has") hasPseudos.push(node as selectorParser.Pseudo);
+      else isRoot = false;
+    } else if (node.type === "class") {
+      if (!ROOT_ALIAS_CLASSES.has(node.value)) isRoot = false;
+    } else {
+      isRoot = false;
+    }
+  }
+  return { isRoot, hasPseudos };
 }
 
 /** 把选择器按 compound 分组（不含 combinator）。 */
@@ -158,25 +178,41 @@ function splitCompounds(sel: selectorParser.Selector): {
 
 /** 剥离前导根级 compound（含 `#write`/`html`/`body`/`:root`/根别名类）。 */
 function stripLeadingRoots(sel: selectorParser.Selector): LeadingStripResult {
-  const { compounds } = splitCompounds(sel);
+  const { compounds, combinators } = splitCompounds(sel);
   const soleCompound = compounds.length === 1;
   let idx = 0;
   const droppedExtras: string[] = [];
-  while (idx < compounds.length && compoundIsRootAlias(compounds[idx], soleCompound)) {
+  const carriedHas: string[] = [];
+  while (idx < compounds.length) {
+    const info = leadingCompoundIsRoot(compounds[idx], soleCompound);
+    if (!info.isRoot) break;
+    for (const p of info.hasPseudos) carriedHas.push(p.toString());
     idx += 1;
   }
   if (idx === 0) {
     // 混合形态（如 `body.custom h1`）：首个 compound 含根别名但不纯 → 仍收敛，附加条件登记丢弃
     const first = compounds[0];
-    const aliasPart = first.filter((n) => compoundIsRootAlias([n], false));
-    if (aliasPart.length > 0) {
+    const aliasNodes = first.filter(
+      (n) => n.type !== "pseudo" && leadingCompoundIsRoot([n], false).isRoot,
+    );
+    if (aliasNodes.length > 0) {
       for (const n of first) {
-        if (!aliasPart.includes(n)) droppedExtras.push(n.toString());
+        if (n.type === "pseudo") {
+          const value = (n as selectorParser.Pseudo).value;
+          if (value === ":has") carriedHas.push(n.toString());
+          else if (!aliasNodes.includes(n) && n.toString() !== ":root") droppedExtras.push(n.toString());
+          continue;
+        }
+        if (!aliasNodes.includes(n)) droppedExtras.push(n.toString());
       }
       idx = 1;
     }
   }
-  if (idx === 0) return { strippedRoots: 0, droppedExtras: [] };
+  if (idx === 0) {
+    return { strippedRoots: 0, droppedExtras: [], carriedHas: [], directChildAfterRoot: false };
+  }
+  // 剥离后紧接的是 `>` 吗？（`#write > h1`；见 §4.3 的真实内容根翻译）
+  const directChildAfterRoot = idx < compounds.length && combinators[idx - 1]?.value === ">";
   // 只删 compound 自身：其后的 combinator（`>` / `+` / ` `）语义属于「前缀 → 文档元素」，必须保留
   for (let i = 0; i < idx; i++) {
     for (const node of compounds[i]) node.remove();
@@ -193,7 +229,7 @@ function stripLeadingRoots(sel: selectorParser.Selector): LeadingStripResult {
     lead.remove();
     lead = next;
   }
-  return { strippedRoots: idx, droppedExtras };
+  return { strippedRoots: idx, droppedExtras, carriedHas, directChildAfterRoot };
 }
 
 /** 按 DOC_CLASS_MAP / DOC_CLASS_ATTR_MAP / TAG_MAP 改写 compound 内的类名与标签。 */
@@ -218,9 +254,36 @@ function applyDocMapping(sel: selectorParser.Selector): void {
   });
 }
 
-/** 在 selector 最前面插入 `prefix`（含空格 combinator）。 */
-function prependPrefix(sel: selectorParser.Selector, prefix: string): void {
-  const parsed = selectorParser().astSync(prefix);
+/**
+ * §4.3 直系子翻译：Typora 的 `#write` **就是内容块的父亲**；本应用 `.milkdown` 与内容块之间
+ * 还有内容根（真实 DOM：`div.milkdown > div.ProseMirror.editor > h1`）。
+ * 故把「紧随剥离后根名的 `>`」翻译为 `> * >` =「内容根的直系子」：
+ * - 保持「一层」语义（不扩散到更深的同名元素）；
+ * - 不会误命中内容根本身（`.milkdown > div` 会打到 `.ProseMirror`）。
+ * 仅改组合子结构，**不增加 class/attr/id 计数**（G6-I1 的「前缀恒 2 段」仍然成立）。
+ */
+function insertContentRootLevel(sel: selectorParser.Selector): boolean {
+  const lead = sel.first;
+  if (!lead || lead.type !== "combinator" || lead.value !== ">") return false;
+  lead.spaces = { before: lead.spaces?.before ?? " ", after: " " };
+  const star = selectorParser.universal({ value: "*" });
+  star.spaces = { before: "", after: "" };
+  const gt = selectorParser.combinator({ value: ">" });
+  gt.spaces = { before: " ", after: " " };
+  const next = lead.next();
+  if (next) next.spaces = { ...next.spaces, before: "" };
+  sel.insertAfter(lead, star);
+  sel.insertAfter(star, gt);
+  return true;
+}
+
+/** 在 selector 最前面插入 `prefix`（含空格 combinator；`carriedPseudos` 追加到最后一个 compound）。 */
+function prependPrefix(
+  sel: selectorParser.Selector,
+  prefix: string,
+  carriedPseudos: readonly string[] = [],
+): void {
+  const parsed = selectorParser().astSync(prefix + carriedPseudos.join(""));
   const prefixNodes = parsed.first ? parsed.first.nodes.map((n) => n.clone()) : [];
   const anchor = sel.first ?? null;
   if (!anchor) {
@@ -284,9 +347,12 @@ function rewritePseudos(
   let ok = true;
   sel.walkPseudos((pseudo) => {
     if (!PSEUDO_FUNCS.has(pseudo.value) || !pseudo.nodes || depth > 6) return;
+    // `:has()` 的内层是**相对选择器**（相对主体元素匹配）→ 不加前缀，只做直系子翻译；
+    // `:is()/:not()/:where()` 的内层是绝对选择器 → 逐个加前缀（§C2）。
+    const relative = pseudo.value === ":has";
     for (const inner of [...pseudo.nodes]) {
       if (inner.type !== "selector") continue;
-      if (!rewriteSelectorNode(inner, report, depth + 1)) inner.remove();
+      if (!rewriteSelectorNode(inner, report, depth + 1, relative)) inner.remove();
     }
     const remaining = pseudo.nodes.filter((n) => n.type === "selector");
     if (remaining.length === 0) {
@@ -303,11 +369,13 @@ function rewritePseudos(
   return ok;
 }
 
-/** 改写单个复合选择器；返回 false 表示丢弃（会就地修改 AST）。 */
+/** 改写单个复合选择器；返回 false 表示丢弃（会就地修改 AST）。
+ * `relative = true`：`:has()` 的内层参数（相对选择器）——不加前缀、不剥根，只做直系子翻译。 */
 function rewriteSelectorNode(
   sel: selectorParser.Selector,
   report: (d: ThemeDiagnostic) => void,
   depth: number,
+  relative = false,
 ): boolean {
   const original = sel.toString().trim();
 
@@ -344,23 +412,48 @@ function rewriteSelectorNode(
     return false;
   }
 
-  const { strippedRoots, droppedExtras } = stripLeadingRoots(sel);
-  if (strippedRoots > 0 && droppedExtras.length > 0) {
+  if (relative) {
+    // `:has(> X)`：主体是被收敛的根（`.milkdown`）→ 内层的 `>` 同样需要真实内容根翻译
+    applyDocMapping(sel);
+    if (insertContentRootLevel(sel)) {
+      report(
+        makeDiag(
+          "scoped-root",
+          `:has(${original})`,
+          "§4.3 直系子翻译（`:has()` 内层相对选择器）：`> X` → `> * > X`（相对内容根而非 `.milkdown`），内层不加前缀（相对选择器语义）",
+        ),
+      );
+    }
+    return rewritePseudos(sel, report, depth);
+  }
+
+  const strip = stripLeadingRoots(sel);
+  if (strip.strippedRoots > 0 && strip.droppedExtras.length > 0) {
     report(
       makeDiag(
         "scoped-root",
         original,
-        `根级复合条件 ${droppedExtras.join("")} 在本应用无对应 → 丢弃该条件，仅保留编辑区收敛`,
+        `根级复合条件 ${strip.droppedExtras.join("")} 在本应用无对应 → 丢弃该条件，仅保留编辑区收敛`,
       ),
     );
-  } else if (strippedRoots > 0) {
+  } else if (strip.strippedRoots > 0) {
     report(
       makeDiag("scoped-root", original, "根级选择器收敛到编辑区容器 `.editor-scroll .milkdown`（2 段）"),
     );
   }
 
   applyDocMapping(sel);
-  prependPrefix(sel, EDITOR_PREFIX);
+  if (strip.directChildAfterRoot && insertContentRootLevel(sel)) {
+    report(
+      makeDiag(
+        "scoped-root",
+        original,
+        "§4.3 直系子翻译：`#write > X` → `前缀 > * > X`（本应用 `.milkdown` 与内容块之间隔着内容根 `.ProseMirror`）→ 命中内容根的直系子，且不再误命中内容根本身",
+      ),
+    );
+  }
+  // 搬过来的 `:has()` 内层由 rewritePseudos 的相对分支统一做直系子翻译（此处只搬运，不重复翻译）
+  prependPrefix(sel, EDITOR_PREFIX, strip.carriedHas);
   return rewritePseudos(sel, report, depth);
 }
 

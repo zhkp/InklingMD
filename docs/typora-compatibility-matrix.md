@@ -48,14 +48,14 @@
 | 26 | `body` / `html` / `:root` / 裸 `*` | `.editor-scroll .milkdown` | 映射 | 根级收敛：背景/字体作用于编辑区容器，**不外溢**到外壳 |
 | 27 | `.typora-export` / `.enable-diagrams` / `.html-for-mac` / `.mac-seamless-mode` / `.typora-node` | 剥离后前缀化 | 映射 | 文档根别名：剥掉条件，保留文档元素规则（`.enable-diagrams` 语义上恒真：本应用总启用图表） |
 | 28 | 窗口级 UI：`#typora-sidebar` / `#top-titlebar` / `#megamenu-*` / `.outline-*` / `.file-node-*` / `.btn*` / `.dropdown*` / `.modal*` / `.code-tooltip` / `.ty-table-edit` / `#md-searchpanel` … | — | 不支持 | **Epic 非目标**；实测 6 款基线主题合计 **约 520 条**此类规则被丢弃（见 §4） |
-| 29 | `:is()` / `:not()` / `:where()` / `:has()` 内层参数 | 递归加前缀 | 映射 | 每个内层参数单独前缀化；`:where()` 特异性仍为 0（与 Typora 行为一致） |
+| 29 | `:is()` / `:not()` / `:where()` 内层参数 | 递归加前缀 | 映射 | 每个内层参数单独前缀化；`:where()` 特异性仍为 0（与 Typora 行为一致）。**`:has()` 例外见 49** |
 | 30 | `@media` / `@supports` / `@container` | 递归改写内部规则 | 映射 | 含 `@media print`（PDF 跟随主题，#226 验收溢出容器） |
 | 31 | `@include-when-export`（**Typora 专有**） | `@media print` | 映射 | 该块语义即「仅导出时生效」；本层翻译为 `@media print` 并递归改写 |
 | 32 | 原生嵌套 / `&` | — | 降级 | 本层不展开 → 整条丢弃并登记（6 款基线主题实测**未使用**） |
 | 33 | `@charset` / BOM | 剥除 | 映射 | 流水线第 0 步（N11-1/N12）；内容 hash 基于规范化文本 |
 | 34 | 本地 `@import "x.css"` | 读取并**内联** | 映射 | 不得重写为 asset URL（`style-src` 不含 asset，P1-6）；递归深度上限 8 + 循环保护 |
 | 35 | 远程 `@import` / 远程字体 / 远程背景图 | — | 降级 | CSP **不含** `https:`（有意取舍：不放开远程字体）；被拦**不报错、不白屏**；远程背景图提示见 #307 §9（P1-7） |
-| 36 | 相对 `url()`（字体/背景图） | `convertFileSrc()` 绝对 URL | 映射 | 按**主题目录**解析（G7-b）；`local()` 保留；多候选 `src` + `format()` 保留；`image-set()` 多分辨率覆盖 |
+| 36 | 相对 `url()`（字体/背景图） | `convertFileSrc()` 绝对 URL | 映射 | 按**主题目录**解析（G7-b）；**越界判据 = 路径边界比较**（非字符串前缀：`../dark-extra/x.png` 必须降级；大小写口径由路径形态决定），见 D29；`local()` 保留；多候选 `src` + `format()` 保留；`image-set()` 多分辨率覆盖 |
 | 37 | `data:` / `http(s):` / `blob:` / 绝对路径 `url()` | 原样 | 原生 | §C9 边界：不重写（`data:` 内联字体由 `font-src data:` 放行） |
 | 38 | `:root { --私有变量 }` | 原样保留 + 收敛到 `.editor-scroll .milkdown` | 映射 | **不改名、不删除**（P0-5）；引用侧无需改写 |
 | 39 | 对基础变量 / `--shell-*` 的赋值 | **拒绝**（删声明） | 映射 | G8 拒绝集 = 白名单 `base` + `shell`；主题内 `var()` 自动落到应用基线值 |
@@ -67,6 +67,8 @@
 | 45 | `@counter-style <name>` | `<前缀>-<name>` | 映射 | 同类全局名称风险 |
 | 46 | 主题自带 `@layer` | 丢弃 | 不支持 | 会注入应用的层命名空间、破坏 `base/theme/user` 层序 |
 | 47 | `@page` / `@namespace` / 其它未登记 at-rule | 丢弃 | 不支持 | 保守丢弃并登记（不做猜测映射） |
+| 48 | **`#write > X`（根名后紧跟 `>`）** | 前缀 `> * >` | 映射（**组合子翻译**） | 本应用 `.milkdown` 与内容块之间隔着内容根 `.ProseMirror` → 原样保留 `>` 会永不命中（`> h1`）或误命中内容根（`> div`）；翻译为「内容根的直系子」保持一层语义。**前缀仍 2 段**（`*` 不计 class/attr/id）。实测 28 处，见 D24 |
+| 49 | `#write:has(> X)` / `:is()` / `:not()` / `:where()` 内层 | `:has()` 内层**不加前缀**（相对选择器）、`>` 同样翻译；其余内层递归加前缀 | 映射 | `:has()` 的参数是相对选择器，加前缀会变成「后代链」而失去原义；`:where()` 特异性仍为 0（与 Typora 一致） |
 
 ## 3. 主题元数据（G11 首落地口径）
 
@@ -86,25 +88,27 @@
 
 | 主题 | themeId | 规则（入→出） | 改写中位耗时 | 根级收敛 | 选择器丢弃 | 变量拒绝 | 名称前缀（**声明侧**） | 引用重写 | URL 重写 | `@import` 内联 / 丢弃 | `!important` 剥离 |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| github.css | `user:github` | 81 → 63 | 5.03 ms | 10 | 44 | 0 | 4 | 1 | 4 | 0 / 0 | 1 |
-| newsprint.css | `user:newsprint` | 115 → 74 | 4.52 ms | 8 | 95 | 0 | 4 | 2 | 4 | 0 / 0 | 0 |
-| night.css | `user:night` | 182 → 92 | 7.92 ms | 20 | 228 | 0 | 0 | 0 | 0 | 3 / 1 | 0 |
-| pixyll.css | `user:pixyll` | 91 → 72 | 4.69 ms | 8 | 47 | 0 | 8 | 4 | 8 | 0 / 0 | 0 |
-| vue-dark.css | `user:vue-dark` | 155 → 79 | 4.59 ms | 26 | 172 | 0 | 0 | 0 | 0 | 1 / 12 | 0 |
-| vue.css | `user:vue` | 85 → 67 | 3.49 ms | 27 | 45 | 0 | 0 | 0 | 0 | 1 / 15 | 0 |
+| github.css | `user:github` | 81 → 63 | 6.60 ms | 12 | 44 | 0 | 4 | 1 | 4 | 0 / 0 | 1 |
+| newsprint.css | `user:newsprint` | 115 → 74 | 4.57 ms | 8 | 95 | 0 | 4 | 2 | 4 | 0 / 0 | 0 |
+| night.css | `user:night` | 182 → 92 | 8.09 ms | 24 | 228 | 0 | 0 | 0 | 0 | 3 / 1 | 0 |
+| pixyll.css | `user:pixyll` | 91 → 72 | 5.07 ms | 8 | 47 | 0 | 8 | 4 | 8 | 0 / 0 | 0 |
+| vue-dark.css | `user:vue-dark` | 155 → 79 | 6.57 ms | 37 | 172 | 0 | 0 | 0 | 0 | 1 / 12 | 0 |
+| vue.css | `user:vue` | 85 → 67 | 3.99 ms | 38 | 45 | 0 | 0 | 0 | 0 | 1 / 15 | 0 |
 
 **§D1 体积与耗时（实测，非估算）**：
 
 | 项 | 数值 |
 |---|---|
 | 兼容层模块打包（postcss + selector/value parser + 本层全量，min） | **146 KB**（**42.3 KB gzip**） |
-| 单主题改写（7–17 KB 真实主题，含 `@import` 预读 I/O） | 中位 **3.5–7.9 ms** |
+| 单主题改写（7–17 KB 真实主题，含 `@import` 预读 I/O） | 中位 **4.0–8.1 ms** |
 | 大主题外推（256 KB 合成主题，仅解析） | 约 38 ms |
 
 > 结论：一次性改写成本可忽略（主题切换/启动时一次），体积 42.3 KB gzip 相对现有 `vendor_mermaid`（935 KB gzip）可接受；#225 需要时可按主题块做动态导入。
 
 
-**诊断分类合计**：`dropped-selector` 631 · `scoped-root` 99 · `private-token-scoped` 46 · `stripped-important` 29 · **`prefixed-name` 16**（声明侧重命名：`Open Sans`×4 / `PT Serif`×4 / `Merriweather`×4 / `Lato`×4）· `rewritten-ref` 7（引用侧：`font-family` 用法）· `rewritten-url` 16 · `dropped-import` 5 · `dropped-at-rule` 4。
+**诊断分类合计**：`dropped-selector` 631 · `scoped-root` 127（其中 **28 条为 §4.3 直系子翻译**）· `private-token-scoped` 46 · `stripped-important` 29 · **`prefixed-name` 16**（声明侧重命名：`Open Sans`×4 / `PT Serif`×4 / `Merriweather`×4 / `Lato`×4）· `rewritten-ref` 7（引用侧：`font-family` 用法）· `rewritten-url` 16 · `dropped-import` 5 · `dropped-at-rule` 4。
+
+> §4.3 的真实语料证据：6 款基线主题里「根别名 + `>`」形态的选择器共 **52 处**（`#write > ul:first-child` / `#write>h3:before` / `body > *:first-child` 等），其中落入映射的 28 处已按 `> * >` 翻译（其余 24 处含 CM/UI 标识被丢弃或属 `body > tr > th` 这类本应用无对应结构者）。**修复前这些规则全部静默失效或误命中内容根**。
 
 > 3 款带自定义字体的基线主题（github / newsprint / pixyll）**实测覆盖了 D9 的字体侧**：`@font-face` family 全部改名为 `t<themeHash8>-<原名>`，引用侧同步；通用族 / 系统族 / `local()` 一律不改名（单测负例③）。`@keyframes` / `@counter-style` 在 6 款基线主题中**未出现**，由自研合成主题 + 单测/E2E 覆盖（`sample-theme.css`：`fade-in` / `sample-dots`）。
 
@@ -161,12 +165,18 @@
 | D21 | 窗口级 UI 选择器（`#typora-sidebar`/`.outline-*`/`.btn*`/`.modal*` …）全部丢弃 | Epic 非目标（不实现窗口级 UI 皮肤） | 登记；实测 ≈520 条规则被丢弃 |
 | D22 | 主题内 `@import` 目标缺失（真实主题常见） | 主题包可选资源未随包提供（如 `night/mermaid.dark.css`） | 丢弃该 `@import` + 登记，不报错/不白屏（vue-dark 实测 12 处、vue 15 处、night 1 处） |
 | D23 | 主题自带 `@layer` / `@page` / `@namespace` / `@scope` 声明被丢弃 | `@layer` 会注入应用层命名空间、破坏 `base/theme/user` 层序（G5）；`@page`/`@namespace` 无对应宿主；`@scope` 归入「未登记 at-rule」 | 一律丢弃 + 登记（`@layer`/`@page`/`@namespace` 有具名原因，其余走「未登记 at-rule 保守丢弃」分支；实测共 4 处） |
+| **D24** | **`#write > X` 直系子组合子的语义翻译（`> X` → `> * > X`）** | Typora 的 `#write` **就是内容块的父亲**；本应用 `.milkdown` 与内容块之间还有内容根 `.ProseMirror`（真实 DOM：`div.milkdown > div.ProseMirror.editor > h1`）。原样保留 `>` → 前者**永不命中**，后者（`> div`）**误命中内容根本身** | **已实现**：仅「紧随剥离后根名的 `>`」翻译为 `> * >`（=「内容根的直系子」），保持「一层」语义、不扩散到更深同名元素、不误命中内容根；`:has(> X)` 走同一翻译（内层是相对选择器，**不加前缀**）；`+` / `~` / 后代组合子不受影响。**前缀仍是 2 段**（`*` 不计 class/attr/id，I1 不变）。实测 28 处；E2E 用真实 DOM 断言「命中的恰好是内容根直系子」+「内容根未被误命中」 |
+| **D25** | **条件 `@import` 的语义** | `@import "print.css" print` 若直接内联 → print-only 规则**无条件泄漏**进编辑区视图（与本层的打印语义自相矛盾） | **已实现**：内联时 `@media` 条件**包回**（`@media print { … }`），`supports()` 包回 `@supports`；`layer()` 无法保留（整包统一进 `@layer theme`）→ 忽略层名 + 登记说明。单测覆盖 `print` / `screen and (min-width: …)` / `supports(...)` / `layer(...)` 四形态 |
+| **D26** | **大小写 slug 冲突的处置** | 同一目录出现 `Vue.css` 与 `vue.css` 时 `themeId` 都是 `user:vue` → 下游（主题列表 / 选中态 / 快照 key）出现重复 ID | **已实现**：扫描处按归一化 `themeId` **去重（取先出现者）**，其余在目录级 `issues` 登记（原描述符自身的冲突说明保留）。单测覆盖冲突/非冲突两向 |
+| **D27** | **私有变量值里的主题字体族 / 动画名（N1）** | 设计集 N9 的重写范围只列 `font-family` / `font` / `animation` 属性，而 P0-5 要求私有变量原样保留 → `--my-font: "DemoFont", sans-serif` 里的族名不改 → `font-family: var(--my-font)` **静默回退** | **已实现**：私有变量**名**原样保留（P0-5），其**值**中 ∈「主题自身名称集合」的 font-family / keyframes 名同步改名（通用族/系统族不动）。单测覆盖 |
+| **D28** | **UNC 路径（N2）** | 归一化 `\\srv\share\a\b` 时丢掉一个前导斜杠 → 该形态就不再是合法 UNC，`toAssetUrl` 入参与越界判据同时失真 | **已实现**：UNC 双前导斜杠保留（含 `..` 折叠与 `isWithinRoot` 判定）；单测覆盖归一化 / 折叠 / 根内判定 |
+| **D29** | **§C9 越界判据的实现口径（评审阻塞 2）** | 原实现用**字符串前缀比较**（`abs.startsWith(root)`）→ `C:\themes\dark-extra\evil.png` 被误判为「在根内」而重写（且 `toLowerCase()` 让比较在 Linux 上变成大小写不敏感，同属偏差） | **已实现**：改为**路径边界比较**（`abs === root` 或 `abs.startsWith(root + 分隔符)`，先规范化并统一分隔符）；大小写口径**由路径形态决定**（Windows 语义不敏感 / POSIX 敏感），与运行平台无关。负例：同前缀兄弟目录必须降级 |
 
 ## 6. 自动化边界（哪些能自动、哪些必须真机）
 
 | 层 | 覆盖 |
 |---|---|
-| 单测（`tests/theme/*`） | 选择器三分类 / I1 前缀深度不变量 / `:is()`·`@media`·嵌套 / 变量白名单四种输入 / `!important` 剥离 / `@import` 内联（含循环、深度、缺失）/ URL 重写五类输入 × 全部覆盖位置 / I3 全局名称三类 + 三条负例 / BOM·`@charset` 规范化 / `@property` 丢弃 / 元数据（G11 五条）/ 解析失败整包拒绝 |
+| 单测（`tests/theme/*`） | 选择器三分类 / I1 前缀深度不变量 / `:is()`·`@media`·嵌套 / 变量白名单四种输入 / `!important` 剥离 / `@import` 内联（含循环、深度、缺失、**条件包回**）/ URL 重写五类输入 × 全部覆盖位置 × **越界边界**（含同前缀兄弟目录负例）/ I3 全局名称三类 + 三条负例 + **私有变量值内的名称** / BOM·`@charset` 规范化 / `@property` 丢弃 / **UNC 路径** / 元数据（G11 五条 + **归一化名冲突去重**）/ 解析失败整包拒绝 / **§4.3 直系子翻译**（含 `:has()` 与 `+`·`~` 不受影响） |
 | 产物级（`scripts/theme-compat-report.ts`） | 6 款真实主题逐条不变量（上文 §4） |
 | E2E（`tests/e2e/typora-shim.spec.ts`） | 真实注入：主题生效（标题/表格/行内代码/引用计算样式变化）+ **外壳三层不变**（token 级 / 全局名称级 / 选择器命中级）+ 远程资源被拦**不报错、不白屏** + 主题在 dark 与 `@layer` 下仍覆盖基线 |
 | 发版前真机（**本机/CI 测不到**） | ① `@layer` / `@scope` 三平台矩阵（下表）；② release 包实际响应头（`style-src` 不含 nonce）与本地字体/背景图端到端加载；③ `convertFileSrc` 真机返回值形态；④ 多窗口/重启后主题一致性 |

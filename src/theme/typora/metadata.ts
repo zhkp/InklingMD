@@ -218,7 +218,7 @@ export function scanThemesInDirectory(
   for (const f of skipped) {
     issues.push(`跳过非 .css 样式文件 ${f}（G11-5：只识别 .css 主题）`);
   }
-  const descriptors = cssFiles.map((fileName) =>
+  const parsedDescriptors = cssFiles.map((fileName) =>
     parseThemeCandidate({
       fileName,
       siblings: fileNames,
@@ -227,5 +227,20 @@ export function scanThemesInDirectory(
       content: contentByName?.get(fileName),
     }),
   );
+  // 归一化名冲突（大小写等）：**取先出现者，其余登记**——下游（主题列表 / 选中态 / 快照 key）
+  // 不允许出现重复 themeId（G11「取先出现者」口径的落实，评审阻塞 4）。
+  const descriptors: ThemeDescriptor[] = [];
+  const byThemeId = new Map<string, ThemeDescriptor>();
+  for (const d of parsedDescriptors) {
+    const prior = byThemeId.get(d.themeId);
+    if (prior) {
+      issues.push(
+        `主题 ID 冲突：${d.fileName} 与 ${prior.fileName} 归一化后同为 ${d.themeId} → 取先出现者 ${prior.fileName}，${d.fileName} 不登记（G11）`,
+      );
+      continue;
+    }
+    byThemeId.set(d.themeId, d);
+    descriptors.push(d);
+  }
   return { themes: pairVariants(descriptors), issues };
 }

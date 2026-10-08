@@ -11,7 +11,7 @@
 import valueParser from "postcss-value-parser";
 import { parse, type Root } from "postcss";
 import type { ThemeDiagnostic, ThemePathApi, ThemeRewriteContext } from "./types";
-import { defaultPathApi, isAbsolutePath, normalizePath, resolvePath } from "./path";
+import { defaultPathApi, isAbsolutePath, isWithinRoot, normalizePath, resolvePath } from "./path";
 
 /** 已经是「绝对 URL」或协议内联资源：一律不重写。 */
 export function isNonRewritableUrl(raw: string): boolean {
@@ -46,8 +46,8 @@ export function rewriteUrlTarget(url: string, opts: AssetRewriteOptions): string
   }
   const abs = path.resolve(opts.themeDir, url);
   const root = normalizePath(opts.root ?? opts.themeDir);
-  const inside = normalizePath(abs).toLowerCase().startsWith(root.toLowerCase());
-  if (!inside) {
+  // 越界判据 = **路径边界**比较（不是字符串前缀）：`…/dark-extra/x.png` 不属于根 `…/dark`
+  if (!isWithinRoot(normalizePath(abs), root)) {
     opts.report({
       kind: "dropped-url",
       target: url,
@@ -97,6 +97,81 @@ export interface InlineImportsOptions {
   report: (d: ThemeDiagnostic) => void;
 }
 
+/** 从 `@import` 参数里取「URL 之后」的剩余条件（媒体查询 / `layer()` / `supports()`）。 */
+function splitImportConditions(rest: string): {
+  layer?: string;
+  supports?: string;
+  media?: string;
+} {
+  let tail = rest.trim();
+  const out: { layer?: string; supports?: string; media?: string } = {};
+  const layerMatch = /^layer\s*(?:\(([^)]*)\))?/i.exec(tail);
+  if (layerMatch) {
+    out.layer = (layerMatch[1] ?? "").trim();
+    tail = tail.slice(layerMatch[0].length).trim();
+  }
+  if (/^supports\s*\(/i.test(tail)) {
+    const open = tail.indexOf("(");
+    let depth = 0;
+    let end = -1;
+    for (let i = open; i < tail.length; i++) {
+      if (tail[i] === "(") depth += 1;
+      else if (tail[i] === ")") {
+        depth -= 1;
+        if (depth === 0) {
+          end = i;
+          break;
+        }
+      }
+    }
+    if (end > 0) {
+      out.supports = tail.slice(open + 1, end).trim();
+      tail = tail.slice(end + 1).trim();
+    }
+  }
+  if (tail) out.media = tail;
+  return out;
+}
+
+/**
+ * 条件 `@import` 的语义保全（评审阻塞 3）：内联时把条件**包回去**，不允许静默丢弃。
+ * `layer()` 无法保留（整包主题统一进 `@layer theme`）→ 登记说明；`@media` / `@supports` 原样包回。
+ */
+function wrapInlinedNodes(
+  nodes: import("postcss").ChildNode[],
+  conditions: { layer?: string; supports?: string; media?: string },
+  target: string,
+  opts: InlineImportsOptions,
+): import("postcss").ChildNode[] {
+  let inner = nodes;
+  const notes: string[] = [];
+  if (conditions.media) {
+    const media = parse(`@media ${conditions.media} {}`).first as import("postcss").AtRule;
+    media.append(inner);
+    inner = [media];
+    notes.push(`条件 \`${conditions.media}\` 包回 \`@media\``);
+  }
+  if (conditions.supports) {
+    const at = parse(`@supports (${conditions.supports}) {}`).first as import("postcss").AtRule;
+    at.append(inner);
+    inner = [at];
+    notes.push(`条件 \`supports(${conditions.supports})\` 包回 \`@supports\``);
+  }
+  if (conditions.layer !== undefined) {
+    notes.push(
+      `\`layer(${conditions.layer})\` 无法保留（整包主题统一进 \`@layer theme\`）→ 忽略该层名并登记`,
+    );
+  }
+  if (notes.length > 0) {
+    opts.report({
+      kind: "inlined-import",
+      target,
+      reason: `本地 @import 已内联；条件保全：${notes.join("；")}`,
+    });
+  }
+  return inner;
+}
+
 /**
  * 把本地 `@import` 读取并内联（递归）。远程 `@import` 一律丢弃并登记（A1：CSP 不放远程）。
  * 读取失败 / 深度超限 / 循环引用 → 丢弃该 `@import`（不报错、不白屏）。
@@ -114,6 +189,8 @@ export function inlineImports(
       params,
     );
     const target = (match?.[1] ?? match?.[2] ?? match?.[3] ?? match?.[4] ?? match?.[5] ?? "").trim();
+    // URL 之后的剩余条件（媒体查询 / `layer()` / `supports()`）——内联时必须包回，不得静默丢弃
+    const conditions = splitImportConditions(match ? params.slice(match[0].length) : "");
     if (!target) {
       opts.report({
         kind: "dropped-import",
@@ -168,7 +245,7 @@ export function inlineImports(
       });
       seen.add(abs.toLowerCase());
       inlineImports(parsed, opts, depth + 1, seen);
-      atRule.replaceWith(parsed.nodes);
+      atRule.replaceWith(wrapInlinedNodes(parsed.nodes, conditions, target, opts));
       opts.report({
         kind: "inlined-import",
         target,

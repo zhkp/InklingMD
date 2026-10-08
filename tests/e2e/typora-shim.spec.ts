@@ -10,6 +10,7 @@ import { expect, test, type Page } from "@playwright/test";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { rewriteWithReport } from "../../src/theme/typora/rewrite";
+import { EDITOR_PREFIX } from "../../src/theme/typora/selector";
 import { openMockWorkspace, MOD } from "./helpers";
 
 const THEME_FILE = resolve(process.cwd(), "tests/fixtures/typora-themes/sample-theme.css");
@@ -187,6 +188,70 @@ test.describe("#306 Typora 兼容层（真实注入）", () => {
     await expect(page.locator(".ProseMirror")).toBeVisible();
     await expect(page.locator(".editor-topbar")).toBeVisible();
     expect(errors, `注入主题后出现未捕获异常：${errors.join(" | ")}`).toEqual([]);
+  });
+
+  test("§4.3 直系子命中率：`#write > X` 命中内容根的直系子，且不误命中内容根本身", async ({
+    page,
+  }) => {
+    await draftWithContent(page);
+
+    // 前提事实（本翻译的存在理由）：`.milkdown` 与内容块之间隔着内容根 `.ProseMirror`，
+    // 且内容根自身是 `.milkdown` 的直系 `div` —— 故「旧的」`prefix > div` 会打到内容根。
+    const premise = await page.evaluate(() => {
+      const root = document.querySelector(".editor-scroll .milkdown .ProseMirror");
+      const legacyHit = document.querySelector(".editor-scroll .milkdown > div");
+      return { rootIsDivChild: legacyHit === root, rootTag: root?.tagName ?? "" };
+    });
+    expect(premise.rootIsDivChild).toBe(true);
+    expect(premise.rootTag).toBe("DIV");
+
+    const before = await page.evaluate(() => {
+      const root = document.querySelector(".editor-scroll .milkdown .ProseMirror")!;
+      return { rootBg: getComputedStyle(root).backgroundColor };
+    });
+
+    // 用「Typora 形态」写成，经兼容层改写后注入（不是手写期望值）
+    const css = rewriteWithReport(
+      `#write > p { background-color: rgb(1, 2, 3); }\n#write > div { background-color: rgb(9, 8, 7); }`,
+      {
+        themeId: "user:direct-child-probe",
+        themeDir: THEME_DIR,
+        toAssetUrl: (abs) => `http://asset.localhost/${encodeURIComponent(abs)}`,
+        assetRoot: THEME_DIR,
+      },
+    ).css;
+    expect(css).toContain(`${EDITOR_PREFIX} > * > p`);
+    await injectTheme(page, css);
+    await page.waitForTimeout(150);
+
+    const after = await page.evaluate(() => {
+      const root = document.querySelector(".editor-scroll .milkdown .ProseMirror")!;
+      const mapped = [
+        ...document.querySelectorAll(".editor-scroll .milkdown > * > h1"),
+      ] as HTMLElement[];
+      const topLevel = [...root.querySelectorAll(":scope > h1")] as HTMLElement[];
+      const topP = root.querySelector(":scope > p") as HTMLElement | null;
+      const matchedDivs = [
+        ...document.querySelectorAll(".editor-scroll .milkdown > * > div"),
+      ] as HTMLElement[];
+      return {
+        rootBg: getComputedStyle(root).backgroundColor,
+        topPBg: topP ? getComputedStyle(topP).backgroundColor : "",
+        mappedH1Count: mapped.length,
+        topLevelH1Count: topLevel.length,
+        mappedAreTopLevel: mapped.every((el) => el.parentElement === root),
+        rootInMatchedDivs: matchedDivs.includes(root as HTMLElement),
+      };
+    });
+
+    // ① 正向：`#write > p` 命中内容根的直系子（修复前该形态永远不命中）
+    expect(after.topPBg).toBe("rgb(1, 2, 3)");
+    // ② 反向：`#write > div` **不再**误命中内容根
+    expect(after.rootBg).toBe(before.rootBg);
+    expect(after.rootInMatchedDivs).toBe(false);
+    // ③ 「一层」语义：`> * > h1` 命中的恰好是内容根的直系 h1（不扩散到更深的同名元素）
+    expect(after.mappedH1Count).toBe(after.topLevelH1Count);
+    expect(after.mappedAreTopLevel).toBe(true);
   });
 
   test("越权赋值被拒：--shell-*/基础变量不被主题改写，--content-* 允许覆盖", async ({ page }) => {
