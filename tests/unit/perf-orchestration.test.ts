@@ -414,6 +414,14 @@ function twoJobsWithCandidate(tag: string): string {
   return simulateDownload(job2, join(sandbox, `${tag}-3`));
 }
 
+/**
+ * 端到端编排用例每条都会 spawn 2–3 个 benchmark 子进程：本机实测 2.1–4.9s，
+ * 而 vitest 对 `tests/unit/**` 用**默认 5s** 线——Windows CI runner 上曾整批越过
+ * （PR #314 第四轮 CI：两条用例报 `Test timed out in 5000ms`，同文件相邻用例实测 4854ms，贴着线）。
+ * 这里只放宽「执行时间」，断言与语义一字未改。
+ */
+const E2E_ORCH_TIMEOUT_MS = 60_000;
+
 describe(`端到端编排：测量 → 复测 → 确认轮${canNest ? "" : `（跳过：${nestReason}）`}`, () => {
   it.skipIf(!canNest)("复测 job 有确认候选时必须移交：不产 report.md、不在本 job 跑确认轮", () => {
     const job1 = scaffold(join(sandbox, "e2e-a1"));
@@ -452,7 +460,7 @@ describe(`端到端编排：测量 → 复测 → 确认轮${canNest ? "" : `（
     // 上游产物必须原样保留（清错目录会让 final 静默退化成两轮）
     expect(existsSync(join(job2, ".perf-output", "raw", `${ID}.json`))).toBe(true);
     expect(existsSync(join(job2, ".perf-output", "raw-retest", `${ID}.json`))).toBe(true);
-  });
+  }, E2E_ORCH_TIMEOUT_MS);
 
   it.skipIf(!canNest)("复测无确认候选时就地出 final（retest2 不应出现，常规路径零额外开销）", () => {
     const job1 = scaffold(join(sandbox, "e2e-b1"));
@@ -479,7 +487,7 @@ describe(`端到端编排：测量 → 复测 → 确认轮${canNest ? "" : `（
     expect(has(job2, "report.md")).toBe(true);
     expect(existsSync(join(job2, ".perf-output", "raw-retest2", `${ID}.json`))).toBe(false);
     expect(readOut(job2, "report.md")).toContain("WARN（复测回落（抖动））");
-  });
+  }, E2E_ORCH_TIMEOUT_MS);
 
   it.skipIf(!canNest)("PERF_FORCE_SUSPECTS2 能确定性制造候选并触发移交（CI 演练路径）", () => {
     const job1 = scaffold(join(sandbox, "e2e-c1"));
@@ -507,7 +515,7 @@ describe(`端到端编排：测量 → 复测 → 确认轮${canNest ? "" : `（
     // 钩子必须把生效清单写回文件，否则工作流的 suspects2 输出为空、第三个 job 不触发
     expect(JSON.parse(readOut(job2, "retest2.json"))).toEqual([ID]);
     expect(has(job2, "report.md")).toBe(false);
-  });
+  }, E2E_ORCH_TIMEOUT_MS);
 
   it.skipIf(!canNest)("确认轮回落 → 不判 FAIL（3 例假 FAIL 形态），exit 0，三轮都披露", () => {
     const job3 = twoJobsWithCandidate("e2e-d");
@@ -524,7 +532,7 @@ describe(`端到端编排：测量 → 复测 → 确认轮${canNest ? "" : `（
     expect(report).toContain("WARN（末轮回落（抖动））");
     expect(report).not.toContain("| FAIL");
     expect(report).toContain("首轮 ✓　复测 ✓　确认 ✓");
-  });
+  }, E2E_ORCH_TIMEOUT_MS);
 
   it.skipIf(!canNest)("三轮都超 → 确认 FAIL + exit 1（真回归护栏不被降级）", () => {
     const job3 = twoJobsWithCandidate("e2e-e");
@@ -538,7 +546,7 @@ describe(`端到端编排：测量 → 复测 → 确认轮${canNest ? "" : `（
     expect(result.status).toBe(1);
     expect(readOut(job3, "report.md")).toContain("FAIL（复测仍超阈值 + 末轮仍超）");
     expect(result.stderr).toContain("相对回归确认（3 轮均超阈值）");
-  });
+  }, E2E_ORCH_TIMEOUT_MS);
 
   it.skipIf(!canNest)("目录清空矩阵：确认轮 job 只清 raw-retest2，上游两轮与候选清单原样保留", () => {
     // 「清错目录会让 final 静默退化成两轮」——用哨兵把四类上游产物逐一钉住。
@@ -562,7 +570,7 @@ describe(`端到端编排：测量 → 复测 → 确认轮${canNest ? "" : `（
     expect(existsSync(join(job3, ".perf-output", "raw-retest2", "STALE.json")), "本轮该清的没清").toBe(false);
     // 候选清单也不能被清（它是「谁该被确认」的唯一依据）
     expect(JSON.parse(readOut(job3, "retest2.json"))).toEqual([ID]);
-  });
+  }, E2E_ORCH_TIMEOUT_MS);
 
   it.skipIf(!canNest)("测量轮清掉上一轮的 retest2.json（#294 评审 P2-a）", () => {
     // 本 PR 新增了「无 suspects → 跳过 confirm」分支，retest2.json 不再每轮覆写。
@@ -582,7 +590,7 @@ describe(`端到端编排：测量 → 复测 → 确认轮${canNest ? "" : `（
 
     expect(result.status).toBe(0);
     expect(has(root, "retest2.json"), "陈旧的确认轮候选没被清 → 本轮会误跑确认轮").toBe(false);
-  });
+  }, E2E_ORCH_TIMEOUT_MS);
 
   it.skipIf(!canNest)("确认轮 job 保留上游 retest2.json（它是上游给的输入，不是本 job 的产物）", () => {
     // 与「测量轮清掉上一轮的 retest2.json」互为反证：确认轮 job 清掉它，final 就读不到候选清单。
@@ -596,5 +604,5 @@ describe(`端到端编排：测量 → 复测 → 确认轮${canNest ? "" : `（
       PW_STUB_VALUES3: "427.5:41",
     });
     expect(JSON.parse(readOut(job3, "retest2.json"))).toEqual([ID]);
-  });
+  }, E2E_ORCH_TIMEOUT_MS);
 });
