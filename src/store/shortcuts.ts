@@ -10,6 +10,7 @@
 
 import { create } from "zustand";
 import { loadJSON, writeJSON } from "../lib/storage";
+import { registerStorageSync } from "./storageSyncRegistry";
 
 /** 可自定义快捷键 ID */
 export type ShortcutId =
@@ -108,19 +109,20 @@ export interface ShortcutsState {
 const initial = loadPersisted();
 
 export const useShortcuts = create<ShortcutsState>((set, get) => {
-  // 监听多窗口/跨标签页的快捷键覆盖同步（storage 事件只在其他窗口触发）
-  if (typeof window !== "undefined") {
-    window.addEventListener("storage", (e) => {
-      if (e.key === STORAGE_KEY && e.newValue) {
-        try {
-          const parsed = JSON.parse(e.newValue) as Partial<Persisted>;
-          set({ overrides: sanitizeOverrides(parsed?.overrides) });
-        } catch {
-          // 忽略非法 JSON
-        }
+  // 多窗口/跨标签页同步（#225 C4：统一登记到 storageSyncRegistry 单一注册点）
+  registerStorageSync(
+    STORAGE_KEY,
+    (e) => {
+      if (!e.newValue) return;
+      try {
+        const parsed = JSON.parse(e.newValue) as Partial<Persisted>;
+        set({ overrides: sanitizeOverrides(parsed?.overrides) });
+      } catch {
+        // 忽略非法 JSON
       }
-    });
-  }
+    },
+    "shortcuts",
+  );
 
   return {
     overrides: initial.overrides,

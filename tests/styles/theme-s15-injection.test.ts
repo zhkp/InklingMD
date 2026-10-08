@@ -8,7 +8,10 @@ import { readFixture, readSrc } from "../helpers/theme-css";
 // 定位口径是函数级，不是全仓 grep；与主题注入无关的 12 处既有 innerHTML 用
 // innerHTMLAllowlist 显式豁免（新增文件用 innerHTML 会让第二个用例失败）。
 function extractFunctionBody(source: string, name: string): string | null {
-  const re = new RegExp(`function\\s+${name}\\s*\\([^)]*\\)\\s*\\{`);
+  // #225 补充：允许显式返回类型注解（`function f(): void { … }`）。
+  // 本断言的口径（函数体内必须 textContent、不得 innerHTML）不受影响——
+  // 原正则只匹配「无返回类型」的写法，会把带 `: void` 的注入函数误判为「函数不存在」。
+  const re = new RegExp(`function\\s+${name}\\s*\\([^)]*\\)\\s*(?::[^{]*)?\\{`);
   const m = source.match(re);
   if (!m || m.index === undefined) return null;
   const open = m.index + m[0].length - 1;

@@ -19,6 +19,7 @@ import {
   loadExpandedDirs,
   loadRecentFiles,
 } from "./shared";
+import { registerStorageSync } from "../storageSyncRegistry";
 
 /** 只允许同步这三个持久化状态字段 */
 export interface WorkspaceStorageSyncPatch {
@@ -30,21 +31,27 @@ export interface WorkspaceStorageSyncPatch {
 /**
  * 注册 workspace 持久化 key 的跨窗口同步监听。
  * 在 useWorkspace store 创建时调用一次（模块级单例）。
+ *
+ * #225 C4（方案 A）：不再自建 `window.addEventListener("storage")`，
+ * 统一登记到 `storageSyncRegistry` 的单一注册点。
  */
 export function subscribeWorkspaceStorageSync(
   set: (patch: WorkspaceStorageSyncPatch) => void,
 ): void {
   if (typeof window === "undefined") return;
-  window.addEventListener("storage", (e: StorageEvent) => {
-    // key 为 null 表示 localStorage.clear()：其他窗口整体清空属于异常路径，
-    // 不主动抹掉本窗口内存状态，避免用户数据随他窗口的清空操作丢失。
-    if (!e.key) return;
-    if (e.key === RECENT_FILES_KEY) {
-      set({ recentFiles: loadRecentFiles() });
-    } else if (e.key === BOOKMARKS_KEY) {
-      set({ bookmarks: loadBookmarks() });
-    } else if (e.key === EXPANDED_DIRS_KEY) {
-      set({ expandedDirs: loadExpandedDirs() });
-    }
-  });
+  registerStorageSync(
+    RECENT_FILES_KEY,
+    () => set({ recentFiles: loadRecentFiles() }),
+    "workspace:recentFiles",
+  );
+  registerStorageSync(
+    BOOKMARKS_KEY,
+    () => set({ bookmarks: loadBookmarks() }),
+    "workspace:bookmarks",
+  );
+  registerStorageSync(
+    EXPANDED_DIRS_KEY,
+    () => set({ expandedDirs: loadExpandedDirs() }),
+    "workspace:expandedDirs",
+  );
 }

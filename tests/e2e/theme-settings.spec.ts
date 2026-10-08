@@ -32,9 +32,10 @@ test.describe("主题切换", () => {
     await page.locator(".export-item", { hasText: "深色" }).click();
     await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
     await expect(page.locator("html")).toHaveCSS("color-scheme", "dark");
-    // localStorage 持久化
+    // localStorage 持久化：#225 起值升级为 themeId（旧值 "light"/"dark" 仅作读取侧迁移）
     const stored = await page.evaluate(() => localStorage.getItem("inkling-theme"));
-    expect(stored).toBe("dark");
+    expect(stored).toBe("builtin:dark");
+    await expect(page.locator("html")).toHaveAttribute("data-theme-id", "builtin:dark");
   });
 
   test("TH4 刷新后保持主题", async ({ page }) => {

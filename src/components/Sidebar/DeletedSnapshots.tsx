@@ -15,6 +15,7 @@ import {
 import { IconAlertTriangle, IconChevronDown, IconChevronRight, IconFileText, IconTrash2 } from "../icons";
 import { basename } from "./treeShared";
 import { askConfirmation } from "../../lib/dialogs";
+import { registerStorageSync } from "../../store/storageSyncRegistry";
 
 export function DeletedSnapshots() {
   const [snapshots, setSnapshots] = useState<DeletedFileSnapshot[]>([]);
@@ -39,14 +40,16 @@ export function DeletedSnapshots() {
   // - 其他窗口写入经原生 storage 事件同步（issue #165 快照部分）
   useEffect(() => {
     refresh();
-    const onStorage = (e: StorageEvent) => {
-      if (e.key === DELETED_FILE_SNAPSHOTS_KEY) refresh();
-    };
     window.addEventListener(SNAPSHOTS_CHANGED_EVENT, refresh);
-    window.addEventListener("storage", onStorage);
+    // #225 C4：跨窗口同步统一登记到 storageSyncRegistry 单一注册点（返回取消注册）
+    const unsubscribe = registerStorageSync(
+      DELETED_FILE_SNAPSHOTS_KEY,
+      () => refresh(),
+      "deleted-snapshots",
+    );
     return () => {
       window.removeEventListener(SNAPSHOTS_CHANGED_EVENT, refresh);
-      window.removeEventListener("storage", onStorage);
+      unsubscribe();
     };
   }, [refresh]);
 

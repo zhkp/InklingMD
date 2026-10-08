@@ -1,3 +1,8 @@
+// #225 G3（反 FOUC）：主题模块**必须**在顶部静态 import（禁止懒加载 / 代码分割）——
+// 它的模块顶层副作用会在 React 首次渲染前同步写 `data-theme` / `data-theme-id`，
+// 并把主题样式（快照命中时）推迟到一个微任务注入（N8：此时 base 层块已就绪）。
+// 不可改成 `import("./theme/session")`，否则正常重启会复现一次可见闪烁。
+import "./theme/session";
 import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";

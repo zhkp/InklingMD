@@ -5,6 +5,7 @@
 
 import { create } from "zustand";
 import { loadJSON, writeJSON } from "../lib/storage";
+import { registerStorageSync } from "./storageSyncRegistry";
 
 /** 代码块语法高亮主题 */
 export type CodeBlockTheme = "oneDark" | "light" | "none";
@@ -110,28 +111,29 @@ function loadPersisted(): PersistedSettings {
 const initial = loadPersisted();
 
 export const useSettings = create<SettingsState>((set, get) => {
-  // 监听多窗口/跨标签页的 settings storage 同步
-  if (typeof window !== "undefined") {
-    window.addEventListener("storage", (e) => {
-      if (e.key === STORAGE_KEY && e.newValue) {
-        try {
-          const parsed = JSON.parse(e.newValue) as Partial<PersistedSettings>;
-          const merged = { ...DEFAULTS, ...parsed };
-          set({
-            formulaAutoNumber: merged.formulaAutoNumber,
-            codeBlockTheme: merged.codeBlockTheme,
-            focusMode: merged.focusMode,
-            typewriterMode: merged.typewriterMode,
-            autoPair: merged.autoPair,
-            spellcheck: merged.spellcheck,
-            editorZoom: clampZoom(merged.editorZoom),
-          });
-        } catch {
-          // 忽略非法 JSON
-        }
+  // 多窗口/跨标签页同步（#225 C4：统一登记到 storageSyncRegistry 单一注册点，不再各自 addEventListener）
+  registerStorageSync(
+    STORAGE_KEY,
+    (e) => {
+      if (!e.newValue) return;
+      try {
+        const parsed = JSON.parse(e.newValue) as Partial<PersistedSettings>;
+        const merged = { ...DEFAULTS, ...parsed };
+        set({
+          formulaAutoNumber: merged.formulaAutoNumber,
+          codeBlockTheme: merged.codeBlockTheme,
+          focusMode: merged.focusMode,
+          typewriterMode: merged.typewriterMode,
+          autoPair: merged.autoPair,
+          spellcheck: merged.spellcheck,
+          editorZoom: clampZoom(merged.editorZoom),
+        });
+      } catch {
+        // 忽略非法 JSON
       }
-    });
-  }
+    },
+    "settings",
+  );
 
   return {
     formulaAutoNumber: initial.formulaAutoNumber,
