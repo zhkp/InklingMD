@@ -173,13 +173,28 @@ describe("#306 S11 选择器三分类前缀收敛（§C1/§C2）", () => {
       expect(rewrite("#write > *").out).toBe(`${EDITOR_PREFIX} > * > *`);
     });
 
-    it("`:has()` 内层不加前缀（相对选择器），但 `>` 做同一翻译并登记", () => {
+    it("`:has()` 内层不加前缀（相对选择器）；**仅当主体是内容根**时 `>` 才翻译", () => {
       expect(rewrite("#write:has(> table)").out).toBe(`${EDITOR_PREFIX}:has(> * > table)`);
       expect(rewrite("#write:has(p)").out).toBe(`${EDITOR_PREFIX}:has(p)`);
       const { diags } = rewrite("#write:has(> table)");
-      expect(diags.some((d) => d.reason.includes("§4.3 直系子翻译（`:has()` 内层相对选择器）"))).toBe(
-        true,
+      expect(diags.some((d) => d.reason.includes("§4.3 直系子翻译"))).toBe(true);
+    });
+
+    it("主体不是内容根的 `:has()`：内层保持原样（内容根之下与 Typora 同构）", () => {
+      // 内容根之下没有多出来的那一层 → 加 `> * >` 会把「命中」变成「不命中」
+      expect(rewrite("p:has(> img)").out).toBe(`${EDITOR_PREFIX} p:has(> img)`);
+      expect(rewrite("h1:has(> a)").out).toBe(`${EDITOR_PREFIX} h1:has(> a)`);
+      expect(rewrite("p:has(> code)").out).not.toContain("> *");
+      expect(rewrite("#write p:has(> code)").out).toBe(`${EDITOR_PREFIX} p:has(> code)`);
+      // 外层组合子照常翻译，内层不动
+      expect(rewrite("#write > p:has(> img)").out).toBe(`${EDITOR_PREFIX} > * > p:has(> img)`);
+      expect(rewrite("#write > h1:has(> a)").out).toBe(`${EDITOR_PREFIX} > * > h1:has(> a)`);
+      // 嵌套：外层（主体=内容根）翻译，内层（主体=内容块）不翻译
+      expect(rewrite("#write:has(> div:has(> img))").out).toBe(
+        `${EDITOR_PREFIX}:has(> * > div:has(> img))`,
       );
+      // 多个根级别名连续时，`:has()` 主体仍是内容根 → 翻译
+      expect(rewrite("html body:has(> div)").out).toBe(`${EDITOR_PREFIX}:has(> * > div)`);
     });
   });
 

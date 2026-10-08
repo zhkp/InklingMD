@@ -254,6 +254,51 @@ test.describe("#306 Typora 兼容层（真实注入）", () => {
     expect(after.mappedAreTopLevel).toBe(true);
   });
 
+  test("`:has()` 翻译范围：主体是内容块时内层不翻译（否则会把命中变成不命中）", async ({ page }) => {
+    await draftWithContent(page);
+
+    // 前提事实：草稿的「行内 `code` 片段」在 DOM 里是 `p > code`（直系）——
+    // 内容根**之下**与 Typora 同构，没有多出来的那一层。
+    const directFact = await page.evaluate(() => {
+      const p = document.querySelector(".editor-scroll .milkdown p");
+      const code = p?.querySelector("code") ?? null;
+      return { hasP: !!p, codeIsDirectChild: !!code && code.parentElement === p };
+    });
+    expect(directFact.hasP).toBe(true);
+    expect(directFact.codeIsDirectChild).toBe(true);
+
+    // 兼容层对 `p:has(> code)`（主体=内容块）**不加** `> *`（回归护栏）
+    const mapped = rewriteWithReport(`p:has(> code) { background-color: rgb(11, 22, 33); }`, {
+      themeId: "user:has-scope-probe",
+      themeDir: THEME_DIR,
+      toAssetUrl: (abs) => `http://asset.localhost/${encodeURIComponent(abs)}`,
+      assetRoot: THEME_DIR,
+    }).css;
+    expect(mapped).toContain("p:has(> code)");
+    expect(mapped).not.toContain("p:has(> * > code)");
+
+    // 真实 DOM：原形命中
+    await page.addStyleTag({ content: mapped });
+    await page.waitForTimeout(120);
+    const original = await page.evaluate(() => {
+      const p = document.querySelector(".editor-scroll .milkdown p")!;
+      return getComputedStyle(p).backgroundColor;
+    });
+    expect(original).toBe("rgb(11, 22, 33)");
+
+    // 真实 DOM：若按「无条件翻译」的旧口径加 `> * >`（这里显式注入该形态）→ **不命中**
+    await page.addStyleTag({
+      content: `.editor-scroll .milkdown p:has(> * > code) { background-color: rgb(44, 55, 66); }`,
+    });
+    await page.waitForTimeout(120);
+    const overConstrained = await page.evaluate(() => {
+      const p = document.querySelector(".editor-scroll .milkdown p")!;
+      return getComputedStyle(p).backgroundColor;
+    });
+    expect(overConstrained).toBe("rgb(11, 22, 33)");
+    expect(overConstrained).not.toBe("rgb(44, 55, 66)");
+  });
+
   test("越权赋值被拒：--shell-*/基础变量不被主题改写，--content-* 允许覆盖", async ({ page }) => {
     await draftWithContent(page);
     const css = buildThemeCss();

@@ -282,12 +282,24 @@ function prependPrefix(
   sel: selectorParser.Selector,
   prefix: string,
   carriedPseudos: readonly string[] = [],
+  /**
+   * 由**根级 compound** 搬运上来的 `:has()` 伪类节点（出参）。
+   * 只有这些 `:has()` 的「主体」才是内容根，才允许做 §4.3 的 `> * >` 翻译
+   * ；挂在内容块上的 `:has(> X)`（如 `p:has(> img)`）在内容根之下**与 Typora 同构**，
+   * 多出来的那一层只存在于「文档根 → 顶层块」之间 → 加了翻译反而变成不命中。
+   */
+  rootCarriedHas?: Set<selectorParser.Pseudo>,
 ): void {
   const parsed = selectorParser().astSync(prefix + carriedPseudos.join(""));
   const prefixNodes = parsed.first ? parsed.first.nodes.map((n) => n.clone()) : [];
   const anchor = sel.first ?? null;
   if (!anchor) {
-    for (const node of prefixNodes) sel.append(node);
+    for (const node of prefixNodes) {
+      sel.append(node);
+      if (rootCarriedHas && node.type === "pseudo" && node.value === ":has") {
+        rootCarriedHas.add(node as selectorParser.Pseudo);
+      }
+    }
     return;
   }
   // 锚点原有的前导空白有两类来源，要区别对待：
@@ -295,7 +307,12 @@ function prependPrefix(
   // ② 前缀自身或函数首参残留的空白 → 清掉（否则出现 `:is( .editor-…` 这种脏输出）。
   const leadingSpace = anchor.spaces?.before ?? "";
   const isFirstInList = !sel.prev();
-  for (const node of prefixNodes) sel.insertBefore(anchor, node as selectorParser.ClassName);
+  for (const node of prefixNodes) {
+    sel.insertBefore(anchor, node as selectorParser.ClassName);
+    if (rootCarriedHas && node.type === "pseudo" && node.value === ":has") {
+      rootCarriedHas.add(node as selectorParser.Pseudo);
+    }
+  }
   if (anchor.type === "combinator") {
     // 剥离根级 compound 后，剩下的第一个节点可能就是 combinator（如 `#write > h1`）：
     // 不再插入空格组合子（两个组合子相邻会让 stringify 吞掉 `>`），保留其自带空白即可。
@@ -343,16 +360,21 @@ function rewritePseudos(
   sel: selectorParser.Selector,
   report: (d: ThemeDiagnostic) => void,
   depth: number,
+  rootCarriedHas: ReadonlySet<selectorParser.Pseudo> = new Set(),
 ): boolean {
   let ok = true;
   sel.walkPseudos((pseudo) => {
     if (!PSEUDO_FUNCS.has(pseudo.value) || !pseudo.nodes || depth > 6) return;
-    // `:has()` 的内层是**相对选择器**（相对主体元素匹配）→ 不加前缀，只做直系子翻译；
+    // `:has()` 的内层是**相对选择器**（相对主体元素匹配）→ 不加前缀；
     // `:is()/:not()/:where()` 的内层是绝对选择器 → 逐个加前缀（§C2）。
     const relative = pseudo.value === ":has";
+    // 只有主体 = 内容根的 `:has()`（由根级 compound 搬运而来）才做 §4.3 直系子翻译。
+    const translateRootLevel = rootCarriedHas.has(pseudo as selectorParser.Pseudo);
     for (const inner of [...pseudo.nodes]) {
       if (inner.type !== "selector") continue;
-      if (!rewriteSelectorNode(inner, report, depth + 1, relative)) inner.remove();
+      if (!rewriteSelectorNode(inner, report, depth + 1, relative, translateRootLevel, rootCarriedHas)) {
+        inner.remove();
+      }
     }
     const remaining = pseudo.nodes.filter((n) => n.type === "selector");
     if (remaining.length === 0) {
@@ -370,12 +392,16 @@ function rewritePseudos(
 }
 
 /** 改写单个复合选择器；返回 false 表示丢弃（会就地修改 AST）。
- * `relative = true`：`:has()` 的内层参数（相对选择器）——不加前缀、不剥根，只做直系子翻译。 */
+ * `relative = true`：`:has()` 的内层参数（相对选择器）——不加前缀、不剥根。
+ * `translateRootLevel = true`：仅当该 `:has()` 主体是内容根（由根级 compound 搬运而来）时，
+ * 内层的 `> X` 才翻译为 `> * > X`；主体是内容块时 DOM 与 Typora 同构，保持原样。 */
 function rewriteSelectorNode(
   sel: selectorParser.Selector,
   report: (d: ThemeDiagnostic) => void,
   depth: number,
   relative = false,
+  translateRootLevel = false,
+  rootCarriedHas: ReadonlySet<selectorParser.Pseudo> = new Set(),
 ): boolean {
   const original = sel.toString().trim();
 
@@ -413,18 +439,19 @@ function rewriteSelectorNode(
   }
 
   if (relative) {
-    // `:has(> X)`：主体是被收敛的根（`.milkdown`）→ 内层的 `>` 同样需要真实内容根翻译
     applyDocMapping(sel);
-    if (insertContentRootLevel(sel)) {
+    // 只有「主体 = 内容根」（由根级 compound 搬运上来的 `:has()`）才做 §4.3 翻译：
+    // 内容根之下的 DOM 与 Typora 同构，无条件加 `> * >` 会把「命中」变成「不命中」。
+    if (translateRootLevel && insertContentRootLevel(sel)) {
       report(
         makeDiag(
           "scoped-root",
           `:has(${original})`,
-          "§4.3 直系子翻译（`:has()` 内层相对选择器）：`> X` → `> * > X`（相对内容根而非 `.milkdown`），内层不加前缀（相对选择器语义）",
+          "§4.3 直系子翻译（仅当 `:has()` 主体为内容根，即由根级 compound 搬运而来）：`> X` → `> * > X`；非根主体的 `:has()` 内层按原样（与 Typora 同构）",
         ),
       );
     }
-    return rewritePseudos(sel, report, depth);
+    return rewritePseudos(sel, report, depth, rootCarriedHas);
   }
 
   const strip = stripLeadingRoots(sel);
@@ -452,9 +479,11 @@ function rewriteSelectorNode(
       ),
     );
   }
-  // 搬过来的 `:has()` 内层由 rewritePseudos 的相对分支统一做直系子翻译（此处只搬运，不重复翻译）
-  prependPrefix(sel, EDITOR_PREFIX, strip.carriedHas);
-  return rewritePseudos(sel, report, depth);
+  // 搬过来的 `:has()` 内层由 rewritePseudos 的相对分支处理；只有**搬运来的**那些
+  // （主体 = 内容根）才做 §4.3 翻译 —— 用集合精确标记，避免误伤 `p:has(> img)`。
+  const carriedSet = new Set<selectorParser.Pseudo>();
+  prependPrefix(sel, EDITOR_PREFIX, strip.carriedHas, carriedSet);
+  return rewritePseudos(sel, report, depth, carriedSet);
 }
 
 /**
