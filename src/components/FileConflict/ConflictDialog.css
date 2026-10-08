@@ -228,11 +228,5 @@
 }
 
 /* 深色主题微调 */
-[data-theme="dark"] .conflict-diff-remove {
-  color: var(--shell-diff-remove-fg);
-}
-
-[data-theme="dark"] .conflict-diff-add {
-  color: var(--shell-diff-add-fg);
-}
+/* #225 归并：原 dark 侧的 diff 文字色覆盖已删除（token 自身随主题翻转） */
 }

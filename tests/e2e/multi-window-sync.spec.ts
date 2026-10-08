@@ -45,6 +45,43 @@ test.describe("跨窗口 / 多页面存储同步 (#133)", () => {
 
     await context.close();
   });
+
+  // #225 D/P1-1：负向断言 —— 不同 browser context 存储相互隔离，
+  // 不能把「同 context 两 page 联动了」误当成「跨窗口机制对」。
+  test("P1-1 负向：另一 browser context 切换主题不影响本 context（存储隔离）", async ({
+    browser,
+  }) => {
+    const ctxA = await browser.newContext();
+    const ctxB = await browser.newContext();
+    const pageA = await ctxA.newPage();
+    const pageB = await ctxB.newPage();
+
+    await openMockWorkspace(pageA);
+    await openMockWorkspace(pageB);
+    const before = await pageB.evaluate(() =>
+      document.documentElement.getAttribute("data-theme"),
+    );
+    expect(before).toBe("light"); // Playwright 默认 prefers-color-scheme: light
+    expect(await pageB.evaluate(() => localStorage.getItem("inkling-theme"))).toBeNull();
+
+    // A 窗口写入主题（与 #133 用例同一底层路径：真实 setItem 触发原生 storage 事件）
+    await pageA.evaluate(() => {
+      localStorage.setItem("inkling-theme", "builtin:dark");
+    });
+    // 写入侧存储已变（storage 事件不会在本窗口触发，故这里只断言存储；
+    // 「同 context 另一窗口的联动」由 #133 用例正向覆盖）
+    expect(await pageA.evaluate(() => localStorage.getItem("inkling-theme"))).toBe("builtin:dark");
+
+    // B 窗口（另一存储域）必须完全不受影响
+    await pageB.waitForTimeout(300);
+    expect(await pageB.evaluate(() => document.documentElement.getAttribute("data-theme"))).toBe(
+      before,
+    );
+    expect(await pageB.evaluate(() => localStorage.getItem("inkling-theme"))).toBeNull();
+
+    await ctxA.close();
+    await ctxB.close();
+  });
 });
 
 // #165：workspace 域（最近文件/书签）此前没有 storage 事件同步，

@@ -120,8 +120,5 @@
 }
 
 /* 深色主题适配 */
-[data-theme="dark"] .tt-btn:hover {
-  background: var(--content-table-toolbar-hover);
-  color: var(--text);
-}
+/* #225 归并：原 dark 侧的按钮悬浮配色覆盖已删除（token 自身随主题翻转） */
 }

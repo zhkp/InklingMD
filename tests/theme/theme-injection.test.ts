@@ -132,6 +132,33 @@ describe("#225 §4.3-2/G6：自定义 CSS 注入 @layer user（最高层，N3 �
   });
 });
 
+describe("#225 §4.2 / S7：注入次序（theme 先、user 后 → 自定义 CSS 天然最高层）", () => {
+  it("先注入主题再注入自定义 CSS：DOM 中 theme 在 user 之前，statement 仍在最前", () => {
+    injectThemeCss("theme-css{}");
+    flushThemeInjection();
+    injectUserCss("user-css{}");
+    const ids = [...document.head.querySelectorAll("style")].map((el) => el.id);
+    expect(ids[0]).toBe(LAYER_STATEMENT_ID);
+    const iTheme = ids.indexOf(THEME_STYLE_ID);
+    const iUser = ids.indexOf(USER_STYLE_ID);
+    expect(iTheme).toBeGreaterThan(0);
+    expect(iTheme).toBeLessThan(iUser);
+  });
+
+  it("已存在的主题样式是**原地更新**（不重新 append），不会挤到自定义 CSS 之后", () => {
+    injectThemeCss("theme-a{}");
+    flushThemeInjection();
+    injectUserCss("user-css{}");
+    const before = [...document.head.querySelectorAll("style")].map((el) => el.id);
+    injectThemeCss("theme-b{}"); // 切主题
+    flushThemeInjection();
+    const after = [...document.head.querySelectorAll("style")].map((el) => el.id);
+    expect(after).toEqual(before);
+    expect(readInjectedThemeCss()).toContain("theme-b{}");
+    expect(after.indexOf(THEME_STYLE_ID)).toBeLessThan(after.indexOf(USER_STYLE_ID));
+  });
+});
+
 describe("#225 §3.2/C3：data-theme 与 data-theme-id 同步落盘", () => {
   it("一次同步写同时写入两个属性", () => {
     writeThemeAttributes("user:vue", "dark");
