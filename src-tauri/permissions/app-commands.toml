@@ -98,3 +98,24 @@ commands.allow = ["pandoc_export_docx"]
 identifier = "allow-take-pending-file"
 description = "Allow take_pending_file command"
 commands.allow = ["take_pending_file"]
+
+# 主题导入的 IO 命令（#307）：扫描主题目录 / 递归复制 / 压缩包解压 / 预装源副本目录
+[[permission]]
+identifier = "allow-scan-theme-dir"
+description = "Allow scan_theme_dir command"
+commands.allow = ["scan_theme_dir"]
+
+[[permission]]
+identifier = "allow-copy-path"
+description = "Allow copy_path command"
+commands.allow = ["copy_path"]
+
+[[permission]]
+identifier = "allow-extract-zip"
+description = "Allow extract_zip command"
+commands.allow = ["extract_zip"]
+
+[[permission]]
+identifier = "allow-resource-themes-dir"
+description = "Allow resource_themes_dir command"
+commands.allow = ["resource_themes_dir"]

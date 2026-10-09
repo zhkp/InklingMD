@@ -2,9 +2,9 @@
 mod commands;
 
 use commands::{
-    allow_asset_dir, create_dir, create_file, delete_path, download_remote_image, file_mtime,
-    find_asset_by_hash, list_dir,
-    list_workspace_files, pandoc_check, pandoc_export_docx, read_text_file, rename_path,
+    allow_asset_dir, copy_path, create_dir, create_file, delete_path, download_remote_image,
+    extract_zip, file_mtime, find_asset_by_hash, list_dir, list_workspace_files, pandoc_check,
+    pandoc_export_docx, read_text_file, rename_path, resource_themes_dir, scan_theme_dir,
     search_in_workspace, write_binary_file, write_text_file,
 };
 use std::sync::Mutex;
@@ -128,6 +128,10 @@ pub fn run() {
             allow_asset_dir,
             download_remote_image,
             find_asset_by_hash,
+            scan_theme_dir,
+            copy_path,
+            extract_zip,
+            resource_themes_dir,
             take_pending_file
         ])
         .run(tauri::generate_context!())
