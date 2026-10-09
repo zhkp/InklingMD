@@ -372,7 +372,8 @@ test.describe("主题层行为断言（#225 落地）", () => {
     // 应用侧通用名仍在（未被主题夺走），主题副本带前缀
     expect(probe.keyframes).toContain("fade-in");
     expect(probe.keyframes).toContain("tdeadbeef-fade-in");
-    // 负例：文档中不存在**未加前缀**的主题字体名（#306 前缀化 + 引用重写的落点）
-    expect(probe.fonts.some((f) => f.replace(/["']/g, "") === "SampleFont")).toBe(false);
+    // 反向（可失败形态）：文档里 `fade-in` **恰好一个** —— 若主题以未加前缀的名字注入，
+    // 这里会数到 2（#306 的前缀化 + 引用重写另有强断言：tests/e2e/typora-shim.spec.ts）
+    expect(probe.keyframes.filter((n) => n === "fade-in")).toHaveLength(1);
   });
 });

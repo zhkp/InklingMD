@@ -53,15 +53,21 @@ export function wrapInLayer(css: string, layer: string): string {
 export function splitLeadingImports(css: string): { imports: string[]; rest: string } {
   const imports: string[] = [];
   let rest = css.replace(/^\uFEFF/, "");
-  // 目标形态：`@import "x.css"` / `@import 'x.css'` / `@import url(x.css)` / `url("x.css")`（后接媒体条件也可）
-  const head = /^\s*@import\s+(?:url\(\s*(?:"[^"]*"|'[^']*'|[^)\s]+)\s*\)|"[^"]*"|'[^']*')/i;
+  // 目标形态：`@import "x.css"` / `'x.css'` / `url(x.css)` / `url("x.css")`（后接媒体条件也可）
+  const importHead = /@import\s+(?:url\(\s*(?:"[^"]*"|'[^']*'|[^)\s]+)\s*\)|"[^"]*"|'[^']*')/i;
+  // 表首允许「空白 + 注释」：与 `src/theme/typora/normalize.ts` 剥 `@charset` 的口径一致。
+  // 不这样做，资源头部常见的许可证/作者注释会挡住 `@import` 外提 → `@import` 落进 layer 块内被浏览器忽略（静默失效）。
+  const leadingTrivia = /^\s*(?:\/\*[\s\S]*?\*\/\s*)*/;
   for (;;) {
-    const m = head.exec(rest);
-    if (!m) break;
-    const end = rest.indexOf(";", m[0].length);
+    const trivia = leadingTrivia.exec(rest)![0];
+    const tail = rest.slice(trivia.length);
+    const m = importHead.exec(tail);
+    if (!m || m.index !== 0) break;
+    const end = tail.indexOf(";", m[0].length);
     if (end < 0) break;
-    imports.push(rest.slice(0, end + 1).trim());
-    rest = rest.slice(end + 1);
+    // 连同其前的注释一起外提（保留许可证/作者头，不丢用户内容）
+    imports.push(rest.slice(0, trivia.length + end + 1).trim());
+    rest = rest.slice(trivia.length + end + 1);
   }
   return { imports, rest: rest.trim() };
 }

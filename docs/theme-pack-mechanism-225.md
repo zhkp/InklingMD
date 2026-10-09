@@ -41,10 +41,14 @@
 
 | 路径 | 期望 | 复现步骤 |
 |---|---|---|
-| 正常重启（快照命中） | **零闪烁** | 选一个带 CSS 的主题（`bundled:*`/`user:*`）→ 关闭应用 → 重新打开：内容出现时已是该主题（E2E `S8` 断言「应用内容首帧 `data-theme` 已正确」） |
+| 正常重启（快照命中） | **零闪烁** | **前置条件**：`inkling-themes-index` 里已有该主题（索引的写入方是 `#307` 的扫描/导入路径）。满足后：选一个带 CSS 的主题（`bundled:*`/`user:*`）→ 关闭应用 → 重新打开：内容出现时已是该主题（E2E `S8` 断言「应用内容首帧 `data-theme` 已正确」；单测覆盖「索引存在 → 首帧快照命中」） |
 | 首装 / 清缓存（快照缺失） | 允许**一次**可见切换（回落内置基线 → 读盘后切换） | 清 `localStorage` 后打开并选择带 CSS 的主题：先看到内置基线，随后切到目标主题一次 |
 | 快照超预算（> 256 KB）/ 写入失败（配额耗尽） | 同「快照缺失」，并**记录状态位**（不得静默） | 造一个 > 256 KB 主题导入后观察 `inkling-theme-snapshot-state.last ∈ {oversize, quota}` |
-| 未知 `themeId`（清单/快照未就绪） | 本帧**不切换**，回落内置基线 + 状态位 `invalid`；清单/快照到达后重试 | 手改 `inkling-theme` 为不存在的 id → 打开应用：不切到「半主题」，状态位留痕 |
+| 未知 `themeId`（清单/快照未就绪） | 本帧**不切换**，回落内置基线 + 状态位 `invalid`；清单/快照到达后重试 | 手改 `inkling-theme` 为不存在于**持久化清单**的 id → 打开应用：不切到「半主题」，状态位留痕 |
+
+> **GC 的 known 集合来自持久化清单**（`inkling-themes-index`），**不是**当刻的内存注册表：
+> 后者在首帧只含两个内置 id，会把所有磁盘主题快照误判为「已不存在」而每次启动清空（评审阻塞 2 已修）。
+> 清单为空时**不动**任何快照（等清单就绪再回收）。
 
 > 内置基线 `builtin:*` **不走快照**（P2-4）：它们的零闪烁由「同步写 `data-theme` + `App.css` 变量块」保证。
 
@@ -87,13 +91,22 @@
 
 ## 7. dark 覆盖归并（C6，输入 = `#223` 的逐条清单）
 
-`src/App.css`：**删除 12 条纯颜色散落覆盖规则**（`::selection`、`.inkling-block-handle`、`save-indicator.*`、
-`blockquote`、`hr`、`th`、`.column-resize-handle`、`.selectedCell::after`、`frontmatter-label/toc-label`、链接色），
+`src/App.css`：**删除 11 条纯颜色散落覆盖规则**（`::selection`、`.inkling-block-handle`、`save-indicator.*`、
+`blockquote`、`hr`、`th`、`.column-resize-handle`、`.selectedCell::after`、`frontmatter-label/toc-label`、链接色；
+清单里第 14 项 `… .frontmatter-cm .cm-gutters` 已由 `#310` 的 CM 宿主主题承载，不在本批删除范围），
 **保留 2 个变量块**与**结构属性规则**（`::-webkit-scrollbar-thumb{,:hover}` 的 border/background-clip、`.split-pane`）。
 组件侧 5 条 dark 覆盖（`TableToolbar` / `SearchPanel` / `ShortcutsCustomize` / `ConflictDialog` ×2）同批删除。
 
-计数核对：归并后 `src/App.css` 中 `[data-theme="dark"]` 仅剩 **3 处**（变量块 + 2 条滚动条规则），
-组件侧 **0 处**；清单见 `docs/theme-dark-rules-split-223.md`。**非颜色规则未被删除**。
+**3 条覆盖的复核（评审阻塞 1 的修法）**：`.tt-btn:hover` / `.conflict-diff-remove` / `.conflict-diff-add` 的**基础规则**
+原先消费的是**另一个 token**（`--btn-hover-bg` / `--danger` / `--success`），与 dark 覆盖用的语义 token
+（`--content-table-toolbar-hover` / `--shell-diff-remove-fg` / `--shell-diff-add-fg`）在 dark 下**取值不同**
+（light 下语义 token 就是前者的别名）→ 直接删覆盖会静默改色并留下死 token。
+修法：**基础规则改用语义 token** → light 取值不变（别名相同）、dark 取值与迁移前逐位相同、token 重新被消费。
+回归护栏：`tests/styles/theme-token-consumers.test.ts` 断言这些语义 token 至少有一个 `var()` 消费点
+（现有 S9/S16/S17 都不检查「token 有没有消费者」）。
+
+计数核对：归并后 `src/App.css` 中 `[data-theme="dark"]` 剩 **4 处**（变量块 + 2 条滚动条规则 + `.split-pane`），
+组件侧 **0 处**；清单与逐条处置见 `docs/theme-dark-rules-split-223.md`。**非颜色规则未被删除**。
 
 ## 8. 断言地图
 
@@ -103,7 +116,8 @@
 | S8 首帧就位 | 同上（`addInitScript` 记录「应用内容首帧」的 `data-theme`） | 预置 `builtin:dark` → 首帧即 dark；首装 → 按 `prefers-color-scheme` 定首次默认 |
 | S12 层序 / 行为级 | `theme-layers.spec.ts` | 层序 statement；同属性下 `@layer theme` 胜 `@layer base`（与 DOM 顺序无关） |
 | S13 未分层 = 0 | `theme-layers.spec.ts` + `tests/styles/theme-s13-source-layers.test.ts` | 应用源 100% 在层内；未分层只来自登记运行时源 |
-| S14 全局名称 | `theme-layers.spec.ts` | 应用侧 `fade-in` 不被夺；主题字体名带前缀 |
+| S14 全局名称 | `theme-layers.spec.ts` | 应用侧 `fade-in` 仍在；主题副本带前缀；主题副本不以「未加前缀」形态出现（前缀化 + 引用重写的强断言在 `typora-shim.spec.ts`） |
+| token 消费点 | `tests/styles/theme-token-consumers.test.ts` | dark 归并涉及的语义 token 必须仍有 `var()` 消费点（防「删覆盖 → 静默改色 + 死值」复发） |
 | S15 注入函数 | `tests/styles/theme-s15-injection.test.ts` | 登记 `src/theme/inject.ts :: writeStyle`（`textContent`、禁 `innerHTML`） |
 | S16 产物级 | `scripts/check-theme-build-assets.mjs` | 3 个 CSS 资产、完全层化、statement 在最前 |
 | 机制单测 | `tests/theme/app-registry|theme-snapshot|theme-injection.test.ts`、`tests/store/storage-sync-registry.test.ts` | 身份/迁移、快照契约（含体积/GC/一致性/适用性/状态位）、注入与首帧、唯一注册点与跨窗口语义 |
@@ -118,3 +132,5 @@
 | D32 | 自定义 CSS 的表首 `@import` 被提到 `@layer user` 之外 | `@import` 属表首限定，包进 layer 块会被浏览器忽略 | 保留在样式表最前（功能保真），规则体仍在 `user` 层内 |
 | D33 | `theme` 层的 `<style>` 只在主题**有独立样式表**时存在 | 内置基线的 `css.kind = none`（A-3） | S7 的「theme 先于 user」在两者都在时断言；注入次序另有单测确定性覆盖；`#307/#308` 落地磁盘主题后自动升级为强断言 |
 | D34 | S15 的函数体提取正则放宽（容忍 `): void {` 返回类型注解） | 原正则只匹配无返回类型的写法，会把带 `: void` 的注入函数误判为「函数不存在」 | 断言口径未变（仍要求 `textContent`、禁 `innerHTML`）；已在本文件登记 |
+| D35 | **快照链路的清单（`inkling-themes-index`）写入方是 `#307`** | 本批不产生磁盘主题扫描/导入，故索引的**写**不在本批范围；但若首帧不消费它，快照不可达且 GC 会把磁盘主题快照清空 | 本批已把首帧路径改为**先读持久化索引并注册**、GC 的 known 集合改为**按该索引判决**（索引为空则不动快照）。因此索引一旦由 `#307` 写入，快照命中与「零闪烁」即自动成立；文档 §3 已按此写明前置条件 |
+| D36 | 自定义 CSS 的 `@import` 只支持「表首（允许注释/空白）」形态 | `@layer user { … }` 包裹要求 `@import` 必须在块外；块中间出现的 `@import` 依旧无效（CSS 语义如此） | 前导注释（许可证/作者头）不再使其失效；带前导注释的单测已补（评审阻塞 3） |

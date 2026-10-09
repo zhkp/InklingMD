@@ -219,12 +219,14 @@
 
 .conflict-diff-remove {
   background: var(--shell-diff-remove-bg);
-  color: var(--danger);
+  /* #225 复核：语义 token（light 下 = var(--danger)，dark 下保留 #223 调过的值） */
+  color: var(--shell-diff-remove-fg);
 }
 
 .conflict-diff-add {
   background: var(--shell-diff-add-bg);
-  color: var(--success);
+  /* #225 复核：语义 token（light 下 = var(--success)，dark 下保留 #223 调过的值） */
+  color: var(--shell-diff-add-fg);
 }
 
 /* 深色主题微调 */

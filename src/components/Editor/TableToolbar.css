@@ -38,7 +38,9 @@
 }
 
 .tt-btn:hover {
-  background: var(--btn-hover-bg);
+  /* #225 复核：改用语义 token（light 下与 --btn-hover-bg 同值；dark 下保留 #223 调过的值），
+     这样原先的 [data-theme="dark"] 覆盖才真正冗余可删 */
+  background: var(--content-table-toolbar-hover);
   color: var(--text);
 }
 

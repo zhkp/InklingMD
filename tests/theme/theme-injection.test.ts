@@ -27,7 +27,13 @@ import {
   registerThemes,
   resetRegisteredThemes,
 } from "../../src/theme/registry";
-import { readSnapshot, readSnapshotState, snapshotKey, writeStoredThemeId } from "../../src/theme/snapshot";
+import {
+  readSnapshot,
+  readSnapshotState,
+  snapshotKey,
+  writeStoredThemeId,
+  writeThemesIndex,
+} from "../../src/theme/snapshot";
 
 const USER_THEME = { id: "user:vue", name: "Vue", mode: "light" as const, source: "user" as const, hash: "abcd1234" };
 
@@ -222,12 +228,98 @@ describe("#225 §4.3（G3）：首帧同步路径", () => {
   });
 
   it("启动 GC：清单外的历史快照被清理", () => {
+    // 评审阻塞 2 后：GC 的 known 集合来自**持久化清单**（`inkling-themes-index`），
+    // 因此这里必须先写清单（否则按新口径「清单为空 → 不动快照」）
+    writeThemesIndex([{ id: USER_THEME.id, name: USER_THEME.name, mode: "light", hash: USER_THEME.hash }]);
     localStorage.setItem(
       snapshotKey("user:removed", "deadbeef"),
       JSON.stringify({ v: 1, themeId: "user:removed", hash: "deadbeef", css: "x", at: 1 }),
     );
     bootstrapFirstFrameTheme();
     expect(localStorage.getItem(snapshotKey("user:removed", "deadbeef"))).toBeNull();
+  });
+});
+
+describe("#225 评审阻塞 2：首帧消费持久化清单（索引）+ GC 按清单判决", () => {
+  it("索引里的磁盘主题 → 首帧快照命中（不再被判未知、不再闪一次内置基线）", () => {
+    resetRegisteredThemes(); // 模拟全新启动：内存注册表里只有内置基线
+    writeThemesIndex([
+      { id: USER_THEME.id, name: USER_THEME.name, mode: "light", hash: USER_THEME.hash, source: "user" },
+    ]);
+    localStorage.setItem(
+      snapshotKey(USER_THEME.id, USER_THEME.hash),
+      JSON.stringify({
+        v: 1,
+        themeId: USER_THEME.id,
+        hash: USER_THEME.hash,
+        css: "#write h1{color:teal}",
+        at: 1,
+      }),
+    );
+    writeStoredThemeId(USER_THEME.id);
+
+    const r = bootstrapFirstFrameTheme();
+    flushThemeInjection();
+    expect(r.source).toBe("snapshot");
+    expect(r.needsAsyncLoad).toBe(false);
+    expect(readInjectedThemeCss()).toContain("color:teal");
+    expect(document.documentElement.getAttribute("data-theme-id")).toBe(USER_THEME.id);
+    expect(readSnapshotState()?.last).not.toBe("invalid");
+  });
+
+  it("GC 按持久化清单判决：清单内的快照保留，清单外的清掉", () => {
+    writeThemesIndex([
+      { id: USER_THEME.id, name: USER_THEME.name, mode: "light", hash: USER_THEME.hash, source: "user" },
+    ]);
+    for (const [id, hash] of [
+      [USER_THEME.id, USER_THEME.hash],
+      ["user:orphan", "deadbeef"],
+    ] as const) {
+      localStorage.setItem(
+        snapshotKey(id, hash),
+        JSON.stringify({ v: 1, themeId: id, hash, css: "x", at: 1 }),
+      );
+    }
+    bootstrapFirstFrameTheme();
+    expect(localStorage.getItem(snapshotKey(USER_THEME.id, USER_THEME.hash))).not.toBeNull();
+    expect(localStorage.getItem(snapshotKey("user:orphan", "deadbeef"))).toBeNull();
+  });
+
+  it("清单为空时**不动**快照（避免把磁盘主题快照误判为「已不存在」而每次启动清空）", () => {
+    localStorage.removeItem("inkling-themes-index");
+    const key = snapshotKey("user:kept", "cafebabe");
+    localStorage.setItem(key, JSON.stringify({ v: 1, themeId: "user:kept", hash: "cafebabe", css: "x", at: 1 }));
+    bootstrapFirstFrameTheme();
+    expect(localStorage.getItem(key)).not.toBeNull();
+  });
+});
+
+describe("#225 评审阻塞 3：自定义 CSS 的「前导注释 + @import」必须仍被外提", () => {
+  it("splitLeadingImports 允许表首注释（许可证/作者头）", () => {
+    const css = `/* Theme by X — MIT License */\n@import "base.css";\n/* 段落 */\n#write h1 { color: red }`;
+    const { imports, rest } = splitLeadingImports(css);
+    expect(imports).toHaveLength(1);
+    expect(imports[0]).toContain('@import "base.css";');
+    // 注释随 import 一起外提（保留归属信息），不在 layer 块内
+    expect(imports[0]).toContain("Theme by X");
+    expect(rest).toContain("#write h1 { color: red }");
+  });
+
+  it("injectUserCss 产物：@import 在 @layer user 之外（前导注释不再使其静默失效）", () => {
+    injectUserCss(`/* header */\n@import "imp.css";\n#a{background:rgb(1,2,3)}`);
+    const css = readInjectedUserCss()!;
+    expect(css.indexOf('@import "imp.css";')).toBeGreaterThanOrEqual(0);
+    expect(css.indexOf('@import "imp.css";')).toBeLessThan(css.indexOf("@layer user {"));
+    expect(css).toContain("#a{background:rgb(1,2,3)}");
+  });
+
+  it("多个 @import（含注释间隔）全部外提，其余内容留在层内", () => {
+    injectUserCss(`@import "a.css";\n/* c */\n@import url(b.css);\n#x{color:red}`);
+    const css = readInjectedUserCss()!;
+    const layerAt = css.indexOf("@layer user {");
+    expect(css.indexOf('@import "a.css";')).toBeLessThan(layerAt);
+    expect(css.indexOf("@import url(b.css);")).toBeLessThan(layerAt);
+    expect(css).toContain("#x{color:red}");
   });
 });
 

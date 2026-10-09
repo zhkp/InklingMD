@@ -17,7 +17,7 @@ import {
   DEFAULT_THEME_ID,
   getTheme,
   isSnapshotEligible,
-  listThemes,
+  registerThemes,
   resolveLegacyThemeId,
   themeModeOf,
   type AppTheme,
@@ -33,6 +33,7 @@ import {
   gcSnapshots,
   readSnapshot,
   readStoredThemeId,
+  readThemesIndex,
   recordSnapshotState,
   writeSnapshot,
   writeStoredThemeId,
@@ -72,6 +73,24 @@ const now = (): number =>
  * 返回诊断结果（供状态位/断言使用）。
  */
 export function bootstrapFirstFrameTheme(): FirstFrameResult {
+  // ⓪ **先消费持久化清单**（评审阻塞 2）：磁盘主题（`bundled:*`/`user:*`）的 id 必须先入册，
+  // 否则（a）存储里的 themeId 被判「未知」→ 首帧回落内置基线（暗色磁盘主题每次重启闪一次浅色），
+  // （b）GC 的 known 集合只剩两个内置 id → 每次启动把所有磁盘主题快照删掉。
+  // `inkling-themes-index` 的**写入方**是 #307 的扫描/导入路径；本批负责在本帧消费它。
+  const index = readThemesIndex();
+  if (index.length > 0) {
+    registerThemes(
+      index.map((t) => ({
+        id: t.id,
+        name: t.name,
+        mode: t.mode,
+        variantOf: t.variantOf,
+        hash: t.hash,
+        source: t.source === "bundled" ? "bundled" : t.source === "builtin" ? "builtin" : "user",
+      })),
+    );
+  }
+
   const storedRaw = readStoredThemeId();
   const resolved = resolveLegacyThemeId(storedRaw);
 
@@ -139,8 +158,12 @@ export function bootstrapFirstFrameTheme(): FirstFrameResult {
     needsAsyncLoad = false;
   }
 
-  // 启动时 GC：清单里已不存在的 themeId 的快照（P2-2）
-  gcSnapshots(listThemes().map((t) => t.id));
+  // 启动时 GC（P2-2）：**known 集合必须来自持久化清单**，而不是「当刻内存注册表」——
+  // 后者在首帧只含两个内置 id，会把所有磁盘主题快照误判为「已不存在」而清空（评审阻塞 2）。
+  // 清单为空（尚无磁盘主题 / 索引丢失）时**不动快照**，等清单就绪再回收。
+  if (index.length > 0) {
+    gcSnapshots([...BUILTIN_THEMES.map((t) => t.id), ...index.map((t) => t.id)]);
+  }
 
   return { themeId, mode, source, needsAsyncLoad, storedRaw };
 }
