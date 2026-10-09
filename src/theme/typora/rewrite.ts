@@ -30,6 +30,16 @@ export function themePrefix(themeId: string): string {
   return `t${hashThemeCss(themeId).slice(0, 8)}`;
 }
 
+/**
+ * 主题 CSS 的内容 hash（G9 快照 key 口径）：**基于规范化文本**（剥 BOM/`@charset`、统一 LF）。
+ *
+ * 与 `rewriteWithReport(...).hash` 同一实现（同一入参必得同一值）——供 #307 的扫描/导入路径
+ * 在不做整轮改写的前提下算 hash（扫描数百个主题时省掉改写成本），并与切换时的快照 key 对齐。
+ */
+export function themeCssHash(css: string): string {
+  return hashThemeCss(normalizeThemeCss(css).css);
+}
+
 /** 允许透传的条件规则（递归改写其内部规则）。 */
 const CONDITION_AT_RULES = new Set(["media", "supports", "container"]);
 
