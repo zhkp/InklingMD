@@ -49,15 +49,19 @@ export function wrapInLayer(css: string, layer: string): string {
 /**
  * 拆分表首 `@import`（N11-2 之外的实测细节）：`@import` 属于「表首限定」，
  * 放进 `@layer { }` 块内会被浏览器忽略 → 提到 layer 包裹之前原样保留。
+ *
+ * ⚠️ 「合法表首」不等于「只有空白/注释」：按 Cascade 5，`@import` 必须前于所有规则，
+ * **`@charset` 与 `@layer <names>;` 语句除外**。所以表首 trivia 还要吃掉这两类语句
+ * （资源头部常见 `@charset "utf-8";`；用户 CSS 也常用 `@layer a, b;` 声明层序），
+ * 否则它们会挡住 `@import` 外提 → `@import` 落进 layer 块内被浏览器**静默忽略**（回归）。
  */
 export function splitLeadingImports(css: string): { imports: string[]; rest: string } {
   const imports: string[] = [];
   let rest = css.replace(/^\uFEFF/, "");
   // 目标形态：`@import "x.css"` / `'x.css'` / `url(x.css)` / `url("x.css")`（后接媒体条件也可）
   const importHead = /@import\s+(?:url\(\s*(?:"[^"]*"|'[^']*'|[^)\s]+)\s*\)|"[^"]*"|'[^']*')/i;
-  // 表首允许「空白 + 注释」：与 `src/theme/typora/normalize.ts` 剥 `@charset` 的口径一致。
-  // 不这样做，资源头部常见的许可证/作者注释会挡住 `@import` 外提 → `@import` 落进 layer 块内被浏览器忽略（静默失效）。
-  const leadingTrivia = /^\s*(?:\/\*[\s\S]*?\*\/\s*)*/;
+  // 表首 trivia = 空白 / 注释 / `@charset …;` / `@layer …;` 语句（可任意重复与混排）
+  const leadingTrivia = /^(?:\s+|\/\*[\s\S]*?\*\/|@charset\s+[^;{}]*;|@layer\s+[^;{}]*;)*/i;
   for (;;) {
     const trivia = leadingTrivia.exec(rest)![0];
     const tail = rest.slice(trivia.length);
@@ -65,7 +69,8 @@ export function splitLeadingImports(css: string): { imports: string[]; rest: str
     if (!m || m.index !== 0) break;
     const end = tail.indexOf(";", m[0].length);
     if (end < 0) break;
-    // 连同其前的注释一起外提（保留许可证/作者头，不丢用户内容）
+    // 连同其前的 trivia（注释 / `@charset` / `@layer` 语句）一起外提：
+    // 它们同属「表首限定」允许的前置内容，外提后仍位于样式表最前，且不丢用户内容。
     imports.push(rest.slice(0, trivia.length + end + 1).trim());
     rest = rest.slice(trivia.length + end + 1);
   }
@@ -134,14 +139,23 @@ export function readInjectedThemeCss(): string | null {
 
 // ── 自定义 CSS（`@layer user`，最高层；N3：不剥 !important） ────────────────
 
+/**
+ * 自定义 CSS 的**最终文本**（纯函数，便于 E2E/单测对同一产物做真实浏览器验证）：
+ * 表首 `@import`（及其前置的注释 / `@charset` / `@layer …;` 语句）外提到 `@layer user` 之外，
+ * 其余规则包进 `@layer user { … }`。
+ */
+export function buildUserCss(css: string): string {
+  const { imports, rest } = splitLeadingImports(css);
+  const body = wrapInLayer(rest, USER_LAYER);
+  return imports.length > 0 ? `${imports.join("\n")}\n${body}` : body;
+}
+
 export function injectUserCss(css: string | null): void {
   if (css === null || css.trim() === "") {
     writeStyle(USER_STYLE_ID, null);
     return;
   }
-  const { imports, rest } = splitLeadingImports(css);
-  const body = wrapInLayer(rest, USER_LAYER);
-  writeStyle(USER_STYLE_ID, imports.length > 0 ? `${imports.join("\n")}\n${body}` : body);
+  writeStyle(USER_STYLE_ID, buildUserCss(css));
 }
 
 export function readInjectedUserCss(): string | null {

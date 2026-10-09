@@ -321,6 +321,48 @@ describe("#225 评审阻塞 3：自定义 CSS 的「前导注释 + @import」必
     expect(css.indexOf("@import url(b.css);")).toBeLessThan(layerAt);
     expect(css).toContain("#x{color:red}");
   });
+
+  // 复审补充：按 Cascade 5，`@import` 必须前于所有规则，**`@charset` 与 `@layer …;` 语句除外**
+  // → 这两类合法的表首前置语句也不能挡住外提（否则 `@import` 落进 layer 块内被**静默忽略**）
+  const TRIVIA_CASES: [string, string][] = [
+    ["@charset 前缀", `@charset "utf-8";\n@import "imp.css";\n#a{background:rgb(1,2,3)}`],
+    ["@layer 语句前缀", `@layer a, b;\n@import "imp.css";\n#a{background:rgb(1,2,3)}`],
+    [
+      "注释 + @charset + @import",
+      `/* h */\n@charset "utf-8";\n@import "imp.css";\n#a{background:rgb(1,2,3)}`,
+    ],
+    [
+      "@charset + @layer 语句 + 注释 + @import",
+      `@charset "utf-8";\n@layer a, b;\n/* c */\n@import "imp.css";\n#a{background:rgb(1,2,3)}`,
+    ],
+  ];
+
+  it.each(TRIVIA_CASES)("%s：@import 仍被外提到 @layer user 之外（不再静默失效）", (_name, input) => {
+    const { imports, rest } = splitLeadingImports(input);
+    expect(imports).toHaveLength(1);
+    expect(imports[0]).toContain('@import "imp.css";');
+    // 表首前置语句随 import 一起外提，且不丢
+    if (input.includes("@charset")) expect(imports[0]).toContain("@charset");
+    if (/@layer\s+a,\s*b;/.test(input)) expect(imports[0]).toContain("@layer a, b;");
+    expect(rest).toContain("#a{background:rgb(1,2,3)}");
+
+    injectUserCss(input);
+    const css = readInjectedUserCss()!;
+    const layerAt = css.indexOf("@layer user {");
+    expect(layerAt).toBeGreaterThan(-1);
+    expect(css.indexOf('@import "imp.css";')).toBeGreaterThanOrEqual(0);
+    expect(css.indexOf('@import "imp.css";')).toBeLessThan(layerAt);
+    // @charset（若存在）必须仍在 import 之前 —— 它对位置有强要求
+    if (css.includes("@charset")) {
+      expect(css.indexOf("@charset")).toBeLessThan(css.indexOf('@import "imp.css";'));
+    }
+    expect(css).toContain("#a{background:rgb(1,2,3)}");
+  });
+
+  it("`@layer a, b;` 语句不丢：外提后仍以语句形态出现（不是被吞进层块）", () => {
+    const { imports } = splitLeadingImports(`@layer a, b;\n@import "imp.css";\n#x{color:red}`);
+    expect(imports[0]).toContain("@layer a, b;");
+  });
 });
 
 describe("#225 §4.2：applyTheme 切换管线", () => {
