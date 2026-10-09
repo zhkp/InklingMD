@@ -167,6 +167,14 @@ pub(crate) fn safe_zip_target(dest: &Path, entry_name: &str) -> Result<PathBuf, 
     if name.starts_with('/') {
         return Err(format!("压缩包条目为绝对路径（{entry_name}）→ 拒绝整包（zip slip）"));
     }
+    // 盘符形态（`C:/…`）在 POSIX 上会被当成**普通相对路径**（只是名字里带冒号）→ 必须显式拒绝，
+    // 否则同一份压缩包在 Windows 被拒、在 Linux 被接受，判据不可移植（CI 在 ubuntu 上抓到过）。
+    let head = name.split('/').next().unwrap_or("");
+    let bytes = head.as_bytes();
+    let is_drive = bytes.len() == 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic();
+    if is_drive {
+        return Err(format!("压缩包条目为绝对路径（{entry_name}）→ 拒绝整包（zip slip）"));
+    }
     let mut out = PathBuf::from(dest);
     for part in name.split('/') {
         if part.is_empty() || part == "." {
