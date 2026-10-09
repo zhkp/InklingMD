@@ -179,4 +179,35 @@ export function parentDirOf(absPath: string): string {
   return dirNameOf(normalizePath(absPath));
 }
 
+/** 递归列目录（导入文件夹时的包结构归一化需要包内**相对路径全集**） */
+export async function walkThemeDir(
+  dir: string,
+  maxDepth = 3,
+): Promise<{ entries: { path: string; kind: "file" | "dir" }[]; skipped: string[]; issues: string[] }> {
+  const out: { path: string; kind: "file" | "dir" }[] = [];
+  const skipped: string[] = [];
+  const issues: string[] = [];
+
+  const walk = async (current: string, rel: string, depth: number): Promise<void> => {
+    if (depth > maxDepth) {
+      issues.push(`目录层级超过 ${maxDepth} 层，未继续下探：${rel || "."}（§3.1 只允许下探 1 层）`);
+      return;
+    }
+    const scan = await scanThemesDir(current);
+    skipped.push(...scan.skipped.map((s) => (rel ? `${rel}/${s}` : s)));
+    for (const entry of scan.entries) {
+      const childRel = rel ? `${rel}/${entry.name}` : entry.name;
+      if (entry.is_dir) {
+        out.push({ path: childRel, kind: "dir" });
+        await walk(entry.path, childRel, depth + 1);
+      } else {
+        out.push({ path: childRel, kind: "file" });
+      }
+    }
+  };
+
+  await walk(dir, "", 1);
+  return { entries: out, skipped, issues };
+}
+
 export { readTextFile };

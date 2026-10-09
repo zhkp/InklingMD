@@ -489,6 +489,9 @@ export function planBundledSync(
     const key = normalizeRelPath(e.css).toLowerCase();
     const live = runtimeByCss.get(key);
     const srcHash = sourceHashes.get(key);
+    // 源副本本身读不到（安装包缺文件 / 打包遗漏）→ **不计划复制**（复制一个不存在的源只会失败），
+    // 由调用方在 issues 里显式登记（不静默）
+    if (srcHash === undefined) continue;
     if (!live) {
       copy.push(e);
       reasons[e.slug] = "运行时副本缺失 → 从源副本补齐（N15）";
