@@ -209,8 +209,10 @@ export const useTheme = create<ThemeState>((set, get) => {
         });
         return;
       }
-      applyThemeWithSnapshot(theme);
+      // 快照缺失的磁盘主题 → 先切身份（属性 + 持久化），再由读盘路径补 CSS 并落快照
+      const needsDiskLoad = applyThemeWithSnapshot(theme);
       set({ themeId: theme.id, mode: theme.mode });
+      if (needsDiskLoad) void loadThemeFromDisk(set, theme.id);
     },
 
     setMode: (mode) => {
@@ -290,15 +292,15 @@ export const useTheme = create<ThemeState>((set, get) => {
  * 切换主题：优先用「快照里的 CSS」（磁盘主题），否则用描述符自带的文本；
  * 内置基线（`css.kind === "none"`）→ 卸载主题样式。
  */
-function applyThemeWithSnapshot(theme: AppTheme): void {
+function applyThemeWithSnapshot(theme: AppTheme): boolean {
   const hash = theme.hash;
   if (theme.css?.kind === "file" && hash) {
     const snap = readSnapshot(theme.id, hash);
     if (snap) {
       applyTheme(theme, { css: snap.css });
-      return;
+      return false;
     }
-    // 快照缺失：先把主题切过去（属性 + 持久化），CSS 等读盘完成后由调用方再注入
+    // 快照缺失：先把主题切过去（属性 + 持久化），CSS 由读盘路径补齐（调用方据返回值触发）
     recordSnapshotState({
       last: "missing",
       themeId: theme.id,
@@ -306,9 +308,10 @@ function applyThemeWithSnapshot(theme: AppTheme): void {
       detail: "切换时快照缺失 → 由读盘路径补齐（允许一次可见切换）",
     });
     applyTheme(theme, { css: null });
-    return;
+    return true;
   }
   applyTheme(theme);
+  return false;
 }
 
 /** 处理来自其他窗口的主题切换（P2-3：未知 themeId 不切换，等清单/快照就绪） */
@@ -337,6 +340,8 @@ function applyRemoteTheme(remoteValue: string, set: (patch: Partial<ThemeState>)
         hash: theme.hash,
         detail: "跨窗口：快照未就绪 → 等快照 key 到达后再切换（P2-3）",
       });
+      // 本窗口也能读盘：补上并落快照后，pending 的重试路径即可完成切换（不让远端等空）
+      void loadThemeFromDisk(set, theme.id);
       return;
     }
   } else {
@@ -461,7 +466,13 @@ async function loadThemeFromDisk(set: SetState, themeId: string): Promise<void> 
   const theme = getTheme(themeId);
   if (!theme || theme.css?.kind !== "file") return;
   try {
-    const assetRoot = normalizePath(await appDataDir());
+    // `assetRoot` = assetProtocol.scope 的根（应用数据目录）；浏览器/E2E 无 Tauri path API → 回落主题目录
+    let assetRoot: string;
+    try {
+      assetRoot = normalizePath(await appDataDir());
+    } catch {
+      assetRoot = dirNameOf(theme.css.path);
+    }
     const { result } = await loadThemeCss({
       themeId,
       filePath: theme.css.path,
