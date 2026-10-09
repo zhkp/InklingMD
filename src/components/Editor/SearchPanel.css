@@ -139,7 +139,5 @@
 }
 
 /* 深色主题适配 */
-[data-theme="dark"] .search-match {
-  background: var(--content-search-match-bg);
-}
+/* #225 归并：原 dark 侧的搜索命中配色覆盖已删除（token 自身随主题翻转） */
 }

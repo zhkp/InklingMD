@@ -189,11 +189,8 @@ select:focus-visible,
   box-shadow: var(--ring);
 }
 
-/* 文本选择颜色跟随强调色 */
+/* 文本选择颜色跟随强调色（#225：dark 侧的重复覆盖已归并 —— 该 token 自身随主题翻转） */
 ::selection {
-  background: var(--shell-selection-bg);
-}
-[data-theme="dark"] ::selection {
   background: var(--shell-selection-bg);
 }
 
@@ -529,9 +526,6 @@ button.save-indicator:focus-visible {
   background: var(--content-drop-indicator);
   margin: -1px 0;
   box-shadow: var(--content-drop-indicator-shadow);
-}
-[data-theme="dark"] .inkling-block-handle {
-  color: var(--content-block-handle);
 }
 
 /* Milkdown 编辑区容器样式 */
@@ -1328,24 +1322,10 @@ button.save-indicator:focus-visible {
   --content-search-current-fg: #ffffff;
 }
 
-/* 以下为 [data-theme="dark"] 散落覆盖规则。#223 已将其中颜色值 token 化（规则保留）；
-   纯颜色覆盖规则的归并删除属于 #225（清单见本批交付）。 */
-
-[data-theme="dark"] .save-indicator.save-ok {
-  color: var(--success);
-}
-[data-theme="dark"] .save-indicator.save-error {
-  color: var(--danger);
-}
-
-[data-theme="dark"] .editor-scroll .milkdown blockquote {
-  border-left-color: var(--content-quote-border);
-  background: var(--content-quote-bg);
-}
-
-[data-theme="dark"] .editor-scroll .milkdown hr {
-  border-top-color: var(--border);
-}
+/* #225 归并：原本散落于此的 [data-theme="dark"] 纯颜色覆盖规则已删除 ——
+   这些声明引用的 token 自身随主题翻转（#223 已逐条 token 化），保留只会形成双份真相；
+   仅保留**结构属性**规则（::-webkit-scrollbar-* 的 border/background-clip）与 .split-pane。
+   归并清单与计数核对见 docs/theme-dark-rules-split-223.md（#223 交付）与矩阵 D6/D30。 */
 
 /* 深色滚动条：轨道透明，滑块更亮 */
 [data-theme="dark"] ::-webkit-scrollbar-thumb {
@@ -1358,30 +1338,6 @@ button.save-indicator:focus-visible {
   border: 2px solid transparent;
   background-clip: padding-box;
 }
-
-[data-theme="dark"] .editor-scroll .milkdown th {
-  background: var(--content-table-head-bg);
-}
-
-[data-theme="dark"] .editor-scroll .milkdown .column-resize-handle {
-  background: var(--content-table-handle);
-}
-
-[data-theme="dark"] .editor-scroll .milkdown .selectedCell::after {
-  background: var(--content-table-selection-bg);
-}
-
-[data-theme="dark"] .editor-scroll .milkdown .frontmatter-label,
-[data-theme="dark"] .editor-scroll .milkdown .toc-label {
-  background: var(--content-frontmatter-label-bg);
-}
-
-[data-theme="dark"] .editor-scroll .milkdown .toc-list .toc-item a,
-[data-theme="dark"] .editor-scroll .milkdown sup.footnote-ref a,
-[data-theme="dark"] .editor-scroll .milkdown .footnote-definition .footnote-backref {
-  color: var(--content-link);
-}
-
 
 /* ===== v0.8.0：图片缩放/对齐/行内 ===== */
 .milkdown-image-wrap {

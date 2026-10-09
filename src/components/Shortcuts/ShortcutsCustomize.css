@@ -192,9 +192,5 @@
 }
 
 /* 深色主题适配 */
-[data-theme="dark"] .sc-binding-capturing {
-  background: var(--shell-capture-bg);
-  border-color: var(--shell-capture-border);
-  color: var(--shell-capture-fg);
-}
+/* #225 归并：原 dark 侧的捕获态配色覆盖已删除（相关 token 自身随主题翻转） */
 }

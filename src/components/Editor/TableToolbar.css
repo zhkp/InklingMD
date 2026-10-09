@@ -38,7 +38,9 @@
 }
 
 .tt-btn:hover {
-  background: var(--btn-hover-bg);
+  /* #225 复核：改用语义 token（light 下与 --btn-hover-bg 同值；dark 下保留 #223 调过的值），
+     这样原先的 [data-theme="dark"] 覆盖才真正冗余可删 */
+  background: var(--content-table-toolbar-hover);
   color: var(--text);
 }
 
@@ -120,8 +122,5 @@
 }
 
 /* 深色主题适配 */
-[data-theme="dark"] .tt-btn:hover {
-  background: var(--content-table-toolbar-hover);
-  color: var(--text);
-}
+/* #225 归并：原 dark 侧的按钮悬浮配色覆盖已删除（token 自身随主题翻转） */
 }

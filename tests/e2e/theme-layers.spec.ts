@@ -236,14 +236,144 @@ test.describe("CSS 层级模型（#224 S12/S13，dev）", () => {
   });
 });
 
-// 以下断言的「被断言对象」由后续 PR 提供，届时移除 skip：
-// - S7：#inkling-theme 位于 App.css 之后、#inkling-custom-theme 之前（#225）
-// - S8：首帧 rAF 前 data-theme 就位（#225 main.tsx 顶部静态导入）
-// - S12 行为级：同属性主题值在层竞争中胜出（#225/#306）
-// - S14：@keyframes/@font-face 全局名称不被主题夺走（#306/#225）
-test.describe.skip("主题层行为断言（等待 #225/#306 被断言对象，#224 已定义口径）", () => {
-  test("S7 DOM 顺序冒烟（dev-only）", () => {});
-  test("S8 首帧 data-theme 就位（addInitScript rAF）", () => {});
-  test("S12 行为级：主题值胜出 base", () => {});
-  test("S14 全局名称不泄漏（含主题引用应用侧 keyframes 负例）", () => {});
+// ── #225 落地：S7 / S8 / S12 行为级 / S14 ────────────────────────────────────
+test.describe("主题层行为断言（#225 落地）", () => {
+  test("S7 DOM 顺序冒烟（dev-only）：statement 在首位，theme 先于 user（自定义 CSS 最高层）", async ({
+    page,
+  }) => {
+    await openMockWorkspace(page);
+    const probe = await page.evaluate(() => {
+      const ids = [...document.head.querySelectorAll("style")].map((el) => el.id || "(anon)");
+      return { ids, firstStyleId: document.head.querySelector("style")?.id ?? "" };
+    });
+    // N1：层序声明必须是 <head> 的第一个样式块（层序由首次出现决定）
+    expect(probe.firstStyleId).toBe("inkling-layer-statement");
+    const iTheme = probe.ids.indexOf("inkling-theme");
+    const iUser = probe.ids.indexOf("inkling-custom-theme");
+    // 两者同时存在时必须 theme < user（N5：插入到 <head> 末尾即可；自定义 CSS 最后 = 最高层）
+    if (iTheme >= 0 && iUser >= 0) expect(iTheme).toBeLessThan(iUser);
+    // 说明：内置基线 css.kind = none → 本 PR 的 dev 首帧没有 #inkling-theme；
+    // 其注入次序（theme 先、user 后）由 tests/theme/theme-injection.test.ts 确定性覆盖，
+    // 磁盘主题（#307/#308）落地后本断言自动升级为强断言。
+  });
+
+  /**
+   * S8 的采集口径（与 G3「首帧前 data-theme 已就位」等价可判定的形式）：
+   * 在**应用内容首次出现的那一帧**（`#root` 第一次有子节点的 rAF）记录 `data-theme`。
+   * 若属性是「渲染后」才写上的，此处读到的就会是默认值而不是 stored 主题 → 断言失败。
+   */
+  const installFirstPaintRecorder = async (page: Page, stored: string | null) => {
+    await page.addInitScript((storedThemeId: string | null) => {
+      if (storedThemeId === null) localStorage.removeItem("inkling-theme");
+      else localStorage.setItem("inkling-theme", storedThemeId);
+      const w = window as unknown as { __firstPaintTheme?: string | null };
+      delete w.__firstPaintTheme;
+      const tick = () => {
+        const root = document.getElementById("root");
+        if (root && root.childElementCount > 0) {
+          w.__firstPaintTheme = document.documentElement.getAttribute("data-theme");
+          return;
+        }
+        requestAnimationFrame(tick);
+      };
+      requestAnimationFrame(tick);
+    }, stored);
+  };
+
+  test("S8 首帧就位：stored themeId = builtin:dark → 应用内容首帧时 data-theme 已是 dark（反 FOUC，G3）", async ({
+    page,
+  }) => {
+    await installFirstPaintRecorder(page, "builtin:dark");
+    await openMockWorkspace(page);
+    await page.waitForFunction(
+      () => (window as unknown as { __firstPaintTheme?: string | null }).__firstPaintTheme !== undefined,
+      undefined,
+      { timeout: 15_000 },
+    );
+    const firstPaintTheme = await page.evaluate(
+      () => (window as unknown as { __firstPaintTheme?: string | null }).__firstPaintTheme,
+    );
+    // 内容一出现就已经是正确的明暗 —— 不存在「先亮后暗」的可见切换
+    expect(firstPaintTheme).toBe("dark");
+    // 权威源与派生属性一致（§3.2/C3）
+    await expect(page.locator("html")).toHaveAttribute("data-theme-id", "builtin:dark");
+  });
+
+  test("S8 首装：无存储 → 按 prefers-color-scheme 决定首次默认（C7）", async ({ page }) => {
+    await installFirstPaintRecorder(page, null);
+    await openMockWorkspace(page);
+    await page.waitForFunction(
+      () => (window as unknown as { __firstPaintTheme?: string | null }).__firstPaintTheme !== undefined,
+      undefined,
+      { timeout: 15_000 },
+    );
+    // Playwright 默认 prefers-color-scheme: light
+    expect(
+      await page.evaluate(
+        () => (window as unknown as { __firstPaintTheme?: string }).__firstPaintTheme,
+      ),
+    ).toBe("light");
+    await expect(page.locator("html")).toHaveAttribute("data-theme-id", "builtin:light");
+  });
+
+  test("S12 行为级：同属性同特异性下 @layer theme 胜出 @layer base（与 DOM 顺序无关）", async ({
+    page,
+  }) => {
+    await openMockWorkspace(page);
+    await openFile(page, "readme.md");
+    const h1 = page.locator(".editor-scroll .milkdown h1").first();
+    await expect(h1).toBeVisible({ timeout: 10_000 });
+
+    await page.addStyleTag({
+      content: "@layer base { .editor-scroll .milkdown h1 { color: rgb(1, 1, 1); } }",
+    });
+    await page.addStyleTag({
+      content: "@layer theme { .editor-scroll .milkdown h1 { color: rgb(2, 2, 2); } }",
+    });
+    await expect(h1).toHaveCSS("color", "rgb(2, 2, 2)");
+
+    // 反向：base 层**后加**的规则（同特异性）仍不能压过 theme —— 层序决定，与块内/DOM 顺序无关
+    await page.addStyleTag({
+      content: "@layer base { .editor-scroll .milkdown h1 { color: rgb(3, 3, 3); } }",
+    });
+    await expect(h1).toHaveCSS("color", "rgb(2, 2, 2)");
+  });
+
+  test("S14 全局名称不泄漏：主题层的带前缀名称不夺走应用侧 fade-in / 无未加前缀的主题字体名", async ({
+    page,
+  }) => {
+    await openMockWorkspace(page);
+    await page.addStyleTag({
+      content: `@layer theme {
+        @keyframes tdeadbeef-fade-in { from { opacity: 0 } to { opacity: 1 } }
+        @font-face { font-family: "tdeadbeef-SampleFont"; src: local("X"); }
+      }`,
+    });
+    const probe = await page.evaluate(() => {
+      const out: { keyframes: string[]; fonts: string[] } = { keyframes: [], fonts: [] };
+      const collect = (rules: CSSRuleList) => {
+        for (const rule of Array.from(rules)) {
+          if (rule.constructor.name === "CSSKeyframesRule") out.keyframes.push((rule as CSSKeyframesRule).name);
+          if (rule.constructor.name === "CSSFontFaceRule")
+            out.fonts.push((rule as CSSFontFaceRule).style.getPropertyValue("font-family"));
+          const inner = (rule as unknown as { cssRules?: CSSRuleList }).cssRules;
+          if (inner) collect(inner);
+        }
+      };
+      for (const sheet of Array.from(document.styleSheets)) {
+        try {
+          collect(sheet.cssRules);
+        } catch {
+          continue;
+        }
+      }
+      return out;
+    });
+    // 应用侧通用名仍在（未被主题夺走），主题副本带前缀
+    expect(probe.keyframes).toContain("fade-in");
+    expect(probe.keyframes).toContain("tdeadbeef-fade-in");
+    // 反向（可失败形态）：文档里 `fade-in` **恰好一个** —— 若主题以未加前缀的名字注入，
+    // 这里会数到 2（#306 的前缀化 + 引用重写另有强断言：tests/e2e/typora-shim.spec.ts）
+    expect(probe.keyframes.filter((n) => n === "fade-in")).toHaveLength(1);
+  });
 });

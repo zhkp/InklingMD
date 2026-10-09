@@ -116,7 +116,7 @@
     }
   },
   "injectionFunctions": [
-    { "file": "src/store/theme.ts", "names": ["applyCustomCSS"] }
+    { "file": "src/theme/inject.ts", "names": ["writeStyle"] }
   ],
   "//innerHTMLAllowlist": "S15 点级豁免：file→允许的 innerHTML 赋值次数（新增一处即失败，须评审登记）",
   "innerHTMLAllowlist": [
