@@ -208,6 +208,8 @@ export function currentInjectedThemeCss(): string | null {
 }
 
 // 模块顶层副作用：main.tsx 顶部静态 import 本模块即完成「首帧前 data-theme 就位」（G3）
-if (typeof window !== "undefined" && typeof document !== "undefined") {
-  bootstrapFirstFrameTheme();
-}
+// 首帧结果对外导出：#307 的读盘路径据此决定是否需要异步补主题（`needsAsyncLoad`）。
+export const firstFrame: FirstFrameResult | undefined =
+  typeof window !== "undefined" && typeof document !== "undefined"
+    ? bootstrapFirstFrameTheme()
+    : undefined;
