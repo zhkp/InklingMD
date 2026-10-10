@@ -1,0 +1,10 @@
+# 预装第三方主题（#308）：随包 CSS 与许可全文必须**逐字节与上游一致**
+# —— docs/theme-licenses.json 登记了 bytes + sha256，check-theme-licenses 会逐字节对账。
+# 禁用换行归一化，避免 Windows 检出把 LF 变 CRLF，导致「登记与实物漂移」或门禁在本地失败。
+src-tauri/resources/themes/*.css -text
+docs/licenses/* -text
+
+# 生成的清单/署名文件：固定 LF（跨平台文本一致，diff 干净）
+src-tauri/resources/themes/manifest.json text eol=lf
+docs/theme-licenses.json text eol=lf
+THIRD-PARTY.md text eol=lf

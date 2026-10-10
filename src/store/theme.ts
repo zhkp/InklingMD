@@ -369,6 +369,18 @@ async function notify(title: string, body: string, kind: "info" | "warning" | "e
   }
 }
 
+/**
+ * 绝对路径 → 可加载 URL（`#306` §C9 的 `toAssetUrl`）。
+ *
+ * 桌面端走 `convertFileSrc`（asset 协议）；**非桌面端（浏览器预览 / E2E）没有 asset 协议**，
+ * `convertFileSrc` 会直接抛错——主题里只要有一个声明级 `url()` 就会因此把整次读盘打成失败并回落内置主题。
+ * 故这里降级为等价形态的 URL（同样的 `asset://localhost/` 前缀，E2E 可断言），保证「读盘 → 改写 → 注入」链路在浏览器里也真实跑通。
+ */
+function toAssetUrlSafe(absPath: string): string {
+  if (isTauri()) return convertFileSrc(absPath);
+  return `asset://localhost/${encodeURIComponent(absPath)}`;
+}
+
 /** 路径最后一段（跨平台分隔符） */
 function basenameOf(p: string): string {
   const parts = normalizePath(p).split(/[\\/]/);
@@ -477,7 +489,7 @@ async function loadThemeFromDisk(set: SetState, themeId: string): Promise<void> 
       themeId,
       filePath: theme.css.path,
       assetRoot,
-      io: { readFile: (abs) => readThemeFile(abs), toAssetUrl: (abs) => convertFileSrc(abs) },
+      io: { readFile: (abs) => readThemeFile(abs), toAssetUrl: toAssetUrlSafe },
     });
     if (result.rejected) {
       throw new Error("主题 CSS 解析失败（整包拒绝，不注入半解析产物）");

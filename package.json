@@ -17,7 +17,8 @@
     "e2e:install": "playwright install --with-deps chromium",
     "benchmark": "node tests/perf/benchmark.mjs",
     "check:build-layers": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\" && vite build && node scripts/check-theme-build-assets.mjs",
-    "check:theme-manifest": "node scripts/check-theme-manifest.mjs"
+    "check:theme-manifest": "node scripts/check-theme-manifest.mjs",
+    "check:theme-licenses": "node scripts/check-theme-licenses.mjs"
   },
   "dependencies": {
     "@codemirror/commands": "^6.10.4",
