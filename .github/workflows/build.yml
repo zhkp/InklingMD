@@ -46,6 +46,13 @@ jobs:
       - name: Run unit & component tests
         run: pnpm test
 
+      # 预装主题的门禁（#308 §3.3 + §4.2）：许可登记完整性 / 两侧 slug 集合一致 /
+      # 随包实物字节与 sha256 / 体积预算。脚本 exit 1 即阻断（不是口头约定）。
+      - name: Check bundled theme licenses & budgets
+        run: |
+          pnpm check:theme-licenses
+          pnpm check:theme-manifest
+
       # Rust 单测：commands 与 lib 的 #[cfg(test)] 模块（#47/#48 新增覆盖）
       # 平台无关，随 test job 矩阵在 Windows + Linux 双平台跑
       - name: Install Tauri Linux system deps

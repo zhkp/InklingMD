@@ -1,4 +1,41 @@
 {
   "v": 1,
-  "themes": []
+  "themes": [
+    {
+      "slug": "drake",
+      "css": "drake.css",
+      "name": "Drake",
+      "mode": "light"
+    },
+    {
+      "slug": "drake-dark",
+      "css": "drake-dark.css",
+      "name": "Drake Dark",
+      "mode": "dark"
+    },
+    {
+      "slug": "lapis",
+      "css": "lapis.css",
+      "name": "Lapis",
+      "mode": "light"
+    },
+    {
+      "slug": "lapis-dark",
+      "css": "lapis-dark.css",
+      "name": "Lapis Dark",
+      "mode": "dark"
+    },
+    {
+      "slug": "notion",
+      "css": "notion.css",
+      "name": "Notion",
+      "mode": "light"
+    },
+    {
+      "slug": "notion-dark",
+      "css": "notion-dark.css",
+      "name": "Notion Dark",
+      "mode": "dark"
+    }
+  ]
 }
