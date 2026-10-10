@@ -65,10 +65,55 @@ describe("preloadLocalImports：递归预读与保护", () => {
       "/themes/l3.css": `@import "l4.css";`,
       "/themes/l4.css": `h1{}`,
     };
-    const sources = await preloadLocalImports("/themes", files["/themes/l1.css"], io(files).readFile, 2);
+    const sources = await preloadLocalImports("/themes", files["/themes/l1.css"], io(files).readFile, {
+      maxImportDepth: 2,
+    });
     expect(sources.has("/themes/l2.css")).toBe(true);
     expect(sources.has("/themes/l3.css")).toBe(true);
     expect(sources.has("/themes/l4.css")).toBe(false);
+  });
+
+  it("越界 @import 被拦下且**不读取**（默认根 = 主题目录）", async () => {
+    const files = {
+      "/themes/x.css": `@import "../shared.css";\n#write{}`,
+      "/shared.css": `SECRET{color:red}`,
+    };
+    const blocked: string[] = [];
+    const sources = await preloadLocalImports("/themes", files["/themes/x.css"], io(files).readFile, {
+      onBlocked: (target, abs) => blocked.push(`${target}→${abs}`),
+    });
+    expect([...sources.keys()]).toEqual([]);
+    expect(blocked).toEqual(["../shared.css→/shared.css"]);
+  });
+
+  it("允许根内的相对共享仍可用（assetRoot = 应用数据目录）", async () => {
+    const files = {
+      "/appdata/themes/dark/x.css": `@import "../shared/common.css";\n#write{}`,
+      "/appdata/themes/shared/common.css": `body{margin:0}`,
+    };
+    const sources = await preloadLocalImports(
+      "/appdata/themes/dark",
+      files["/appdata/themes/dark/x.css"],
+      io(files).readFile,
+      { assetRoot: "/appdata" },
+    );
+    expect(sources.get("/appdata/themes/shared/common.css")).toContain("margin");
+  });
+
+  it("同前缀兄弟目录不算「根内」（路径边界比较，非字符串前缀）", async () => {
+    const files = {
+      "/appdata/themes/x.css": `@import "../../appdata-evil/leak.css";`,
+      "/appdata-evil/leak.css": "LEAK",
+    };
+    const blocked: string[] = [];
+    const sources = await preloadLocalImports(
+      "/appdata/themes",
+      files["/appdata/themes/x.css"],
+      io(files).readFile,
+      { assetRoot: "/appdata", onBlocked: (t) => blocked.push(t) },
+    );
+    expect([...sources.keys()]).toEqual([]);
+    expect(blocked).toHaveLength(1);
   });
 
   it("目标缺失不算错误（真实主题包的可选资源）：不预读，由流水线登记丢弃", async () => {
@@ -118,6 +163,25 @@ describe("loadThemeCss：读盘 + 预读 + #306 改写组装", () => {
     });
     expect(result.diagnostics.some((d) => d.kind === "dropped-url")).toBe(true);
     expect(result.css).not.toContain("asset://localhost/etc/passwd");
+  });
+
+  it("越界 @import：丢弃 + 写诊断，产物里不出现越界文件内容（评审阻塞 2）", async () => {
+    const files = {
+      "/appdata/themes/x.css": `@import "../../../.ssh/id_rsa";\n#write h1{color:red}`,
+      "/.ssh/id_rsa": "SECRET-CONTENT-ROOT:x;",
+    };
+    const { result, blockedImports } = await loadThemeCss({
+      themeId: "user:x",
+      filePath: "/appdata/themes/x.css",
+      assetRoot: "/appdata",
+      io: io(files),
+    });
+    expect(blockedImports).toHaveLength(1);
+    expect(result.css).not.toContain("SECRET-CONTENT-ROOT");
+    expect(result.css).toContain(".editor-scroll .milkdown h1");
+    expect(
+      result.diagnostics.some((d) => d.kind === "dropped-import" && d.reason.includes("越出允许根")),
+    ).toBe(true);
   });
 
   it("解析失败 → 整包拒绝（空产物 + parse-error），不注入半解析内容", async () => {

@@ -46,8 +46,9 @@
 | 体积 | `>512 KB` **拒绝**（可读理由）；`256–512 KB` 可用但**不走快照**（恒定降级，UI 提示）；`≤256 KB` 走快照（零闪烁） |
 | `url(javascript:…)` / `expression(…)` | **显式拒绝**（大小写/空白容错） |
 | 远程资源 | **显式提示**：远程 `@import` 与远程字体不加载（CSP），远程图片可加载但会发网络请求（P1-7 的有意取舍，预留离线开关位） |
-| 本地 `@import` | **导入/切换期递归预读并内联**（`preloadLocalImports`，深度上限 8 + 循环保护）→ 产物中不出现指向 asset 的 `@import` |
-| zip slip | Rust 侧**先全量校验后落盘**：任一条目越出目标目录 → **整包拒绝**（不留半成品）；另加单条 8 MB / 整包 64 MB / 2000 条上限（压缩炸弹） |
+| 本地 `@import` | **导入/切换期递归预读并内联**（`preloadLocalImports`，深度上限 8 + 循环保护）→ 产物中不出现指向 asset 的 `@import`；**解析后的目标必须落在允许根内**（`assetRoot`，与 §C9 的 `url()` 同一判据 `isWithinRoot`），越界**丢弃且不读取** + 写 `dropped-import` 诊断（评审阻塞 2 的闭环） |
+| zip slip | Rust 侧**先全量校验后落盘**：任一条目越出目标目录 → **整包拒绝**（不留半成品） |
+| 压缩炸弹 | 单条 8 MB / 整包 64 MB / 2000 条上限，且**按实际写入字节判定**：zip 头里声明的 uncompressed size **不可信**（可谎报 1024 而实际展开几十 MB），落盘时逐块计数，超限即中止并清理已写文件；`ExtractReport.bytes` 报**实际**写入量（评审阻塞 1 的闭环） |
 | 符号链接 | **不跟随**：扫描跳过、复制跳过、解压跳过，且**逐条登记**（不静默） |
 | 注入方式 | 一律 `textContent`（`#225` 的 `inject.ts`），禁 `innerHTML` |
 
@@ -115,7 +116,9 @@
 | 预装主题：幂等补齐 / 隐藏 / 不误判为 user | `tests/theme/theme-catalog.test.ts`（N13 缺失/不一致/一致三态、N15 大小写与 `my-vue.css` 反例、资源目录一并补齐） |
 | 预装不可被导入覆盖 | `tests/theme/theme-import.test.ts`（`bundled:*` → `duplicate-as-user`，可用选项不含 `overwrite`） |
 | 预装清单载体与字段最小集 | `scripts/check-theme-manifest.mjs`（正例通过；幽灵条目 + 许可字段 → 退出码 1） + `src-tauri/resources/themes/{manifest.json,README.md}` |
-| zip slip / 符号链接 / 递归复制 | Rust `src-tauri/src/commands/themes.rs` 的 6 条单测（`../evil.css` 整包拒绝且不留半成品） |
+| zip slip / 符号链接 / 递归复制 | Rust `src-tauri/src/commands/themes.rs` 的 8 条单测（`../evil.css` 整包拒绝且不留半成品） |
+| **压缩炸弹（谎报尺寸）** | 同上：`extract_zip_rejects_lying_uncompressed_size`（把 local header / central directory 的 uncompressed size 回填成 1024、真实 12 MB → 必须拒绝且不留半成品）+ `extract_zip_report_bytes_are_actual_not_declared`（报告必须是实际字节） |
+| **`@import` 越界读取** | `tests/theme/theme-disk.test.ts`：越界目标**不读取**（`readFile` 桩根本没被调用）+ 产物不含越界内容 + `dropped-import` 诊断含「越出允许根」；对称覆盖「根内 `../shared/x.css` 仍可用」与「同前缀兄弟目录不算根内」 |
 | 包结构归一化 / 体积分档 / 显式拒绝 / 远程提示 | `tests/theme/theme-import.test.ts`（4 种包形态 + 三档边界 + `javascript:`·`expression()` + 远程计数） |
 | 本地 `@import` 内联、资源 `url()` 重写与越界降级 | `tests/theme/theme-disk.test.ts`（与 `#306` 的解析基准、大小写键、丢弃语义逐项对齐） |
 
@@ -128,3 +131,5 @@
 | T3 | 目录层级 >3 层 | `walkThemeDir` 上限 3 层（导入文件夹时）；§3.1 只要求下探 1 层，更深不猜测并登记 |
 | T4 | 导入压缩包仅 `.zip` | 其它归档（`.tar.gz`/`.7z`）不支持，按「不是有效 zip」拒绝并提示 |
 | T5 | 浏览器（E2E）无真实文件对话框 | 导入按钮在非桌面端明确提示「仅桌面端支持」；E2E 覆盖「扫描 → 列表 → 生效 → 持久化」主干，真实对话框/解压由 Rust 单测与真机核对 |
+| T6 | `copy_path`（文件夹导入 / 备份 / 复制为我的主题）不做体积上限 | 其源是**用户本地目录**（与「下载来的 zip」不同信任级）；zip 解压后的暂存内容已被抽解压上限约束，因此下载路径的放大风险闭环在 `extract_zip`。若后续要收紧，可在 `copy_path` 加同一组计数上限 |
+| T7 | 预装清单的 `css` / `dir` 只接受相对路径且不得含 `..` | 清单是随包只读产物，但它驱动「从源副本复制到主题目录」→ 与 zip-slip 同级判据（`parseBundledManifest` 与该条非法即跳过并登记；`check-theme-manifest.mjs` 同判据在发版侧拦截） |

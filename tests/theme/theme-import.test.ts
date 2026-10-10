@@ -261,6 +261,20 @@ describe("§2 新-2 预装清单 + §10 N13/N15", () => {
     expect(r.issues).toHaveLength(2);
   });
 
+  it("清单条目的 css/dir 拒绝绝对路径与 `..`（会驱动复制到主题目录，必须与 zip 同级判据）", () => {
+    const r = parseBundledManifest(
+      manifest([
+        { slug: "ok", css: "ok.css", name: "OK", mode: "light" },
+        { slug: "abs", css: "/etc/passwd", name: "ABS", mode: "light" },
+        { slug: "up", css: "../evil.css", name: "UP", mode: "light" },
+        { slug: "drive", css: "C:\\evil.css", name: "DRIVE", mode: "light" },
+        { slug: "dirup", css: "x.css", dir: "../x", name: "DIRUP", mode: "light" },
+      ]),
+    );
+    expect(r.entries.map((e) => e.slug)).toEqual(["ok"]);
+    expect(r.issues.filter((i) => i.includes("路径不合法"))).toHaveLength(4);
+  });
+
   it("N15 清单驱动识别：相对路径 → slug（大小写不敏感、不做模糊匹配）", () => {
     const entries: BundledManifestEntry[] = [
       { slug: "vue", css: "vue.css", dir: "vue", name: "Vue", mode: "light" },

@@ -72,6 +72,11 @@ if (!manifest) {
         ["dir", dir],
       ]) {
         if (typeof value !== "string" || !value.trim()) continue;
+        // 清单驱动「从源副本复制到主题目录」→ 路径必须相对且在源目录内（与 zip-slip 同级判据）
+        if (value.startsWith("/") || /^[a-zA-Z]:/.test(value) || value.split(/[\\/]/).includes("..")) {
+          fail(`${where}.${field} 必须是相对路径且不得含 \`..\`：${value}`);
+          continue;
+        }
         const target = join(THEMES_DIR, value);
         if (!existsSync(target)) {
           fail(`${where}.${field} 指向的文件不存在：${value}（打包/入库遗漏）`);

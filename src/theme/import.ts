@@ -421,6 +421,16 @@ export function parseBundledManifest(raw: unknown): ParseManifestResult {
       issues.push(`预装清单条目字段缺失（slug/css/name/mode 必填）→ 跳过：${JSON.stringify(t)}`);
       continue;
     }
+    // 清单是随包产物，但一旦被改写就会驱动「复制到主题目录」→ 路径必须先做与 zip 同级的越界判据
+    const dir = typeof t.dir === "string" ? normalizeRelPath(t.dir) : undefined;
+    const unsafeRel = (rel: string): boolean =>
+      rel.startsWith("/") || /^[a-zA-Z]:/.test(rel) || rel.split("/").includes("..");
+    if (unsafeRel(css) || (dir !== undefined && unsafeRel(dir))) {
+      issues.push(
+        `预装清单条目路径不合法（不得为绝对路径或含 \`..\`）：css=${css} dir=${dir ?? "-"} → 跳过该条`,
+      );
+      continue;
+    }
     if (seen.has(slug)) {
       issues.push(`预装清单 slug 重复：${slug} → 只取先出现者`);
       continue;
@@ -429,7 +439,7 @@ export function parseBundledManifest(raw: unknown): ParseManifestResult {
     entries.push({
       slug,
       css,
-      dir: typeof t.dir === "string" ? normalizeRelPath(t.dir) : undefined,
+      dir,
       name,
       mode,
       hiddenByDefault: t.hiddenByDefault === true,

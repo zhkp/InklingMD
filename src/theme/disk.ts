@@ -11,7 +11,7 @@
  * - 资源 `url()` 的允许根 = **assetProtocol.scope 的根**（如应用数据目录），否则同包内 `../fonts/x` 会被判越界降级。
  */
 import { rewriteWithReport, themeCssHash, type RewriteResult } from "./typora/rewrite";
-import { defaultPathApi } from "./typora/path";
+import { defaultPathApi, isWithinRoot, normalizePath } from "./typora/path";
 import type { ThemePathApi, ThemeRewriteContext } from "./typora/types";
 
 /** 读盘依赖（生产用 `readThemeFile` / `convertFileSrc`；单测注入桩，保持纯函数可断言） */
@@ -51,18 +51,35 @@ export function extractImportTargets(css: string): string[] {
   return out;
 }
 
+export interface PreloadOptions {
+  /** `@import` 递归深度上限（P1-6，默认 8，与 `#306` 一致） */
+  maxImportDepth?: number;
+  /**
+   * 允许读取的根（**默认 = themeDir**，保守）：解析后的目标必须落在该根内，否则**丢弃该 `@import`**。
+   * 与 `§C9` 的 `url()` 越界判据**同一套**（`isWithinRoot` 路径边界比较），生产传 `assetRoot` = 应用数据目录，
+   * 这样主题目录区内的合法共享（`../shared/x.css`）仍可用，而 `../../.ssh/id_rsa` 这类越界读取被拦。
+   */
+  assetRoot?: string;
+  path?: ThemePathApi;
+  /** 被拦下的越界目标（调用方据此写诊断，不允许静默丢弃） */
+  onBlocked?: (target: string, abs: string) => void;
+}
+
 /**
  * 递归预读本地 `@import`（P1-6：导入/切换期把本地方案读进来，产物里不允许出现指向 asset 的 `@import`）。
  *
- * 目标缺失（真实主题包常见的可选资源）**不算错误**：不预读 → 流水线丢弃该 `@import` 并登记。
+ * - **越界即拦**（不允许读到允许根之外的文件，更不允许内联进注入产物）；
+ * - 目标缺失（真实主题包常见的可选资源）**不算错误**：不预读 → 流水线丢弃该 `@import` 并登记。
  */
 export async function preloadLocalImports(
   themeDir: string,
   css: string,
   readFile: (absPath: string) => Promise<string>,
-  maxImportDepth = 8,
-  path: ThemePathApi = defaultPathApi,
+  options: PreloadOptions = {},
 ): Promise<Map<string, string>> {
+  const path = options.path ?? defaultPathApi;
+  const maxImportDepth = options.maxImportDepth ?? 8;
+  const root = normalizePath(options.assetRoot ?? themeDir);
   const sources = new Map<string, string>();
   const seen = new Set<string>();
 
@@ -70,6 +87,11 @@ export async function preloadLocalImports(
     if (depth >= maxImportDepth) return;
     for (const target of extractImportTargets(text)) {
       const abs = path.resolve(themeDir, target);
+      if (!isWithinRoot(abs, root)) {
+        // 越界：不读、不内联（与 §C9 的 url() 越界对称）
+        options.onBlocked?.(target, abs);
+        continue;
+      }
       const key = abs.toLowerCase();
       if (seen.has(key)) continue; // 循环引用保护
       seen.add(key);
@@ -96,6 +118,8 @@ export interface LoadThemeCssResult {
   importSources: Map<string, string>;
   /** 主题文件所在的目录（资源解析基准） */
   themeDir: string;
+  /** 被拦下的越界 `@import`（已写进 `result.diagnostics`，这里供调用方观测/断言） */
+  blockedImports: { target: string; abs: string }[];
 }
 
 /** 读盘 + 预读 `@import` + 兼容层改写（#307 §6.1 的第③层） */
@@ -103,13 +127,13 @@ export async function loadThemeCss(opts: LoadThemeCssOptions): Promise<LoadTheme
   const path = opts.path ?? defaultPathApi;
   const themeDir = path.dirname(opts.filePath);
   const raw = await opts.io.readFile(opts.filePath);
-  const importSources = await preloadLocalImports(
-    themeDir,
-    raw,
-    opts.io.readFile,
-    opts.maxImportDepth ?? 8,
+  const blocked: { target: string; abs: string }[] = [];
+  const importSources = await preloadLocalImports(themeDir, raw, opts.io.readFile, {
+    maxImportDepth: opts.maxImportDepth ?? 8,
+    assetRoot: opts.assetRoot,
     path,
-  );
+    onBlocked: (target, abs) => blocked.push({ target, abs }),
+  });
   const ctx: ThemeRewriteContext = {
     themeId: opts.themeId,
     themeDir,
@@ -118,7 +142,16 @@ export async function loadThemeCss(opts: LoadThemeCssOptions): Promise<LoadTheme
     maxImportDepth: opts.maxImportDepth ?? 8,
     assetRoot: opts.assetRoot,
   };
-  return { result: rewriteWithReport(raw, ctx), importSources, themeDir };
+  const result = rewriteWithReport(raw, ctx);
+  // 越界 `@import`：显式登记（与 §C9 的 dropped-url 对称；流水线另外也会给一条通用 dropped-import）
+  for (const item of blocked) {
+    result.diagnostics.push({
+      kind: "dropped-import",
+      target: item.target,
+      reason: `@import 目标越出允许根（${item.abs}）→ 丢弃且**不读取**（§9；与 §C9 的 url() 越界同一判据）`,
+    });
+  }
+  return { result, importSources, themeDir, blockedImports: blocked };
 }
 
 /** 读盘路径的内容 hash（与扫描期 `themeCssHash` 同口径，供断言「快照 key 一致」） */

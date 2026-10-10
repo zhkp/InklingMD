@@ -44,6 +44,33 @@ async function openThemeMenu(page: Page): Promise<void> {
   await expect(page.locator('[data-theme-menu="1"]')).toBeVisible();
 }
 
+/**
+ * 首帧采集口径（与 `theme-layers.spec.ts` 的 S8 一致）：在**应用内容首次出现的那一帧**
+ * （`#root` 第一次有子节点的 rAF）记录主题身份与主题样式是否已注入。
+ * 若身份/样式是「渲染后才补上」的，这里读到的就不是磁盘主题 → 断言失败（这才叫「首帧就位 / 无先闪」）。
+ */
+async function installFirstPaintRecorder(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    const w = window as unknown as {
+      __firstPaint?: { id: string | null; hasStyle: boolean; len: number };
+    };
+    delete w.__firstPaint;
+    const tick = () => {
+      const root = document.getElementById("root");
+      if (root && root.childElementCount > 0) {
+        w.__firstPaint = {
+          id: document.documentElement.getAttribute("data-theme-id"),
+          hasStyle: !!document.getElementById("inkling-theme"),
+          len: document.getElementById("inkling-theme")?.textContent?.length ?? 0,
+        };
+        return;
+      }
+      requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+  });
+}
+
 async function currentState(page: Page) {
   return page.evaluate(() => ({
     themeId: document.documentElement.getAttribute("data-theme-id"),
@@ -95,6 +122,7 @@ test.describe("#307 主题目录 → 列表 → 生效 → 持久化", () => {
 
   test("重启后首帧仍就位（快照路径，无先闪内置浅色）", async ({ page }) => {
     await seedThemes(page);
+    await installFirstPaintRecorder(page);
     await ensureTopbar(page);
     await openThemeMenu(page);
     await page.locator('[data-theme-option="user:probe"]').click();
@@ -104,12 +132,21 @@ test.describe("#307 主题目录 → 列表 → 生效 → 持久化", () => {
 
     // 模拟重启：同源重载（localStorage 保留，主题目录依旧由 mock 播种）
     await page.reload({ waitUntil: "domcontentloaded" });
-    const firstFrame = await page.evaluate(() => ({
-      id: document.documentElement.getAttribute("data-theme-id"),
-      injected: document.getElementById("inkling-theme")?.textContent ?? "",
-    }));
+    // 等「应用内容首次出现那一帧」的记录（重载后 initScript 会重新采集）
+    await expect
+      .poll(async () => page.evaluate(() => (window as unknown as { __firstPaint?: unknown }).__firstPaint ?? null), {
+        timeout: 10_000,
+      })
+      .not.toBeNull();
+    const firstFrame = await page.evaluate(
+      () =>
+        (window as unknown as { __firstPaint?: { id: string | null; hasStyle: boolean; len: number } })
+          .__firstPaint!,
+    );
+    // 首帧（不是「挂载后」）：身份已是磁盘主题，且主题样式表已在
     expect(firstFrame.id).toBe("user:probe");
-    expect(firstFrame.injected).toContain("@layer theme");
+    expect(firstFrame.hasStyle).toBe(true);
+    expect(firstFrame.len).toBeGreaterThan(0);
   });
 
   test("多窗口一致：同 context 两个窗口用同一主题（另一窗口首帧即一致）", async ({ page, context }) => {

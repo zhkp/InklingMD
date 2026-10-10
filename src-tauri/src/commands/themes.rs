@@ -9,7 +9,7 @@
 
 use serde::Serialize;
 use std::fs;
-use std::io;
+use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 
 /// 主题目录扫描结果（单层）
@@ -264,27 +264,65 @@ fn extract_zip_sync(zip_path: &Path, dest: &Path) -> Result<ExtractReport, Strin
         planned.push(Planned { rel, target, is_dir, size: entry.size() });
     }
 
-    // ② 落盘
+    // ② 落盘：**按实际写入字节**计限。zip 头里声明的 uncompressed size **不可信**
+    // （可以谎报 1024 而实际展开几十 MB），`zip` crate 的读取链也只在压缩侧限流 →
+    // 必须在这里逐块计数；超限即中止并清理已写文件（不留半成品）。
     let mut report = ExtractReport { entries: Vec::new(), files: 0, bytes: 0, skipped };
     fs::create_dir_all(dest).map_err(|e| format!("创建目标目录失败: {e}"))?;
+    let mut written: u64 = 0;
+    let mut created: Vec<PathBuf> = Vec::new();
     for item in &planned {
         if item.is_dir {
             fs::create_dir_all(&item.target).map_err(|e| format!("创建目录失败: {e}"))?;
-        } else {
-            if let Some(parent) = item.target.parent() {
-                fs::create_dir_all(parent).map_err(|e| format!("创建目录失败: {e}"))?;
-            }
-            let mut src = archive
-                .by_name(&item.rel)
-                .map_err(|e| format!("重新读取条目 {} 失败: {e}", item.rel))?;
-            let mut out = fs::File::create(&item.target).map_err(|e| format!("写入失败: {e}"))?;
-            io::copy(&mut src, &mut out).map_err(|e| format!("写入失败: {e}"))?;
-            report.files += 1;
-            report.bytes += item.size;
+            report.entries.push(item.rel.clone());
+            continue;
         }
+        if let Some(parent) = item.target.parent() {
+            fs::create_dir_all(parent).map_err(|e| format!("创建目录失败: {e}"))?;
+        }
+        let mut src = archive
+            .by_name(&item.rel)
+            .map_err(|e| format!("重新读取条目 {} 失败: {e}", item.rel))?;
+        let mut out = fs::File::create(&item.target).map_err(|e| format!("写入失败: {e}"))?;
+        created.push(item.target.clone());
+
+        let mut buf = vec![0u8; 64 * 1024];
+        let mut entry_written: u64 = 0;
+        loop {
+            let n = src.read(&mut buf).map_err(|e| format!("读取条目 {} 失败: {e}", item.rel))?;
+            if n == 0 {
+                break;
+            }
+            entry_written += n as u64;
+            if entry_written > MAX_ZIP_ENTRY_BYTES {
+                cleanup_extracted(&created);
+                return Err(format!(
+                    "压缩包条目 {} 实际解压体积超过单条上限 {} 字节（头里声明 {} 字节，不可信）→ 整包拒绝",
+                    item.rel, MAX_ZIP_ENTRY_BYTES, item.size
+                ));
+            }
+            written += n as u64;
+            if written > MAX_ZIP_TOTAL_BYTES {
+                cleanup_extracted(&created);
+                return Err(format!(
+                    "压缩包实际解压总体积超过上限 {} 字节 → 整包拒绝",
+                    MAX_ZIP_TOTAL_BYTES
+                ));
+            }
+            out.write_all(&buf[..n]).map_err(|e| format!("写入失败: {e}"))?;
+        }
+        report.files += 1;
+        report.bytes += entry_written;
         report.entries.push(item.rel.clone());
     }
     Ok(report)
+}
+
+/// 超限中止时清理本次已写出的文件（best-effort：清理失败不影响「已拒绝」这一结论）
+fn cleanup_extracted(created: &[PathBuf]) {
+    for path in created {
+        let _ = fs::remove_file(path);
+    }
 }
 
 /// 预装主题源副本目录（§2 新-2：`$RESOURCE/themes`，内含 `manifest.json`）。
@@ -441,6 +479,82 @@ mod tests {
         assert!(dest2.join("vue.css").is_file());
         assert!(dest2.join("vue").join("font.woff2").is_file());
         assert!(report.entries.iter().any(|e| e == "vue.css"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 把 zip 里**声明**的 uncompressed size（local header +22 / central directory +24）从 `from` 改成 `to`，
+    /// 用来构造「谎报尺寸」的压缩炸弹（真实展开远超声明值，CRC 仍按真实数据算 → 读取不报错）。
+    fn patch_declared_size(bytes: &mut [u8], from: u32, to: u32) {
+        let needle = from.to_le_bytes();
+        let mut patched = 0;
+        let mut i = 0usize;
+        while i + 4 <= bytes.len() {
+            if bytes[i..i + 4] == needle {
+                if i >= 22 && &bytes[i - 22..i - 18] == b"PK\x03\x04" {
+                    bytes[i..i + 4].copy_from_slice(&to.to_le_bytes());
+                    patched += 1;
+                } else if i >= 24 && &bytes[i - 24..i - 20] == b"PK\x01\x02" {
+                    bytes[i..i + 4].copy_from_slice(&to.to_le_bytes());
+                    patched += 1;
+                }
+            }
+            i += 1;
+        }
+        assert_eq!(patched, 2, "应回填 local header 与 central directory 两处声明尺寸");
+    }
+
+    #[test]
+    fn extract_zip_rejects_lying_uncompressed_size() {
+        use std::io::Write;
+        use zip::write::SimpleFileOptions;
+
+        let dir = temp_dir("bomb");
+        let zip_path = dir.join("bomb.zip");
+        const REAL: usize = 12 * 1024 * 1024; // 12 MB 全零：deflate 后只有几十 KB
+        {
+            let file = fs::File::create(&zip_path).unwrap();
+            let mut writer = zip::ZipWriter::new(file);
+            writer.start_file("big.css", SimpleFileOptions::default()).unwrap();
+            writer.write_all(&vec![0u8; REAL]).unwrap();
+            writer.finish().unwrap();
+        }
+        // 谎报：头里声明 1024 字节（真实 12 MB）
+        let mut bytes = fs::read(&zip_path).unwrap();
+        patch_declared_size(&mut bytes, REAL as u32, 1024);
+        fs::write(&zip_path, &bytes).unwrap();
+
+        let dest = dir.join("out");
+        let err = extract_zip_sync(&zip_path, &dest).expect_err("谎报尺寸的压缩包必须被拒（按实际字节判定）");
+        assert!(err.contains("单条上限"), "错误应点明超出单条上限：{err}");
+        // 不留半成品
+        assert!(!dest.join("big.css").exists(), "超限中止后不得留下已写文件");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn extract_zip_report_bytes_are_actual_not_declared() {
+        use std::io::Write;
+        use zip::write::SimpleFileOptions;
+
+        let dir = temp_dir("actual-bytes");
+        let zip_path = dir.join("small.zip");
+        const REAL: usize = 4096;
+        {
+            let file = fs::File::create(&zip_path).unwrap();
+            let mut writer = zip::ZipWriter::new(file);
+            writer.start_file("a.css", SimpleFileOptions::default()).unwrap();
+            writer.write_all(&vec![b'x'; REAL]).unwrap();
+            writer.finish().unwrap();
+        }
+        // 谎报成比真实值**小**：报告必须给实际写入量（否则 UI/日志在撒谎）
+        let mut bytes = fs::read(&zip_path).unwrap();
+        patch_declared_size(&mut bytes, REAL as u32, 128);
+        fs::write(&zip_path, &bytes).unwrap();
+
+        let dest = dir.join("out");
+        let report = extract_zip_sync(&zip_path, &dest).expect("单条不超限时应成功");
+        assert_eq!(report.bytes, REAL as u64, "report.bytes 必须是实际写入量");
+        assert_eq!(fs::read(dest.join("a.css")).unwrap().len(), REAL);
         let _ = fs::remove_dir_all(&dir);
     }
 }
