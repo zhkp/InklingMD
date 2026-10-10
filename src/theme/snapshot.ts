@@ -268,6 +268,12 @@ export interface ThemesIndexEntry {
   hash?: string;
   variantOf?: string;
   source?: "bundled" | "user" | "builtin";
+  /**
+   * 磁盘文件名（#307 追加字段）：**跨窗口读盘与移除都要靠它**——
+   * slug 由文件名归一化而来（`Vue.css` → `vue`），在大小写敏感的文件系统上无法由 slug 反推文件名。
+   * 附加字段对旧读取方无害（`readThemesIndex` 只校验 `id`）。
+   */
+  file?: string;
 }
 
 export function readThemesIndex(): ThemesIndexEntry[] {

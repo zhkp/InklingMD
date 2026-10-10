@@ -15,6 +15,10 @@ pub use search::search_in_workspace;
 pub mod assets;
 pub use assets::{download_remote_image, find_asset_by_hash};
 
+// 主题导入的 IO 层（#307）：扫描 / 递归复制 / 压缩包解压 / 预装目录解析
+pub mod themes;
+pub use themes::{copy_path, extract_zip, resource_themes_dir, scan_theme_dir};
+
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 use std::fs;

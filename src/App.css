@@ -396,6 +396,18 @@ button.save-indicator:focus-visible {
   background: var(--border);
   margin: 5px 4px;
 }
+/* #307 主题菜单分组标签 / 选中态提示 */
+.export-label {
+  font-size: 0.68rem;
+  color: var(--text-muted);
+  padding: 4px 8px 2px;
+  letter-spacing: 0.03em;
+}
+.export-item-hint {
+  margin-left: auto;
+  font-size: 0.68rem;
+  color: var(--accent);
+}
 
 .editor-scroll {
   flex: 1;
