@@ -72,6 +72,12 @@ export const MOCK_TREE: FileNode = {
           children: [],
         },
         {
+          name: "link-anchor-demo.md",
+          path: "/mock-workspace/notes/link-anchor-demo.md",
+          is_dir: false,
+          children: [],
+        },
+        {
           name: "attachment.txt",
           path: "/mock-workspace/notes/attachment.txt",
           is_dir: false,
@@ -87,6 +93,66 @@ export const MOCK_TREE: FileNode = {
     },
   ],
 };
+
+/**
+ * 锚点 E2E 用的填充正文（#299）。
+ *
+ * 目的：把标题组推到首屏之外。否则目标标题初始就可见，"点击后是否滚动"无从观测，
+ * `scrollTop` 增量恒为 0，断言会退化成恒真——这正是 #299 要消灭的形态。
+ */
+const LINK_ANCHOR_FILLER = Array.from(
+  { length: 30 },
+  (_, i) => `填充段落 ${String(i + 1).padStart(2, "0")}：用于把标题组推到首屏之外。`,
+).join("\n\n");
+
+/**
+ * 锚点 fixture（#299 / #297 共用）。约束：
+ * - 链接**全部是纯 `#frag`**：`workspace-file` 形态与自链接住在 `link-relative.md`（#296），
+ *   因为该形态的执行臂要到 #296 才落地，本文件若带上会让 #299/#297 批次出现必然失败的用例；
+ * - 目标标题包含四类 slug 形态：中文同文本、含标点、重复标题、带小数点；
+ * - 编码锚点的空格必须写成 `%20`（CommonMark 的行内链接 destination 不允许裸空格）。
+ */
+const LINK_ANCHOR_DEMO = `# 链接锚点示例
+
+锚点链接（全部为纯 #frag）：
+
+- [中文同文本](#理解问题与方法)
+- [含标点标题](#hello-world)
+- [重复含标点标题-1](#hello-world-1)
+- [重复含标点标题 GitHub 原形](#Hello,%20World!-1)
+- [重复中文标题](#重复标题)
+- [重复中文标题-1](#重复标题-1)
+- [重复中文标题 Milkdown 形](#重复标题-#1)
+- [版本号标题](#v20-release)
+- [编码锚点](#%E7%90%86%E8%A7%A3%E9%97%AE%E9%A2%98%E4%B8%8E%E6%96%B9%E6%B3%95)
+- [不存在的锚点](#不存在的锚点)
+
+${LINK_ANCHOR_FILLER}
+
+## 理解问题与方法
+
+目标一：中文同文本锚点。
+
+## Hello, World!
+
+第一处含标点标题。
+
+## 重复标题
+
+第一处重复标题。
+
+## 重复标题
+
+第二处重复标题。
+
+## Hello, World!
+
+第二处含标点标题。
+
+## v2.0 release
+
+版本号标题（slug 为 v20-release）。
+`;
 
 export const MOCK_FILE_CONTENT: Record<string, string> = {
   "/mock-workspace/notes/readme.md":
@@ -111,6 +177,7 @@ export const MOCK_FILE_CONTENT: Record<string, string> = {
     "# TOC 示例\n\n[TOC]\n\n## 二级标题 A\n\n内容 A。\n\n## 二级标题 B\n\n内容 B。\n",
   "/mock-workspace/notes/link-demo.md":
     "# 链接示例\n\n外部链接：[Example](https://example.com)\n\n锚点链接：[跳转标题](#锚点目标)\n\n## 锚点目标\n\n目标段落内容。\n",
+  "/mock-workspace/notes/link-anchor-demo.md": LINK_ANCHOR_DEMO,
 };
 
 /** 递归查找路径对应的节点（返回引用，可就地修改） */
