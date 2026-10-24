@@ -104,7 +104,7 @@ describe("saveCurrent 按 tab 互斥（issue #148）", () => {
     await useWorkspace.getState().saveCurrent();
 
     // B 的保存真实落盘，而不是被全局 saving 闸静默吞掉
-    expect(writeTextFileMock).toHaveBeenCalledWith("/docs/b.md", "B 编辑");
+    expect(writeTextFileMock).toHaveBeenCalledWith("/docs/b.md", "B 编辑", { mustExist: true });
 
     // A 的对话框此刻返回：保存完成，但不得抢占 B 的活跃状态或污染镜像
     resolveSaveDialog("E:/docs/a.md");

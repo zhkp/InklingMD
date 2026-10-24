@@ -31,6 +31,7 @@ vi.mock("../../src/lib/fs", () => ({
 }));
 
 import { useWorkspace } from "../../src/store/workspace";
+import { WriteError } from "../../src/lib/writeErrors";
 
 function tab(path: string, content: string, diskContent: string): OpenTab {
   return {
@@ -82,7 +83,7 @@ describe("saveCurrent 外部修改冲突保护", () => {
     expect(askMock).not.toHaveBeenCalled();
     expect(fileMtimeMock).toHaveBeenCalledWith("/docs/a.md");
     expect(readTextFileMock).not.toHaveBeenCalled();
-    expect(writeTextFileMock).toHaveBeenCalledWith("/docs/a.md", "本地编辑");
+    expect(writeTextFileMock).toHaveBeenCalledWith("/docs/a.md", "本地编辑", { mustExist: true });
     const s = useWorkspace.getState();
     expect(s.dirty).toBe(false);
     // 保存后基线更新为本次写入内容
@@ -108,21 +109,40 @@ describe("saveCurrent 外部修改冲突保护", () => {
 
     await useWorkspace.getState().saveCurrent();
 
-    expect(writeTextFileMock).toHaveBeenCalledWith("/docs/a.md", "本地编辑");
+    expect(writeTextFileMock).toHaveBeenCalledWith("/docs/a.md", "本地编辑", { mustExist: true });
     expect(useWorkspace.getState().dirty).toBe(false);
     expect(
       useWorkspace.getState().openTabs.find((t) => t.path === "/docs/a.md")?.diskContent,
     ).toBe("本地编辑");
   });
 
-  it("磁盘读取失败（文件被删）：继续尝试保存", async () => {
+  it("磁盘读取失败：不弹冲突确认，由 mustExist 写盘判定文件是否仍在原处（#363）", async () => {
     fileMtimeMock.mockResolvedValue(2_000);
     readTextFileMock.mockRejectedValue(new Error("文件不存在"));
 
     await useWorkspace.getState().saveCurrent();
 
     expect(askMock).not.toHaveBeenCalled();
-    expect(writeTextFileMock).toHaveBeenCalledWith("/docs/a.md", "本地编辑");
+    expect(writeTextFileMock).toHaveBeenCalledWith("/docs/a.md", "本地编辑", { mustExist: true });
+  });
+
+  it("自动保存时文件已不在原处（#363）：不写回、不记 saveError，tab 标记已删除并保留编辑", async () => {
+    fileMtimeMock.mockRejectedValue(new Error("文件不存在"));
+    readTextFileMock.mockRejectedValue(new Error("文件不存在"));
+    writeTextFileMock.mockRejectedValueOnce(new WriteError("TARGET_MISSING"));
+
+    await useWorkspace.getState().saveCurrent({ interactive: false });
+
+    const s = useWorkspace.getState();
+    expect(writeTextFileMock).toHaveBeenCalledTimes(1);
+    expect(s.saveError).toBeNull();
+    expect(s.saving).toBe(false);
+    expect(s.dirty).toBe(true);
+    expect(s.openTabs[0].deletedOnDisk).toBe(true);
+
+    // 标记期间的自动保存直接跳过，不再发起写盘
+    await useWorkspace.getState().saveCurrent({ interactive: false });
+    expect(writeTextFileMock).toHaveBeenCalledTimes(1);
   });
   it("自动保存（非交互）：外部冲突时不弹窗，标记 conflictPending", async () => {
     fileMtimeMock.mockResolvedValue(2_000);
@@ -141,7 +161,7 @@ describe("saveCurrent 外部修改冲突保护", () => {
     readTextFileMock.mockResolvedValue("磁盘基线");
     await useWorkspace.getState().saveCurrent();
     expect(readTextFileMock).toHaveBeenCalledWith("/docs/a.md");
-    expect(writeTextFileMock).toHaveBeenCalledWith("/docs/a.md", "本地编辑");
+    expect(writeTextFileMock).toHaveBeenCalledWith("/docs/a.md", "本地编辑", { mustExist: true });
   });
 
   it.each([

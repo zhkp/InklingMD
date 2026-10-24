@@ -309,6 +309,54 @@ describe("#200 读取在途重命名：tab 归属新路径（幽灵 tab 边界�
   });
 });
 
+describe("目录改名时的在途读取（#363/#366）", () => {
+  it("子文件读取在途时重命名父目录：落定后 tab 建在新路径，旧路径不留痕迹", async () => {
+    // 迁移只覆盖精确路径时，子文件读取会按旧路径建 tab；此后保存被 mustExist 拒写，
+    // 用户被引导「重新创建」→ 旧目录被重建、内容分叉。这里锁住前缀迁移。
+    const inflight = deferred<string>();
+    readTextFileMock.mockReturnValue(inflight.promise);
+
+    const opening = useWorkspace.getState().openFile("/w/notes/x.md");
+    await Promise.resolve();
+    expect(fileRequests.has("/w/notes/x.md")).toBe(true);
+
+    useWorkspace.getState().onFileRenamed("/w/notes", "/w/notes2");
+    // 在途条目已按前缀迁移（新路径立即可查，旧路径不存在）
+    expect(fileRequests.has("/w/notes2/x.md")).toBe(true);
+    expect(fileRequests.has("/w/notes/x.md")).toBe(false);
+
+    inflight.resolve("# 子文件内容");
+    await opening;
+
+    const state = useWorkspace.getState();
+    expect(state.openTabs.map((t) => t.path)).toEqual(["/w/notes2/x.md"]);
+    expect(state.openTabs[0].content).toBe("# 子文件内容");
+    expect(state.activeTabPath).toBe("/w/notes2/x.md");
+    // 加载态与错误表都不留旧路径
+    expect(state.openingFiles.has("/w/notes/x.md")).toBe(false);
+    expect(state.openingFiles.size).toBe(0);
+    expect(state.fileOpenErrors.size).toBe(0);
+  });
+
+  it("子文件在途读取失败 + 重命名父目录：错误记到新路径，旧路径无错误", async () => {
+    const inflight = deferred<string>();
+    readTextFileMock.mockReturnValue(inflight.promise);
+
+    const opening = useWorkspace.getState().openFile("/w/notes/y.md");
+    const caught = opening.catch((e: unknown) => e);
+    await Promise.resolve();
+
+    useWorkspace.getState().onFileRenamed("/w/notes", "/w/notes2");
+    inflight.reject(new Error("读取失败"));
+
+    await expect(caught).resolves.toBeInstanceOf(Error);
+    const state = useWorkspace.getState();
+    expect(state.fileOpenErrors.get("/w/notes2/y.md")).toBe("读取失败");
+    expect(state.fileOpenErrors.has("/w/notes/y.md")).toBe(false);
+    expect(state.openTabs).toHaveLength(0);
+  });
+});
+
 describe("#166 删除文件快照竞态", () => {
   it("快照采集前先 flush 发布防抖：快照内容是最后编辑而非发布前旧内容", () => {
     // 模拟：用户刚输入，编辑器序列化仍在 150ms 防抖窗口内——
@@ -362,6 +410,41 @@ describe("#166 删除文件快照竞态", () => {
     // 黑名单一次性消费；打开错误给出原因
     expect(deletedDuringLoad.size).toBe(0);
     expect(useWorkspace.getState().fileOpenErrors.get("/w/a.md")).toContain("被外部删除");
+  });
+
+  it("读取在途先删除、再改名父目录：黑名单跟着迁移，#166 快照保护不被打掉", async () => {
+    // 删除与改名两个事件交错：请求键迁到新路径后，落定查表用的是**新路径**。
+    // 黑名单如果留在旧路径，`readFileOnce` 与 `ensureTab` 的两次查表都会 miss，
+    // 于是为已删除文件建出干净 tab、读到的内容也不进恢复快照。
+    const inflight = deferred<string>();
+    readTextFileMock.mockReturnValue(inflight.promise);
+
+    const opening = useWorkspace.getState().openFile("/w/notes/x.md");
+    const caught = opening.catch((e: unknown) => e);
+    expect(fileRequests.has("/w/notes/x.md")).toBe(true);
+
+    useWorkspace.getState().onFileDeleted("/w/notes/x.md");
+    expect(deletedDuringLoad.has("/w/notes/x.md")).toBe(true);
+
+    // 紧接着改名父目录：请求键与黑名单必须一起迁到新路径
+    useWorkspace.getState().onFileRenamed("/w/notes", "/w/notes2");
+    expect(fileRequests.has("/w/notes2/x.md")).toBe(true);
+    expect(deletedDuringLoad.has("/w/notes2/x.md")).toBe(true);
+    expect(deletedDuringLoad.has("/w/notes/x.md")).toBe(false);
+
+    inflight.resolve("# 删除前读到的内容");
+    const error = await caught;
+    expect((error as Error).message).toContain("加载期间被外部删除");
+
+    // 新旧路径都不留「已删除文件」的干净 tab
+    expect(useWorkspace.getState().openTabs).toHaveLength(0);
+    // 读到的内容仍写入恢复快照（挂在迁移后的路径下）
+    const snapshots = loadDeletedSnapshots();
+    expect(
+      snapshots.some((s) => s.path === "/w/notes2/x.md" && s.content === "# 删除前读到的内容"),
+    ).toBe(true);
+    // 黑名单一次性消费
+    expect(deletedDuringLoad.size).toBe(0);
   });
 
   it("黑名单消费后同名文件重建可正常打开（不误拦）", async () => {

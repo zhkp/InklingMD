@@ -367,3 +367,30 @@ describe("TabsBar 键盘操作与 ARIA 语义 (#188)", () => {
     expect(switchTab).not.toHaveBeenCalled();
   });
 });
+
+describe("TabsBar 磁盘删除标记（#363）", () => {
+  it("deletedOnDisk 变化时重渲染：标记出现与解除都即时反映到 tab 上", () => {
+    useWorkspace.setState({
+      openTabs: [makeTab({ path: "/docs/a.md" })],
+      activeTabPath: "/docs/a.md",
+    });
+    render(<TabsBar />);
+    const tab = () => screen.getByText("a.md").closest(".tab") as HTMLElement;
+    expect(tab()).not.toHaveClass("tab-deleted-on-disk");
+
+    act(() => {
+      useWorkspace.setState((s) => ({
+        openTabs: s.openTabs.map((t) => ({ ...t, deletedOnDisk: true })),
+      }));
+    });
+    expect(tab()).toHaveClass("tab-deleted-on-disk");
+    expect(tab()).toHaveAttribute("title", "/docs/a.md (已在磁盘上被删除)");
+
+    act(() => {
+      useWorkspace.setState((s) => ({
+        openTabs: s.openTabs.map((t) => ({ ...t, deletedOnDisk: false })),
+      }));
+    });
+    expect(tab()).not.toHaveClass("tab-deleted-on-disk");
+  });
+});

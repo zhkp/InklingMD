@@ -22,6 +22,38 @@ export function dirname(p: string): string {
   return p.slice(0, idx);
 }
 
+/**
+ * 删除确认文案（#366）：一次说清删除对已打开文件的影响——打开中的子文件
+ * tab 会一并关闭；未保存修改会先备份到「可恢复文件」（onFileDeleted 写快照）；
+ * 备份存储空间不足时明确警告会永久丢失。
+ * @param openPaths 位于被删路径下（含自身）的已打开文件
+ * @param dirtyPaths 其中有未保存修改的文件
+ * @param backupWritable 快照存储当前是否可写
+ */
+export function buildDeleteConfirmMessage(
+  node: Pick<FileNode, "name" | "is_dir">,
+  openPaths: string[],
+  dirtyPaths: string[],
+  backupWritable: boolean,
+): string {
+  let msg = node.is_dir
+    ? `确定删除文件夹「${node.name}」及其所有内容吗？`
+    : `确定删除「${node.name}」吗？`;
+  if (node.is_dir && openPaths.length > 0) {
+    msg += `\n\n其中 ${openPaths.length} 个文件正在编辑器中打开，删除后这些标签页会一并关闭。`;
+  }
+  if (dirtyPaths.length === 0) return msg;
+
+  const names = dirtyPaths.slice(0, 3).map(basename).join("、") + (dirtyPaths.length > 3 ? " 等" : "");
+  const subject = node.is_dir
+    ? `${dirtyPaths.length} 个有未保存的修改（${names}）`
+    : `「${node.name}」有未保存的修改`;
+  const lead = node.is_dir ? "\n" : "\n\n";
+  return backupWritable
+    ? `${msg}${lead}${subject}，会先备份到侧边栏「可恢复文件」，之后可恢复为新标签页。`
+    : `${msg}${lead}${subject}。备份存储空间不足，这些修改无法备份，删除后会永久丢失。`;
+}
+
 /** 自定义事件名 */
 export const TREE_MENU_EVENT = "inkling-tree-menu";
 export const TREE_ACTION_EVENT = "inkling-tree-action";

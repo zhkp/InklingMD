@@ -5,6 +5,7 @@
 import { invoke, isTauri, convertFileSrc } from "@tauri-apps/api/core";
 import { resolve as resolvePath } from "@tauri-apps/api/path";
 import { dirNameOf, joinPath, normalizePath } from "./path";
+import { mapWriteError, WriteError } from "./writeErrors";
 
 export { joinPath, normalizePath, dirNameOf, isTauri };
 
@@ -102,16 +103,33 @@ export async function readTextFile(filePath: string): Promise<string> {
   return MOCK_FILE_CONTENT[filePath];
 }
 
-/** 写入文本文件 */
+export interface WriteTextOptions {
+  /** 覆盖已有文档：目标不存在（被删除/改名）时拒绝写入，抛 TARGET_MISSING（issue #363） */
+  mustExist?: boolean;
+  /** 父目录缺失时补建整条目录链。仅用于用户明确同意「在原位置重新创建」 */
+  createParents?: boolean;
+}
+
+/**
+ * 写入文本文件。默认不补建父目录（缺失抛 PARENT_MISSING），目标被目录等占用抛 NOT_A_FILE。
+ */
 export async function writeTextFile(
   filePath: string,
   content: string,
+  options: WriteTextOptions = {},
 ): Promise<void> {
   if (isTauri()) {
-    return invoke<void>("write_text_file", { filePath, content });
+    try {
+      return await invoke<void>("write_text_file", { filePath, content, ...options });
+    } catch (e) {
+      throw mapWriteError(e);
+    }
   }
   // 浏览器 mock：只在内存里记录
   const { MOCK_FILE_CONTENT } = await import("./mockFs");
+  if (options.mustExist && !Object.prototype.hasOwnProperty.call(MOCK_FILE_CONTENT, filePath)) {
+    throw new WriteError("TARGET_MISSING");
+  }
   MOCK_FILE_CONTENT[filePath] = content;
 }
 
@@ -272,16 +290,24 @@ export function uint8ArrayToBase64(data: Uint8Array): string {
  * 桌面端将数据编码为 base64 后调用 Rust write_binary_file 命令（避免 JSON 数字数组导致的 IPC 膨胀）；
  * 浏览器端无真实 fs，仅返回成功（mock 无法持久化二进制）。
  * @param data 字节数组
+ * @param options.createParentDir 父目录缺失时只补建一层（如文档旁的 assets/），
+ *   且要求上一级目录仍存在；默认不建目录（issue #363）
  */
 export async function writeBinaryFile(
   filePath: string,
   data: Uint8Array,
+  options: { createParentDir?: boolean } = {},
 ): Promise<void> {
   if (isTauri()) {
-    return invoke<void>("write_binary_file", {
-      filePath,
-      data: uint8ArrayToBase64(data),
-    });
+    try {
+      return await invoke<void>("write_binary_file", {
+        filePath,
+        data: uint8ArrayToBase64(data),
+        ...options,
+      });
+    } catch (e) {
+      throw mapWriteError(e);
+    }
   }
   // 浏览器 mock：记录到内存二进制表（供 assets 去重与 E2E 断言）
   const { MOCK_BINARY_FILES } = await import("./mockFs");

@@ -84,6 +84,8 @@ describe("saveImageAsset：落盘前按内容查重", () => {
     expect(invokeMock).toHaveBeenCalledWith("write_binary_file", {
       filePath: "/docs/sub/assets/new.png",
       data: expect.any(String),
+      // #363：只允许补建 assets/ 这一层
+      createParentDir: true,
     });
   });
 

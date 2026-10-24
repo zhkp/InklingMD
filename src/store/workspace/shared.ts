@@ -199,3 +199,21 @@ export function wasDeletedDuringLoad(path: string): boolean {
 export function consumeDeletedDuringLoad(path: string): void {
   deletedDuringLoad.delete(path);
 }
+
+/**
+ * 文件 / 目录改名后迁移黑名单的键。
+ *
+ * 这张表的键是**路径**，落定时的查表用的却是请求当前的注册路径
+ * （`readFileOnce` 按请求身份取 `registeredPath`，`ensureTab` 兜底再查一次）。
+ * `onFileRenamed` 把在途请求迁到新路径之后，黑名单如果还留在旧路径，
+ * 两次查表都会 miss：已删除文件照常建出干净 tab、读到的内容也不进恢复快照，
+ * 等于把 #166 的保护整条打掉。所以两者必须一起迁。
+ */
+export function rebaseDeletedDuringLoad(from: string, to: string): void {
+  for (const [path, deletedAt] of [...deletedDuringLoad]) {
+    const nextPath = rebasePathPrefix(path, from, to);
+    if (nextPath === path) continue;
+    deletedDuringLoad.delete(path);
+    deletedDuringLoad.set(nextPath, deletedAt);
+  }
+}

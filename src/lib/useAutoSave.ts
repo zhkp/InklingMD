@@ -10,7 +10,7 @@ const MAX_AUTOSAVE_DEBOUNCE_MS = 60000;
 /**
  * 挂载后监听：
  * - 全局 Ctrl/Cmd+S 键盘事件 → 立即保存
- * - dirty 变为 true 后防抖自动保存（未命名草稿除外；支持连续失败指数退避 2s -> 4s -> 8s... -> 60s；非阻塞静默跳过冲突）
+ * - dirty 变为 true 后防抖自动保存（未命名草稿与磁盘上已不存在的文件除外；支持连续失败指数退避 2s -> 4s -> 8s... -> 60s；非阻塞静默跳过冲突）
  */
 export function useAutoSave() {
   const dirty = useWorkspace((s) => s.dirty);
@@ -21,6 +21,11 @@ export function useAutoSave() {
   const activeTabIsUntitled = useWorkspace((s) => {
     const tab = s.openTabs.find((t) => t.path === s.activeTabPath);
     return tab?.isUntitled ?? false;
+  });
+  // issue #363：活跃文件已不在磁盘原处时暂停自动保存，绝不悄悄写回
+  const activeTabDeletedOnDisk = useWorkspace((s) => {
+    const tab = s.openTabs.find((t) => t.path === s.activeTabPath);
+    return tab?.deletedOnDisk ?? false;
   });
   const saveCurrent = useWorkspace((s) => s.saveCurrent);
 
@@ -53,6 +58,8 @@ export function useAutoSave() {
   useEffect(() => {
     if (!dirty || saving || !currentFile) return;
     if (activeTabIsUntitled) return;
+    // 文件已被删除 / 移动：等用户经 Ctrl+S 或状态栏入口决定去向，或文件恢复后由监听器解除
+    if (activeTabDeletedOnDisk) return;
     // 冲突待处理：暂停自动保存，等待用户通过冲突对话框处理（issue #149）。
     // 否则冲突态下每 2 秒 stat + 全量读盘空转一次，形成隐性 IO 风暴
     if (conflictPending) return;
@@ -91,5 +98,14 @@ export function useAutoSave() {
       }
     }, delay);
     return () => window.clearTimeout(timer);
-  }, [dirty, saving, currentFile, activeTabIsUntitled, conflictPending, saveCurrent, retryRevision]);
+  }, [
+    dirty,
+    saving,
+    currentFile,
+    activeTabIsUntitled,
+    activeTabDeletedOnDisk,
+    conflictPending,
+    saveCurrent,
+    retryRevision,
+  ]);
 }
