@@ -597,6 +597,10 @@ where
 
         match commit(mode, &temp, path) {
             Ok(()) => {
+                // 提交成功必须自己清 temp：POSIX 的 `RENAME_EXCHANGE` 是把旧目标换到
+                // temp 路径上（不是"消耗 temp"），不删就会在文档目录里留下 `.<name>.tmp.*`。
+                // Windows 的 ReplaceFileW / MoveFileEx 已消耗 temp，这里是幂等 no-op。
+                fs.remove_temp(&temp);
                 let r = receipt_for(fs, path, temp_meta, policy, content)?;
                 // Durability::None（journal 防抖）不做任何 fsync；Sync 才落盘父目录
                 if durability == Durability::Sync {
@@ -2054,7 +2058,9 @@ mod engine_tests {
             if n == 1 { Err(ReplaceError::Unsupported) } else { Ok(()) }
         }).unwrap();
         assert_eq!(r.stat, st(1, 5));
-        assert_eq!(c.fs.removed_count(), 0);
+        // 提交成功后必须自己清 temp：POSIX 的 RENAME_EXCHANGE 把旧目标留在 temp 路径上，
+        // 不删就会在文档目录里留下 `.<name>.tmp.*`（Windows 的原语已消耗 temp，删除是 no-op）
+        assert_eq!(c.fs.removed_count(), 1);
         assert!(c.store.entries().is_empty(), "Unsupported 不应留下 temp 登记");
     }
 
