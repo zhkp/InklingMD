@@ -13,7 +13,8 @@
 use serde::{Deserialize, Serialize};
 use std::fs::{File, Metadata};
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::UNIX_EPOCH;
 
 /// 打开上限（issue #159）：10MB，防止超大文件整体进内存并经 JSON IPC 传输。
@@ -91,6 +92,35 @@ impl From<std::io::Error> for CmdError {
         };
         CmdError::new(code, e.to_string())
     }
+}
+
+/// 提交语义三态：用一个 bool 表达会直接把「导出覆盖 / 保存已有 / 另存为未确认覆盖」做坏。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommitMode {
+    /// 允许创建、允许覆盖：导出 HTML/MD、资源写入、用户已在保存对话框确认覆盖的另存为
+    CreateOrReplace,
+    /// 目标必须存在：命名文档保存（目标消失 → NotFound，绝不复活）
+    ReplaceExisting,
+    /// 目标必须不存在：未确认覆盖的编程式另存为（目标出现 → AlreadyExists → Conflict）
+    CreateExclusive,
+}
+
+/// 平台替换原语的失败分类：1175/1176/1177 与 Unsupported/Unknown 必须分开处理，
+/// 否则「1176 移回」会替前端做「是否复活旧路径」的决定。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplaceError {
+    NotFound,
+    AlreadyExists,
+    /// 1176：替换文件移动失败，**目标与 temp 的实际状态未定**，必须 probe 后决定
+    ReplacementMoveFailed,
+    /// 1177（两边都还在）
+    PartialState,
+    /// 本平台/本卷不支持该原语 → `platform_commit` 内部回退
+    Unsupported,
+    /// 未识别：目标状态未知
+    UnknownTargetState,
+    /// 1175：目标未变
+    Other,
 }
 
 fn mtime_us(meta: &Metadata) -> u64 {
@@ -212,6 +242,979 @@ fn too_large(size: u64) -> CmdError {
         ),
     )
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum SaveOutcome {
+    Written { stat: FileStat, foreign_write: bool },
+    Conflict {
+        disk: FileStat,
+        /// 必须 skip 掉 None：否则 TS 侧 `tempPath?: string` 会收到 `null`
+        #[serde(skip_serializing_if = "Option::is_none")]
+        temp_path: Option<String>,
+        register_failed: bool,
+    },
+    NotFound,
+    ParentMissing { parent: String },
+}
+
+#[derive(Debug)]
+pub enum AtomicError {
+    Outcome(SaveOutcome),
+    Cmd(CmdError),
+}
+
+impl From<CmdError> for AtomicError {
+    fn from(e: CmdError) -> Self {
+        AtomicError::Cmd(e)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WriteReceipt {
+    pub stat: FileStat,
+    pub foreign_write: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReceiptPolicy {
+    MtimeAndSize,
+    ReadBack,
+}
+
+// 回执策略只由 `receipt_policy()` 决定（不设同名常量，避免两处真值源）
+
+pub trait Fs {
+    fn parent_exists(&self, path: &Path) -> std::io::Result<bool>;
+    fn create_parent_dirs(&self, path: &Path) -> std::io::Result<()>;
+    fn stat(&self, path: &Path) -> std::io::Result<Option<FileStat>>;
+    fn write_temp(&self, target: &Path, content: &str) -> std::io::Result<(PathBuf, FileStat)>;
+    fn sync_temp(&self, temp: &Path) -> std::io::Result<()>;
+    fn sync_parent(&self, target: &Path) -> std::io::Result<()>;
+    fn read_text(&self, path: &Path) -> std::io::Result<String>;
+    fn remove_temp(&self, temp: &Path);
+    fn sleep_ms(&self, ms: u64);
+}
+
+pub trait TempKeptStore {
+    fn register(&self, temp: &Path, target: &Path) -> Result<(), CmdError>;
+    fn release(&self, temp: &Path) -> Result<(), CmdError>;
+    /// 启动 prune 与恢复面板枚举都要用；带 createdAt 供面板排序/展示
+    fn entries(&self) -> Vec<TempKeptEntry>;
+    /// 半失败（1176/1177 不匹配/Unknown）时是否登记为"唯一副本"。
+    /// recovery 写入（journal/session/crashed）用 Never：那是缓存，内存里还有，
+    /// 登记只会造出假的"用户文档唯一副本"并让 TTL 留下悬空条目。
+    fn register_policy(&self) -> RegisterPolicy {
+        RegisterPolicy::OnFailure
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegisterPolicy {
+    OnFailure,
+    Never,
+}
+
+/// recovery/ 专用：任何半失败都删 temp + Io，不登记
+pub struct NoRegisterStore;
+impl TempKeptStore for NoRegisterStore {
+    fn register(&self, _t: &Path, _g: &Path) -> Result<(), CmdError> {
+        unreachable!("Never policy 不走 register")
+    }
+    fn release(&self, _t: &Path) -> Result<(), CmdError> {
+        Ok(())
+    }
+    fn entries(&self) -> Vec<TempKeptEntry> {
+        vec![]
+    }
+    fn register_policy(&self) -> RegisterPolicy {
+        RegisterPolicy::Never
+    }
+}
+
+/// 持久化 DTO：字段名即 temp-kept.json 的键名（serde camelCase），
+/// 所以用 String 而不是 PathBuf——与 TS 的 tempPath/targetPath 唯一对应。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TempKeptEntry {
+    pub temp_path: String,
+    pub target_path: String,
+    pub created_at: u64,
+}
+
+/// `recovery/temp-kept.json` 的顶层结构；`version` 便于以后迁移。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TempKeptFile {
+    pub version: u32,
+    pub entries: Vec<TempKeptEntry>,
+}
+
+/// 真实实现：Mutex 串行化 read-modify-write（同窗口多个 spawn_blocking 会并发）
+pub struct MutexTempKeptStore {
+    entries: Mutex<Vec<TempKeptEntry>>,
+    fail: bool,
+}
+impl MutexTempKeptStore {
+    pub fn new(fail: bool) -> Self {
+        MutexTempKeptStore { entries: Mutex::new(vec![]), fail }
+    }
+}
+impl TempKeptStore for MutexTempKeptStore {
+    fn register(&self, temp: &Path, target: &Path) -> Result<(), CmdError> {
+        if self.fail {
+            return Err(CmdError {
+                code: ErrorCode::Io,
+                message: "registry write failed".into(),
+                path: None,
+                target: None,
+            });
+        }
+        let ts = temp.display().to_string();
+        let mut g = self.entries.lock().unwrap();
+        if !g.iter().any(|e| e.temp_path == ts) {
+            g.push(TempKeptEntry {
+                temp_path: ts,
+                target_path: target.display().to_string(),
+                created_at: 0,
+            });
+        }
+        Ok(())
+    }
+    fn release(&self, temp: &Path) -> Result<(), CmdError> {
+        let ts = temp.display().to_string();
+        let mut g = self.entries.lock().unwrap();
+        g.retain(|e| e.temp_path != ts);
+        Ok(())
+    }
+    fn entries(&self) -> Vec<TempKeptEntry> {
+        self.entries.lock().unwrap().clone()
+    }
+}
+
+pub const MAX_ATTEMPTS: u32 = 5;
+pub const RETRY_DELAY_MS: u64 = 50;
+
+fn receipt_for<F: Fs>(
+    fs: &F,
+    target: &Path,
+    temp_meta: FileStat,
+    policy: ReceiptPolicy,
+    content: &str,
+) -> Result<WriteReceipt, AtomicError> {
+    let stat = match fs.stat(target) {
+        Ok(v) => v,
+        Err(_) => match fs.stat(target) {
+            Ok(v) => v,
+            Err(_) => return Ok(WriteReceipt { stat: temp_meta, foreign_write: true }),
+        },
+    };
+    let post = match stat {
+        Some(s) => s,
+        None => return Err(AtomicError::Outcome(SaveOutcome::NotFound)),
+    };
+    let foreign_write = match policy {
+        ReceiptPolicy::MtimeAndSize => post != temp_meta,
+        ReceiptPolicy::ReadBack => fs.read_text(target).map(|t| t != content).unwrap_or(true),
+    };
+    Ok(WriteReceipt { stat: post, foreign_write })
+}
+
+/// 保留 temp（可能是唯一副本）并返回可操作错误；register 失败也必须带 temp_path。
+/// 若 store 的 policy 是 Never（recovery 写入），则删 temp + Io，绝不登记。
+fn keep<F: Fs, S: TempKeptStore>(
+    fs: &F,
+    store: &S,
+    temp: &Path,
+    target: &Path,
+    disk: Option<FileStat>,
+    message: &str,
+) -> AtomicError {
+    if store.register_policy() == RegisterPolicy::Never {
+        fs.remove_temp(temp);
+        return AtomicError::Cmd(CmdError {
+            code: ErrorCode::Io,
+            message: format!("{}（临时文件已丢弃）", message),
+            path: None,
+            target: Some(target.display().to_string()),
+        });
+    }
+    let temp_s = temp.display().to_string();
+    match store.register(temp, target) {
+        Ok(()) => match disk {
+            Some(d) => AtomicError::Outcome(SaveOutcome::Conflict {
+                disk: d,
+                temp_path: Some(temp_s),
+                register_failed: false,
+            }),
+            None => AtomicError::Cmd(CmdError {
+                code: ErrorCode::TempKept,
+                message: message.into(),
+                path: Some(temp_s),
+                target: Some(target.display().to_string()),
+            }),
+        },
+        Err(e) => match disk {
+            // 登记失败也要给 temp_path，否则 UI 与清理器都看不到唯一副本
+            Some(d) => AtomicError::Outcome(SaveOutcome::Conflict {
+                disk: d,
+                temp_path: Some(temp_s),
+                register_failed: true,
+            }),
+            None => AtomicError::Cmd(CmdError {
+                code: ErrorCode::TempRegisterFailed,
+                message: format!("{}；且登记失败（重启后可能找不到）：{}", message, e.message),
+                path: Some(temp_s),
+                target: Some(target.display().to_string()),
+            }),
+        },
+    }
+}
+
+/// 唯一出口：根据"temp 是否可能是唯一副本"决定删还是留
+#[allow(clippy::too_many_arguments)]
+fn settle<F: Fs, S: TempKeptStore>(
+    fs: &F,
+    store: &S,
+    temp: &Path,
+    target: &Path,
+    temp_may_be_only_copy: bool,
+    // 非粘性场景下的"确定性失败"如何表达
+    deterministic: Deterministic,
+) -> AtomicError {
+    if !temp_may_be_only_copy {
+        fs.remove_temp(temp);
+        return match deterministic {
+            Deterministic::NotFound => AtomicError::Outcome(SaveOutcome::NotFound),
+            Deterministic::Conflict(disk) => AtomicError::Outcome(SaveOutcome::Conflict {
+                disk,
+                temp_path: None,
+                register_failed: false,
+            }),
+            Deterministic::Io(msg) => AtomicError::Cmd(CmdError {
+                code: ErrorCode::Io,
+                message: msg,
+                path: None,                                    // path 只放"内容所在 temp"
+                target: Some(target.display().to_string()),
+            }),
+        };
+    }
+    // 三态：stat 的 Err 不得当成"不存在"
+    match probe(fs, target) {
+        Probe::Present(d) => keep(fs, store, temp, target, Some(d), "内容保留在临时文件（目标状态不确定）"),
+        Probe::Absent | Probe::Unknown => {
+            keep(fs, store, temp, target, None, "内容保留在临时文件（目标状态不确定）")
+        }
+    }
+}
+
+enum Deterministic {
+    NotFound,
+    Conflict(FileStat),
+    Io(String),
+}
+
+/// 耐久策略（B11）：journal 的 1.2s 防抖用 None（不 fsync），用户数据保存用 Sync。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Durability {
+    None,
+    Sync,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn atomic_write<F, P, C, S>(
+    fs: &F,
+    path: &Path,
+    content: &str,
+    create_parent_dirs: bool,
+    mode: CommitMode,
+    policy: ReceiptPolicy,
+    durability: Durability,
+    mut on_before_commit: P,
+    mut commit: C,
+    store: &S,
+) -> Result<WriteReceipt, AtomicError>
+where
+    F: Fs,
+    P: FnMut(&Path) -> Result<(), AtomicError>,
+    C: FnMut(CommitMode, &Path, &Path) -> Result<(), ReplaceError>,
+    S: TempKeptStore,
+{
+    if !fs.parent_exists(path).map_err(CmdError::from)? {
+        if mode == CommitMode::ReplaceExisting || !create_parent_dirs {
+            return Err(AtomicError::Outcome(SaveOutcome::ParentMissing {
+                parent: path.parent().map(|p| p.display().to_string()).unwrap_or_default(),
+            }));
+        }
+        fs.create_parent_dirs(path).map_err(CmdError::from)?;
+    }
+
+    let (temp, temp_meta) = fs.write_temp(path, content).map_err(CmdError::from)?;
+    if durability == Durability::Sync {
+        if let Err(e) = fs.sync_temp(&temp) {
+            fs.remove_temp(&temp);
+            return Err(AtomicError::Cmd(e.into()));
+        }
+    }
+
+    // 粘性：一旦无法确定目标状态，之后任何出口都不许删 temp
+    let mut temp_may_be_only_copy = false;
+
+    for attempt in 0..MAX_ATTEMPTS {
+        if attempt > 0 {
+            fs.sleep_ms(RETRY_DELAY_MS);
+        }
+        if let Err(e) = on_before_commit(path) {
+            return Err(if temp_may_be_only_copy {
+                match e {
+                    AtomicError::Outcome(SaveOutcome::Conflict { disk, .. }) => {
+                        keep(fs, store, &temp, path, Some(disk), "复核发现冲突")
+                    }
+                    // 三态：stat Err 不当作"目标不存在"
+                    _ => match probe(fs, path) {
+                        Probe::Present(d) => keep(fs, store, &temp, path, Some(d), "复核失败"),
+                        Probe::Absent | Probe::Unknown => keep(fs, store, &temp, path, None, "复核失败"),
+                    },
+                }
+            } else {
+                fs.remove_temp(&temp);
+                e
+            });
+        }
+
+        match commit(mode, &temp, path) {
+            Ok(()) => {
+                let r = receipt_for(fs, path, temp_meta, policy, content)?;
+                // Durability::None（journal 防抖）不做任何 fsync；Sync 才落盘父目录
+                if durability == Durability::Sync {
+                    let _ = fs.sync_parent(path);
+                }
+                return Ok(r);
+            }
+            Err(ReplaceError::NotFound) => {
+                return Err(settle(fs, store, &temp, path, temp_may_be_only_copy, Deterministic::NotFound));
+            }
+            Err(ReplaceError::AlreadyExists) => match fs.stat(path) {
+                Ok(Some(disk)) => {
+                    return Err(settle(
+                        fs, store, &temp, path, temp_may_be_only_copy, Deterministic::Conflict(disk),
+                    ));
+                }
+                // 拿不到目标 stat（闪现/IO）→ 无法证明 temp 不是唯一副本
+                Ok(None) | Err(_) => {
+                    temp_may_be_only_copy = true;
+                    continue;
+                }
+            },
+            // 1176：**一律不移回**。Rust 不知道前端是否有 tombstone（重命名/删除事件只在前端），
+            // 若在这里 CreateExclusive 把 temp 搬回旧路径，就会在"保存期间被改名/删除"时复活旧路径（#363）。
+            // 因此只做：probe 两侧 → 保留 temp + 登记 + 上报，由前端决定是否另存。
+            Err(ReplaceError::ReplacementMoveFailed) => {
+                return Err(replacement_failed(fs, store, &temp, path));
+            }
+            Err(ReplaceError::PartialState) => match fs.stat(path) {
+                Ok(Some(disk)) if disk == temp_meta => {
+                    if durability == Durability::Sync {
+                        let _ = fs.sync_parent(path);
+                    }
+                    return Ok(WriteReceipt { stat: disk, foreign_write: false });
+                }
+                Ok(Some(disk)) => {
+                    return Err(keep(fs, store, &temp, path, Some(disk), "替换处于半失败态"));
+                }
+                Ok(None) => {
+                    // 目标不存在：等同 1176 的"目标缺失"现实，同样不移回
+                    return Err(replacement_failed(fs, store, &temp, path));
+                }
+                Err(_) => {
+                    temp_may_be_only_copy = true;
+                    continue;
+                }
+            },
+            Err(ReplaceError::UnknownTargetState) => {
+                temp_may_be_only_copy = true;
+                continue;
+            }
+            // 原语不支持（EINVAL/ENOSYS/ENOTSUP/EXDEV）→ 可重试，且**不得**置位粘性标志
+            Err(ReplaceError::Unsupported) => continue,
+            Err(ReplaceError::Other) => continue,
+        }
+    }
+
+    Err(settle(
+        fs,
+        store,
+        &temp,
+        path,
+        temp_may_be_only_copy,
+        Deterministic::Io(format!("提交重试 {} 次仍失败", MAX_ATTEMPTS)),
+    ))
+}
+
+/// 1176（替换文件移动失败）：**不做任何"移回"**，只按两侧实际状态上报。
+/// 移回会把旧路径重新创建出来，而"旧路径是否允许复活"只有前端知道（tombstone），Rust 无权决定。
+fn replacement_failed<F: Fs, S: TempKeptStore>(
+    fs: &F,
+    store: &S,
+    temp: &Path,
+    target: &Path,
+) -> AtomicError {
+    match (probe(fs, temp), probe(fs, target)) {
+        // temp 仍在：目标存在 → 冲突（带 temp）；否则 → 唯一副本在 temp
+        (Probe::Present(_), Probe::Present(d)) => {
+            keep(fs, store, temp, target, Some(d), "替换失败，目标是外部内容")
+        }
+        (Probe::Present(_), Probe::Absent) => {
+            keep(fs, store, temp, target, None, "替换失败，目标不存在，唯一副本在临时文件")
+        }
+        (Probe::Present(_), Probe::Unknown) => {
+            keep(fs, store, temp, target, None, "替换失败，目标状态未知，唯一副本在临时文件")
+        }
+        // temp 状态未知：可能还在 → 必须保留，绝不返回成功
+        (Probe::Unknown, Probe::Present(d)) => {
+            keep(fs, store, temp, target, Some(d), "替换失败，临时文件状态未知")
+        }
+        (Probe::Unknown, Probe::Absent | Probe::Unknown) => {
+            keep(fs, store, temp, target, None, "替换失败，临时文件状态未知")
+        }
+        // temp 已不在、目标在：无法确认目标是不是我们写的 → 交给用户判断，不谎报成功
+        (Probe::Absent, Probe::Present(d)) => AtomicError::Outcome(SaveOutcome::Conflict {
+            disk: d,
+            temp_path: None,
+            register_failed: false,
+        }),
+        (Probe::Absent, Probe::Absent) => AtomicError::Cmd(CmdError {
+            code: ErrorCode::Io,
+            message: "替换失败，且临时文件与目标均不存在".into(),
+            path: None,
+            target: Some(target.display().to_string()),
+        }),
+        (Probe::Absent, Probe::Unknown) => AtomicError::Cmd(CmdError {
+            code: ErrorCode::Io,
+            message: "替换失败，临时文件已不在且目标状态未知".into(),
+            path: None,
+            target: Some(target.display().to_string()),
+        }),
+    }
+}
+
+/// stat 三态：Err 一律当"未知"，绝不当"不存在"
+enum Probe {
+    Present(FileStat),
+    Absent,
+    Unknown,
+}
+
+fn probe<F: Fs>(fs: &F, p: &Path) -> Probe {
+    match fs.stat(p) {
+        Ok(Some(s)) => Probe::Present(s),
+        Ok(None) => Probe::Absent,
+        Err(_) => Probe::Unknown,
+    }
+}
+
+/// 旧写盘入口（导出/备份用）：必须共享同一个登记表，否则 1176 会留下未登记孤儿
+pub fn write_text_file_sync<F, C, S>(
+    fs: &F,
+    path: &Path,
+    content: &str,
+    commit: C,
+    store: &S,
+) -> Result<(), CmdError>
+where
+    F: Fs,
+    C: FnMut(CommitMode, &Path, &Path) -> Result<(), ReplaceError>,
+    S: TempKeptStore,
+{
+    match atomic_write(fs, path, content, true, CommitMode::CreateOrReplace,
+                       receipt_policy(), Durability::Sync, |_p| Ok(()), commit, store) {
+        Ok(_) => Ok(()),
+        Err(AtomicError::Cmd(e)) => Err(e),
+        // CreateOrReplace 也可能撞上半失败态：必须转成结构化错误，带上 temp/target
+        Err(AtomicError::Outcome(SaveOutcome::Conflict { temp_path: Some(t), register_failed, .. })) => {
+            Err(CmdError {
+                code: if register_failed { ErrorCode::TempRegisterFailed } else { ErrorCode::TempKept },
+                message: "目标处于半失败态，内容保留在临时文件".into(),
+                path: Some(t),
+                target: Some(path.display().to_string()),
+            })
+        }
+        Err(AtomicError::Outcome(SaveOutcome::Conflict { temp_path: None, .. })) => Err(CmdError {
+            code: ErrorCode::Io,
+            message: "目标已存在且内容不同".into(),
+            path: None,
+            target: Some(path.display().to_string()),
+        }),
+        Err(AtomicError::Outcome(SaveOutcome::NotFound)) => Err(CmdError {
+            code: ErrorCode::Io,
+            message: "目标消失".into(),
+            path: None,
+            target: Some(path.display().to_string()),
+        }),
+        Err(AtomicError::Outcome(SaveOutcome::ParentMissing { parent })) => Err(CmdError {
+            code: ErrorCode::ParentMissing,
+            message: format!("父目录不存在：{}", parent),
+            path: None,
+            target: Some(path.display().to_string()),
+        }),
+        Err(AtomicError::Outcome(SaveOutcome::Written { .. })) => Err(CmdError {
+            code: ErrorCode::Io,
+            message: "内部错误：CreateOrReplace 返回了 Written".into(),
+            path: None,
+            target: Some(path.display().to_string()),
+        }),
+    }
+}
+
+/// 生产回执策略：证明平台保留 mtime 之前一律 ReadBack
+pub fn receipt_policy() -> ReceiptPolicy {
+    ReceiptPolicy::ReadBack
+}
+
+/// 公开测试入口：只做 mode 映射 + atomic_write。
+/// 注意：`atomic_write` **会**做写后回执（receipt_for），本函数只是不做 §5.2 ② 的 initial stat。
+#[allow(clippy::too_many_arguments)]
+pub fn write_document_with<F, P, C, S>(
+    fs: &F,
+    file_path: &Path,
+    content: &str,
+    expected: Option<FileStat>,
+    create_parent_dirs: bool,
+    overwrite_existing: bool,
+    policy: ReceiptPolicy,
+    on_before_commit: P,
+    commit: C,
+    store: &S,
+) -> Result<SaveOutcome, CmdError>
+where
+    F: Fs,
+    P: FnMut(&Path) -> Result<(), AtomicError>,
+    C: FnMut(CommitMode, &Path, &Path) -> Result<(), ReplaceError>,
+    S: TempKeptStore,
+{
+    let mode = match (expected, overwrite_existing) {
+        (Some(_), _) => CommitMode::ReplaceExisting,
+        (None, true) => CommitMode::CreateOrReplace,
+        (None, false) => CommitMode::CreateExclusive,
+    };
+    if expected.is_some() && create_parent_dirs {
+        return Err(CmdError {
+            code: ErrorCode::InvalidArgument,
+            message: "既有文档保存不得创建父目录".into(),
+            path: None,
+            target: Some(file_path.display().to_string()),
+        });
+    }
+    match atomic_write(fs, file_path, content, create_parent_dirs, mode, policy, Durability::Sync,
+                       on_before_commit, commit, store) {
+        Ok(r) => Ok(SaveOutcome::Written { stat: r.stat, foreign_write: r.foreign_write }),
+        Err(AtomicError::Outcome(o)) => Ok(o),
+        Err(AtomicError::Cmd(e)) => Err(e),
+    }
+}
+
+// ─────────────────────────── tests ───────────────────────────
+
+// ── 生产实现：StdFs / platform_commit / TempKeptRegistry ─────────────────────
+
+/// 真实文件系统：`std::fs` + 平台替换原语。
+///
+/// 耐久策略由调用方决定：`write_temp` 只写不 fsync，`sync_temp` / `sync_parent`
+/// 只在 `Durability::Sync` 时被 `atomic_write` 调用（journal 的防抖写入不落盘）。
+pub struct StdFs;
+
+static TEMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+impl Fs for StdFs {
+    fn parent_exists(&self, path: &Path) -> std::io::Result<bool> {
+        match std::fs::metadata(path) {
+            Ok(meta) => Ok(meta.is_dir()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+
+    fn create_parent_dirs(&self, path: &Path) -> std::io::Result<()> {
+        std::fs::create_dir_all(path)
+    }
+
+    fn stat(&self, path: &Path) -> std::io::Result<Option<FileStat>> {
+        match std::fs::metadata(path) {
+            // 目录/设备等非普通文件按「不可作为文档目标」处理，上层据此报 NotAFile / Conflict
+            Ok(meta) if !meta.is_file() => Ok(None),
+            Ok(meta) => Ok(Some(stat_of(&meta))),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    fn write_temp(&self, target: &Path, content: &str) -> std::io::Result<(PathBuf, FileStat)> {
+        let parent = target.parent().unwrap_or_else(|| Path::new("."));
+        let name = target
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("document");
+        let seq = TEMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let temp = parent.join(format!(".{name}.tmp.{}-{seq}", std::process::id()));
+        let mut file = File::create(&temp)?;
+        use std::io::Write;
+        if let Err(e) = file.write_all(content.as_bytes()) {
+            let _ = std::fs::remove_file(&temp);
+            return Err(e);
+        }
+        let meta = file.metadata()?;
+        Ok((temp, stat_of(&meta)))
+    }
+
+    fn sync_temp(&self, temp: &Path) -> std::io::Result<()> {
+        File::open(temp)?.sync_all()
+    }
+
+    fn sync_parent(&self, target: &Path) -> std::io::Result<()> {
+        #[cfg(unix)]
+        {
+            // 目录 fsync 才能保证「改名」本身落盘；Windows 无对应语义（见设计 R3b）
+            if let Some(parent) = target.parent() {
+                if !parent.as_os_str().is_empty() {
+                    File::open(parent)?.sync_all()?;
+                }
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = target;
+        }
+        Ok(())
+    }
+
+    fn read_text(&self, path: &Path) -> std::io::Result<String> {
+        std::fs::read_to_string(path)
+    }
+
+    fn remove_temp(&self, temp: &Path) {
+        let _ = std::fs::remove_file(temp);
+    }
+
+    fn sleep_ms(&self, ms: u64) {
+        std::thread::sleep(std::time::Duration::from_millis(ms));
+    }
+}
+
+// 回执策略见上文 `receipt_policy()`：统一用 `ReadBack`（读回比对内容），
+// 不依赖「替换后 mtime == temp mtime」这一平台假设。
+
+// ── 平台替换原语 ────────────────────────────────────────────────────────────
+
+#[cfg(windows)]
+pub fn platform_commit(mode: CommitMode, temp: &Path, target: &Path) -> Result<(), ReplaceError> {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+
+    extern "system" {
+        fn ReplaceFileW(
+            replaced: *const u16,
+            replacement: *const u16,
+            backup: *const u16,
+            flags: u32,
+            exclude: usize,
+            reserved: usize,
+        ) -> i32;
+        fn MoveFileExW(existing: *const u16, new: *const u16, flags: u32) -> i32;
+    }
+
+    const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;
+    const MOVEFILE_WRITE_THROUGH: u32 = 0x8;
+
+    fn wide(path: &Path) -> Vec<u16> {
+        OsStr::new(path).encode_wide().chain(std::iter::once(0)).collect()
+    }
+    fn last_err() -> i32 {
+        std::io::Error::last_os_error().raw_os_error().unwrap_or(0)
+    }
+
+    let (t, g) = (wide(temp), wide(target));
+    match mode {
+        CommitMode::ReplaceExisting => {
+            // ReplaceFileW 要求目标已存在；失败码 1175/1176/1177 必须分开（三态未定）
+            let ok = unsafe { ReplaceFileW(g.as_ptr(), t.as_ptr(), std::ptr::null(), 0, 0, 0) };
+            if ok != 0 {
+                return Ok(());
+            }
+            match last_err() {
+                2 | 3 => Err(ReplaceError::NotFound),   // ERROR_FILE_NOT_FOUND / PATH_NOT_FOUND
+                1175 => Err(ReplaceError::Other),
+                1176 => Err(ReplaceError::ReplacementMoveFailed),
+                1177 => Err(ReplaceError::PartialState),
+                _ => Err(ReplaceError::UnknownTargetState),
+            }
+        }
+        CommitMode::CreateOrReplace => {
+            let flags = MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH;
+            let ok = unsafe { MoveFileExW(t.as_ptr(), g.as_ptr(), flags) };
+            if ok != 0 {
+                return Ok(());
+            }
+            match last_err() {
+                2 | 3 => Err(ReplaceError::NotFound),
+                _ => Err(ReplaceError::UnknownTargetState),
+            }
+        }
+        CommitMode::CreateExclusive => {
+            // 不带 REPLACE_EXISTING：目标已存在 → ERROR_ALREADY_EXISTS(183) / ERROR_FILE_EXISTS(80)
+            let ok = unsafe { MoveFileExW(t.as_ptr(), g.as_ptr(), MOVEFILE_WRITE_THROUGH) };
+            if ok != 0 {
+                return Ok(());
+            }
+            match last_err() {
+                80 | 183 => Err(ReplaceError::AlreadyExists),
+                2 | 3 => Err(ReplaceError::NotFound),
+                _ => Err(ReplaceError::UnknownTargetState),
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub fn platform_commit(mode: CommitMode, temp: &Path, target: &Path) -> Result<(), ReplaceError> {
+    use std::ffi::CString;
+    use std::os::raw::{c_char, c_int, c_uint};
+    use std::os::unix::ffi::OsStrExt;
+
+    extern "C" {
+        fn renameat2(
+            olddirfd: c_int,
+            oldpath: *const c_char,
+            newdirfd: c_int,
+            newpath: *const c_char,
+            flags: c_uint,
+        ) -> c_int;
+    }
+    const AT_FDCWD: c_int = -100;
+    const RENAME_NOREPLACE: c_uint = 1;
+    const RENAME_EXCHANGE: c_uint = 2;
+    const EINVAL: i32 = 22;
+    const ENOSYS: i32 = 38;
+    const EEXIST: i32 = 17;
+    const ENOENT: i32 = 2;
+
+    fn c(path: &Path) -> std::io::Result<CString> {
+        CString::new(path.as_os_str().as_bytes())
+            .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))
+    }
+    let (from, to) = match (c(temp), c(target)) {
+        (Ok(a), Ok(b)) => (a, b),
+        _ => return Err(ReplaceError::Unsupported),
+    };
+    let call = |flags: c_uint| unsafe {
+        renameat2(AT_FDCWD, from.as_ptr(), AT_FDCWD, to.as_ptr(), flags)
+    };
+
+    match mode {
+        // 交换后：target = 新内容，temp = 旧内容（随后由 remove_temp 清掉旧副本）
+        CommitMode::ReplaceExisting => {
+            if call(RENAME_EXCHANGE) == 0 {
+                return Ok(());
+            }
+            match std::io::Error::last_os_error().raw_os_error().unwrap_or(0) {
+                ENOENT => Err(ReplaceError::NotFound), // 目标不存在：绝不创建
+                EINVAL | ENOSYS => fallback_rename_existing(temp, target),
+                _ => Err(ReplaceError::UnknownTargetState),
+            }
+        }
+        // 非原子回退：先确认目标存在，再 rename（窗口见设计 R1）
+        CommitMode::CreateExclusive => {
+            if call(RENAME_NOREPLACE) == 0 {
+                return Ok(());
+            }
+            match std::io::Error::last_os_error().raw_os_error().unwrap_or(0) {
+                EEXIST => Err(ReplaceError::AlreadyExists),
+                EINVAL | ENOSYS => create_exclusive_fallback(temp, target),
+                _ => Err(ReplaceError::UnknownTargetState),
+            }
+        }
+        CommitMode::CreateOrReplace => std::fs::rename(temp, target)
+            .map_err(|e| match e.kind() {
+                std::io::ErrorKind::NotFound => ReplaceError::NotFound,
+                _ => ReplaceError::UnknownTargetState,
+            }),
+    }
+}
+
+#[cfg(target_os = "macos")]
+pub fn platform_commit(mode: CommitMode, temp: &Path, target: &Path) -> Result<(), ReplaceError> {
+    use std::ffi::CString;
+    use std::os::raw::{c_char, c_int, c_uint};
+    use std::os::unix::ffi::OsStrExt;
+
+    extern "C" {
+        fn renamex_np(from: *const c_char, to: *const c_char, flags: c_uint) -> c_int;
+    }
+    // renamex_np 的标志：RENAME_SWAP = 0x2，RENAME_EXCL = 0x4
+    const RENAME_SWAP: c_uint = 0x2;
+    const RENAME_EXCL: c_uint = 0x4;
+    const EEXIST: i32 = 17;
+    const ENOENT: i32 = 2;
+    const ENOTSUP: i32 = 45;
+
+    fn c(path: &Path) -> std::io::Result<CString> {
+        CString::new(path.as_os_str().as_bytes())
+            .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))
+    }
+    let (from, to) = match (c(temp), c(target)) {
+        (Ok(a), Ok(b)) => (a, b),
+        _ => return Err(ReplaceError::Unsupported),
+    };
+
+    match mode {
+        CommitMode::ReplaceExisting => {
+            if unsafe { renamex_np(from.as_ptr(), to.as_ptr(), RENAME_SWAP) } == 0 {
+                return Ok(());
+            }
+            match std::io::Error::last_os_error().raw_os_error().unwrap_or(0) {
+                ENOENT => Err(ReplaceError::NotFound),
+                ENOTSUP => fallback_rename_existing(temp, target),
+                _ => Err(ReplaceError::UnknownTargetState),
+            }
+        }
+        CommitMode::CreateExclusive => {
+            if unsafe { renamex_np(from.as_ptr(), to.as_ptr(), RENAME_EXCL) } == 0 {
+                return Ok(());
+            }
+            match std::io::Error::last_os_error().raw_os_error().unwrap_or(0) {
+                EEXIST => Err(ReplaceError::AlreadyExists),
+                ENOTSUP => create_exclusive_fallback(temp, target),
+                _ => Err(ReplaceError::UnknownTargetState),
+            }
+        }
+        CommitMode::CreateOrReplace => std::fs::rename(temp, target).map_err(|e| match e.kind() {
+            std::io::ErrorKind::NotFound => ReplaceError::NotFound,
+            _ => ReplaceError::UnknownTargetState,
+        }),
+    }
+}
+
+/// 其余平台（以及原语不可用时的回退）：`rename` 在 POSIX 上是替换语义，
+/// 但目标缺失时会**创建**它，所以必须先确认目标存在（残留窗口见设计 R1/R2）。
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+pub fn platform_commit(mode: CommitMode, temp: &Path, target: &Path) -> Result<(), ReplaceError> {
+    match mode {
+        CommitMode::ReplaceExisting => fallback_rename_existing(temp, target),
+        CommitMode::CreateExclusive => create_exclusive_fallback(temp, target),
+        CommitMode::CreateOrReplace => std::fs::rename(temp, target).map_err(|e| match e.kind() {
+            std::io::ErrorKind::NotFound => ReplaceError::NotFound,
+            _ => ReplaceError::UnknownTargetState,
+        }),
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos", not(any(windows, target_os = "linux", target_os = "macos"))))]
+fn fallback_rename_existing(temp: &Path, target: &Path) -> Result<(), ReplaceError> {
+    match std::fs::metadata(target) {
+        Ok(meta) if meta.is_file() => std::fs::rename(temp, target)
+            .map_err(|_| ReplaceError::UnknownTargetState),
+        Ok(_) => Err(ReplaceError::AlreadyExists),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Err(ReplaceError::NotFound),
+        Err(_) => Err(ReplaceError::UnknownTargetState),
+    }
+}
+
+/// 无 NOREPLACE 时的排他创建：`hard_link` 在目标已存在时返回 EEXIST，
+/// 成功后再删 temp（同目录，不会跨卷）。
+#[cfg(any(target_os = "linux", target_os = "macos", not(any(windows, target_os = "linux", target_os = "macos"))))]
+fn create_exclusive_fallback(temp: &Path, target: &Path) -> Result<(), ReplaceError> {
+    match std::fs::hard_link(temp, target) {
+        Ok(()) => {
+            let _ = std::fs::remove_file(temp);
+            Ok(())
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(ReplaceError::AlreadyExists),
+        Err(_) => Err(ReplaceError::UnknownTargetState),
+    }
+}
+
+// ── 登记表（recovery/temp-kept.json） ───────────────────────────────────────
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// 全局单文件的半失败登记表（多窗口共用，`Mutex` 串行化 read-modify-write）。
+pub struct TempKeptRegistry {
+    file: PathBuf,
+    entries: Mutex<Vec<TempKeptEntry>>,
+}
+
+impl TempKeptRegistry {
+    /// 读一次文件；解析失败按空表处理（登记表损坏不应阻塞保存）。
+    pub fn load(file: PathBuf) -> Self {
+        let entries = std::fs::read_to_string(&file)
+            .ok()
+            .and_then(|raw| serde_json::from_str::<TempKeptFile>(&raw).ok())
+            .map(|f| f.entries)
+            .unwrap_or_default();
+        TempKeptRegistry { file, entries: Mutex::new(entries) }
+    }
+
+    fn persist(&self, entries: &[TempKeptEntry]) -> Result<(), CmdError> {
+        let payload = TempKeptFile { version: 1, entries: entries.to_vec() };
+        let json = serde_json::to_string_pretty(&payload)
+            .map_err(|e| CmdError::new(ErrorCode::Io, format!("登记表序列化失败: {e}")))?;
+        if let Some(parent) = self.file.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| CmdError::new(ErrorCode::Io, format!("创建登记表目录失败: {e}")))?;
+        }
+        let temp = self.file.with_extension("json.tmp");
+        let write = || -> std::io::Result<()> {
+            use std::io::Write;
+            let mut file = File::create(&temp)?;
+            file.write_all(json.as_bytes())?;
+            file.sync_all()?;
+            Ok(())
+        };
+        if let Err(e) = write() {
+            let _ = std::fs::remove_file(&temp);
+            return Err(CmdError::new(ErrorCode::Io, format!("写登记表失败: {e}")));
+        }
+        std::fs::rename(&temp, &self.file)
+            .map_err(|e| CmdError::new(ErrorCode::Io, format!("替换登记表失败: {e}")))?;
+        // 掉电丢登记会让 temp 变成未登记孤儿，所以这里必须落盘
+        if let Some(parent) = self.file.parent() {
+            let _ = File::open(parent).and_then(|f| f.sync_all());
+        }
+        Ok(())
+    }
+}
+
+impl TempKeptStore for TempKeptRegistry {
+    fn register(&self, temp: &Path, target: &Path) -> Result<(), CmdError> {
+        let mut guard = self.entries.lock().expect("registry poisoned");
+        let key = temp.display().to_string();
+        if !guard.iter().any(|e| e.temp_path == key) {
+            guard.push(TempKeptEntry {
+                temp_path: key,
+                target_path: target.display().to_string(),
+                created_at: now_ms(),
+            });
+        }
+        self.persist(&guard)
+    }
+
+    fn release(&self, temp: &Path) -> Result<(), CmdError> {
+        let mut guard = self.entries.lock().expect("registry poisoned");
+        let key = temp.display().to_string();
+        guard.retain(|e| e.temp_path != key);
+        self.persist(&guard)
+    }
+
+    fn entries(&self) -> Vec<TempKeptEntry> {
+        self.entries.lock().expect("registry poisoned").clone()
+    }
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -422,3 +1425,679 @@ mod tests {
         assert_eq!(other.code, ErrorCode::Io);
     }
 }
+
+#[cfg(test)]
+mod engine_tests {
+    use super::*;
+    use std::cell::{Cell, RefCell};
+    use std::sync::Arc;
+
+    struct MockFs {
+        target: RefCell<Option<FileStat>>,
+        temp_present: Cell<bool>,
+        parent_exists: bool,
+        stat_errors: Cell<u32>,
+        stat_errors_for_temp: Cell<u32>,
+        written: RefCell<Vec<String>>,
+        removed: RefCell<Vec<PathBuf>>,
+        disk_text: RefCell<String>,
+        sync_parent_calls: Cell<u32>,
+        sync_temp_calls: Cell<u32>,
+    }
+
+    impl MockFs {
+        fn new(target: Option<FileStat>) -> Self {
+            MockFs {
+                target: RefCell::new(target),
+                temp_present: Cell::new(true),
+                parent_exists: true,
+                stat_errors: Cell::new(0),
+                stat_errors_for_temp: Cell::new(0),
+                written: RefCell::new(vec![]),
+                removed: RefCell::new(vec![]),
+                disk_text: RefCell::new(String::new()),
+                sync_parent_calls: Cell::new(0),
+                sync_temp_calls: Cell::new(0),
+            }
+        }
+        fn removed_count(&self) -> usize {
+            self.removed.borrow().len()
+        }
+    }
+
+    impl Fs for MockFs {
+        fn parent_exists(&self, _p: &Path) -> std::io::Result<bool> {
+            Ok(self.parent_exists)
+        }
+        fn create_parent_dirs(&self, _p: &Path) -> std::io::Result<()> {
+            Ok(())
+        }
+        fn stat(&self, p: &Path) -> std::io::Result<Option<FileStat>> {
+            if p.extension().map(|e| e == "tmp").unwrap_or(false) {
+                let n = self.stat_errors_for_temp.get();
+                if n > 0 {
+                    self.stat_errors_for_temp.set(n - 1);
+                    return Err(std::io::Error::other("temp stat hiccup"));
+                }
+                return Ok(if self.temp_present.get() {
+                    Some(FileStat { mtime_us: 111, size: 5 })
+                } else {
+                    None
+                });
+            }
+            let n = self.stat_errors.get();
+            if n > 0 {
+                self.stat_errors.set(n - 1);
+                return Err(std::io::Error::other("stat hiccup"));
+            }
+            Ok(*self.target.borrow())
+        }
+        fn write_temp(&self, target: &Path, content: &str) -> std::io::Result<(PathBuf, FileStat)> {
+            self.written.borrow_mut().push(content.to_string());
+            self.temp_present.set(true);
+            Ok((target.with_extension("tmp"), FileStat { mtime_us: 111, size: content.len() as u64 }))
+        }
+        fn sync_temp(&self, _t: &Path) -> std::io::Result<()> {
+            self.sync_temp_calls.set(self.sync_temp_calls.get() + 1);
+            Ok(())
+        }
+        fn sync_parent(&self, _t: &Path) -> std::io::Result<()> {
+            self.sync_parent_calls.set(self.sync_parent_calls.get() + 1);
+            Ok(())
+        }
+        fn read_text(&self, _p: &Path) -> std::io::Result<String> {
+            Ok(self.disk_text.borrow().clone())
+        }
+        fn remove_temp(&self, t: &Path) {
+            self.removed.borrow_mut().push(t.to_path_buf());
+            self.temp_present.set(false);
+        }
+        fn sleep_ms(&self, _ms: u64) {}
+    }
+
+    fn st(m: u64, s: u64) -> FileStat {
+        FileStat { mtime_us: m, size: s }
+    }
+
+    struct Ctx {
+        fs: MockFs,
+        store: MutexTempKeptStore,
+    }
+
+    fn ctx(target: Option<FileStat>) -> Ctx {
+        Ctx { fs: MockFs::new(target), store: MutexTempKeptStore::new(false) }
+    }
+
+    fn run<C>(c: &Ctx, mode: CommitMode, commit: C) -> Result<WriteReceipt, AtomicError>
+    where
+        C: FnMut(CommitMode, &Path, &Path) -> Result<(), ReplaceError>,
+    {
+        atomic_write(&c.fs, Path::new("/d/a.md"), "hello", false, mode,
+                     ReceiptPolicy::MtimeAndSize, Durability::Sync, |_p| Ok(()), commit, &c.store)
+    }
+
+    // ── 基础清理语义 ──
+
+    #[test]
+    fn t_precheck_conflict_removes_temp_once() {
+        let c = ctx(Some(st(1, 5)));
+        let mut commits = 0;
+        let r = atomic_write(&c.fs, Path::new("/d/a.md"), "hello", false, CommitMode::ReplaceExisting,
+                             ReceiptPolicy::MtimeAndSize, Durability::Sync,
+                             |_p| Err(AtomicError::Outcome(SaveOutcome::Conflict {
+                                 disk: st(2, 5), temp_path: None, register_failed: false,
+                             })),
+                             |_m: CommitMode, _t: &Path, _g: &Path| { commits += 1; Ok(()) }, &c.store);
+        assert!(matches!(r, Err(AtomicError::Outcome(SaveOutcome::Conflict { .. }))));
+        assert_eq!(commits, 0);
+        assert_eq!(c.fs.removed_count(), 1);
+    }
+
+    #[test]
+    fn t_notfound_removes_temp() {
+        let c = ctx(None);
+        let r = run(&c, CommitMode::ReplaceExisting, |_m, _t, _g| Err(ReplaceError::NotFound));
+        assert!(matches!(r, Err(AtomicError::Outcome(SaveOutcome::NotFound))));
+        assert_eq!(c.fs.removed_count(), 1);
+        assert!(c.store.entries().is_empty());
+    }
+
+    #[test]
+    fn t_already_exists_removes_temp() {
+        let c = ctx(Some(st(7, 3)));
+        let r = run(&c, CommitMode::CreateExclusive, |_m, _t, _g| Err(ReplaceError::AlreadyExists));
+        match r {
+            Err(AtomicError::Outcome(SaveOutcome::Conflict { disk, temp_path, register_failed })) => {
+                assert_eq!(disk, st(7, 3));
+                assert!(temp_path.is_none());
+                assert!(!register_failed);
+            }
+            _ => panic!("应为 Conflict"),
+        }
+        assert_eq!(c.fs.removed_count(), 1);
+    }
+
+    // ── 1176（一律不移回）/ 1177 ──
+
+    /// 1176 + 目标不存在 → TempKept（带 temp/target），temp 保留并登记
+    #[test]
+    fn t1176_target_absent_is_tempkept() {
+        let c = ctx(None);
+        let err = run(&c, CommitMode::ReplaceExisting, |_m, _t, _g| Err(ReplaceError::ReplacementMoveFailed)).unwrap_err();
+        match err {
+            AtomicError::Cmd(e) => {
+                assert_eq!(e.code, ErrorCode::TempKept);
+                assert_eq!(e.path.as_deref(), Some("/d/a.tmp"));
+                assert_eq!(e.target.as_deref(), Some("/d/a.md"));
+            }
+            _ => panic!("应为 TempKept"),
+        }
+        assert_eq!(c.fs.removed_count(), 0);
+        assert_eq!(c.store.entries().len(), 1);
+    }
+
+    /// 1176 + 目标被外部重建 → Conflict{disk, temp_path}，**绝不把 temp 搬回旧路径**
+    #[test]
+    fn t1176_target_present_conflicts_without_revive() {
+        let c = ctx(Some(st(42, 9)));
+        let err = run(&c, CommitMode::ReplaceExisting, |_m, _t, _g| Err(ReplaceError::ReplacementMoveFailed)).unwrap_err();
+        match err {
+            AtomicError::Outcome(SaveOutcome::Conflict { disk, temp_path, register_failed }) => {
+                assert_eq!(disk, st(42, 9));
+                assert_eq!(temp_path.as_deref(), Some("/d/a.tmp"));
+                assert!(!register_failed);
+            }
+            _ => panic!("应为 Conflict"),
+        }
+        assert_eq!(c.fs.removed_count(), 0);
+        assert_eq!(c.store.entries().len(), 1);
+        // 关键：#363 —— 目标路径的内容未被我们改写
+        assert_eq!(*c.fs.target.borrow(), Some(st(42, 9)));
+    }
+
+    /// 1176 + stat(temp) 失败 → 视为可能仍在，保留 + 登记，绝不返回 Written
+    #[test]
+    fn t1176_temp_unknown_never_returns_written() {
+        let c = ctx(Some(st(42, 9)));
+        c.fs.stat_errors_for_temp.set(100);
+        let err = run(&c, CommitMode::ReplaceExisting, |_m, _t, _g| Err(ReplaceError::ReplacementMoveFailed)).unwrap_err();
+        match err {
+            AtomicError::Outcome(SaveOutcome::Conflict { temp_path, .. }) => {
+                assert_eq!(temp_path.as_deref(), Some("/d/a.tmp"))
+            }
+            AtomicError::Cmd(e) => assert_eq!(e.code, ErrorCode::TempKept),
+            _ => panic!("stat(temp)=Err 时绝不能返回 Written"),
+        }
+        assert_eq!(c.fs.removed_count(), 0);
+        assert_eq!(c.store.entries().len(), 1);
+    }
+
+    /// 1176 + temp 已不在、目标在 → 无法确认目标是否为我们所写 → Conflict，不谎报成功
+    #[test]
+    fn t1176_temp_gone_target_present_is_conflict() {
+        let c = ctx(Some(st(999, 5)));
+        let err = run(&c, CommitMode::ReplaceExisting, |_m: CommitMode, _t: &Path, _g: &Path| {
+            c.fs.temp_present.set(false);      // commit 可能已移走 temp 又报错
+            Err(ReplaceError::ReplacementMoveFailed)
+        }).unwrap_err();
+        match err {
+            AtomicError::Outcome(SaveOutcome::Conflict { disk, temp_path, .. }) => {
+                assert_eq!(disk, st(999, 5));
+                assert!(temp_path.is_none(), "temp 已不在，不能谎称副本还在");
+            }
+            _ => panic!("应为 Conflict"),
+        }
+    }
+
+    /// 1176 + 两边都不在 → Io，且不得声称"内容在 temp"
+    #[test]
+    fn t1176_both_gone_is_io() {
+        let c = ctx(None);
+        let err = run(&c, CommitMode::ReplaceExisting, |_m: CommitMode, _t: &Path, _g: &Path| {
+            c.fs.temp_present.set(false);
+            Err(ReplaceError::ReplacementMoveFailed)
+        }).unwrap_err();
+        match err {
+            AtomicError::Cmd(e) => assert_eq!(e.code, ErrorCode::Io),
+            _ => panic!("两边都不存在时应报 Io"),
+        }
+        assert_eq!(c.store.entries().len(), 0);
+    }
+
+    /// P2-5：旧写盘入口在 1176 下也必须给结构化错误（带 temp/target）
+    #[test]
+    fn t_write_text_file_sync_surfaces_temp() {
+        let c = ctx(None);
+        let err = write_text_file_sync(&c.fs, Path::new("/d/out.html"), "<h1/>",
+                                       |_m: CommitMode, _t: &Path, _g: &Path| Err(ReplaceError::ReplacementMoveFailed),
+                                       &c.store).unwrap_err();
+        assert_eq!(err.code, ErrorCode::TempKept);
+        assert_eq!(err.path.as_deref(), Some("/d/out.tmp"));
+        assert_eq!(err.target.as_deref(), Some("/d/out.html"));
+        assert_eq!(c.store.entries().len(), 1, "旧入口也不能留下未登记 temp");
+    }
+
+    #[test]
+    fn t1177_match_is_written_and_syncs_parent() {
+        let c = ctx(Some(st(111, 5)));
+        let r = run(&c, CommitMode::ReplaceExisting, |_m, _t, _g| Err(ReplaceError::PartialState)).unwrap();
+        assert!(!r.foreign_write);
+        assert_eq!(c.fs.removed_count(), 0);
+        assert_eq!(c.fs.sync_parent_calls.get(), 1);
+    }
+
+    #[test]
+    fn t1177_mismatch_keeps_temp() {
+        let c = ctx(Some(st(999, 5)));
+        let r = run(&c, CommitMode::ReplaceExisting, |_m, _t, _g| Err(ReplaceError::PartialState));
+        match r {
+            Err(AtomicError::Outcome(SaveOutcome::Conflict { disk, temp_path, register_failed })) => {
+                assert_eq!(disk, st(999, 5));
+                assert_eq!(temp_path.as_deref(), Some("/d/a.tmp"));
+                assert!(!register_failed);
+            }
+            _ => panic!("应为 Conflict"),
+        }
+        assert_eq!(c.fs.removed_count(), 0);
+        assert_eq!(c.store.entries().len(), 1);
+    }
+
+    /// P1-F：1177 登记失败也必须带 temp_path 且 register_failed=true
+    #[test]
+    fn t1177_mismatch_register_failure_still_exposes_temp() {
+        let fs = MockFs::new(Some(st(999, 5)));
+        let store = MutexTempKeptStore::new(true);
+        let r = atomic_write(&fs, Path::new("/d/a.md"), "hello", false, CommitMode::ReplaceExisting,
+                             ReceiptPolicy::MtimeAndSize, Durability::Sync, |_p| Ok(()),
+                             |_m: CommitMode, _t: &Path, _g: &Path| Err(ReplaceError::PartialState), &store);
+        match r {
+            Err(AtomicError::Outcome(SaveOutcome::Conflict { temp_path, register_failed, .. })) => {
+                assert_eq!(temp_path.as_deref(), Some("/d/a.tmp"), "登记失败也不能丢 temp 路径");
+                assert!(register_failed);
+            }
+            _ => panic!("应为 Conflict"),
+        }
+        assert_eq!(fs.removed_count(), 0);
+    }
+
+    /// 1177 且目标不存在 → 与 1176 同路：保留 temp + TempKept，**不在旧路径重建**
+    #[test]
+    fn t1177_target_none_keeps_temp_without_revive() {
+        let c = ctx(None);
+        let err = run(&c, CommitMode::ReplaceExisting, |_m, _t, _g| Err(ReplaceError::PartialState)).unwrap_err();
+        match err {
+            AtomicError::Cmd(e) => assert_eq!(e.code, ErrorCode::TempKept),
+            _ => panic!("目标不存在时应为 TempKept"),
+        }
+        assert_eq!(c.fs.removed_count(), 0);
+        assert_eq!(c.store.entries().len(), 1);
+        assert!(*c.fs.target.borrow() == None, "不得在旧路径重建文件");
+    }
+
+    // ── 耗尽与未知 ──
+
+    #[test]
+    fn t1175_exhausted_removes_temp() {
+        let c = ctx(Some(st(1, 5)));
+        let mut attempts = 0;
+        let r = run(&c, CommitMode::ReplaceExisting, |_m, _t, _g| {
+            attempts += 1;
+            Err(ReplaceError::Other)
+        });
+        match r {
+            Err(AtomicError::Cmd(e)) => assert_eq!(e.code, ErrorCode::Io),
+            _ => panic!("应为 Io"),
+        }
+        assert_eq!(attempts, MAX_ATTEMPTS);
+        assert_eq!(c.fs.removed_count(), 1);
+    }
+
+    /// Unknown 耗尽 + 目标不存在 → TempKept（内容只在 temp）
+    #[test]
+    fn t_unknown_exhausted_keeps_temp_and_registers() {
+        let c = ctx(None);
+        let mut attempts = 0;
+        let r = run(&c, CommitMode::ReplaceExisting, |_m, _t, _g| {
+            attempts += 1;
+            Err(ReplaceError::UnknownTargetState)
+        });
+        match r {
+            Err(AtomicError::Cmd(e)) => {
+                assert_eq!(e.code, ErrorCode::TempKept);
+                assert_eq!(e.path.as_deref(), Some("/d/a.tmp"));
+                assert_eq!(e.target.as_deref(), Some("/d/a.md"));
+            }
+            _ => panic!("应为 TempKept"),
+        }
+        assert_eq!(attempts, MAX_ATTEMPTS);
+        assert_eq!(c.fs.removed_count(), 0, "状态未知绝不删 temp");
+        assert_eq!(c.store.entries().len(), 1);
+    }
+
+    /// Unknown 耗尽 + 目标存在 → 带 tempPath 的 Conflict（让用户选覆盖/另存/采用 temp）
+    #[test]
+    fn t_unknown_exhausted_with_target_is_conflict_with_temp() {
+        let c = ctx(Some(st(1, 5)));
+        let r = run(&c, CommitMode::ReplaceExisting, |_m, _t, _g| Err(ReplaceError::UnknownTargetState));
+        match r {
+            Err(AtomicError::Outcome(SaveOutcome::Conflict { disk, temp_path, register_failed })) => {
+                assert_eq!(disk, st(1, 5));
+                assert_eq!(temp_path.as_deref(), Some("/d/a.tmp"));
+                assert!(!register_failed);
+            }
+            _ => panic!("应为带 tempPath 的 Conflict"),
+        }
+        assert_eq!(c.fs.removed_count(), 0);
+        assert_eq!(c.store.entries().len(), 1);
+    }
+
+    /// P1-E：Unknown 之后 pre-check 发现冲突 → 仍不能删 temp
+    #[test]
+    fn t_unknown_then_precheck_conflict_keeps_temp() {
+        let c = ctx(Some(st(1, 5)));
+        let mut n = 0;
+        let mut pre = |_p: &Path| -> Result<(), AtomicError> {
+            n += 1;
+            if n == 1 {
+                Ok(())
+            } else {
+                Err(AtomicError::Outcome(SaveOutcome::Conflict {
+                    disk: st(8, 5), temp_path: None, register_failed: false,
+                }))
+            }
+        };
+        let r = atomic_write(&c.fs, Path::new("/d/a.md"), "hello", false, CommitMode::ReplaceExisting,
+                             ReceiptPolicy::MtimeAndSize, Durability::Sync, &mut pre,
+                             |_m: CommitMode, _t: &Path, _g: &Path| Err(ReplaceError::UnknownTargetState), &c.store);
+        match r {
+            Err(AtomicError::Outcome(SaveOutcome::Conflict { temp_path, register_failed, .. })) => {
+                assert_eq!(temp_path.as_deref(), Some("/d/a.tmp"));
+                assert!(!register_failed);
+            }
+            _ => panic!("应为带 tempPath 的 Conflict"),
+        }
+        assert_eq!(c.fs.removed_count(), 0, "Unknown 之后的早退不得删 temp");
+        assert_eq!(c.store.entries().len(), 1);
+    }
+
+    /// P1-E：Unknown 之后 commit 返回 NotFound → 也不能删
+    #[test]
+    fn t_unknown_then_notfound_keeps_temp() {
+        let c = ctx(None);
+        let mut n = 0;
+        let r = run(&c, CommitMode::ReplaceExisting, |_m, _t, _g| {
+            n += 1;
+            if n == 1 { Err(ReplaceError::UnknownTargetState) } else { Err(ReplaceError::NotFound) }
+        });
+        match r {
+            Err(AtomicError::Cmd(e)) => assert_eq!(e.code, ErrorCode::TempKept),
+            _ => panic!("应为 TempKept"),
+        }
+        assert_eq!(c.fs.removed_count(), 0);
+        assert_eq!(c.store.entries().len(), 1);
+    }
+
+    /// P1-E：Unknown 之后 AlreadyExists+Some → 带 tempPath 的 Conflict
+    #[test]
+    fn t_unknown_then_already_exists_keeps_temp() {
+        let c = ctx(Some(st(3, 5)));
+        let mut n = 0;
+        let r = run(&c, CommitMode::ReplaceExisting, |_m, _t, _g| {
+            n += 1;
+            if n == 1 { Err(ReplaceError::UnknownTargetState) } else { Err(ReplaceError::AlreadyExists) }
+        });
+        match r {
+            Err(AtomicError::Outcome(SaveOutcome::Conflict { temp_path, .. })) => {
+                assert_eq!(temp_path.as_deref(), Some("/d/a.tmp"));
+            }
+            _ => panic!("应为带 tempPath 的 Conflict"),
+        }
+        assert_eq!(c.fs.removed_count(), 0);
+    }
+
+    /// P1-E：AlreadyExists + stat 一直失败 → 视为唯一副本，耗尽后保留 + 登记
+    #[test]
+    fn t_already_exists_stat_err_keeps_temp() {
+        let c = ctx(Some(st(1, 5)));
+        *c.fs.target.borrow_mut() = None; // 目标不存在
+        c.fs.stat_errors.set(100);        // 并且 stat 一直失败
+        let mut attempts = 0;
+        let r = run(&c, CommitMode::CreateExclusive, |_m, _t, _g| {
+            attempts += 1;
+            Err(ReplaceError::AlreadyExists)
+        });
+        match r {
+            Err(AtomicError::Cmd(e)) => assert_eq!(e.code, ErrorCode::TempKept),
+            _ => panic!("应为 TempKept（拿不到目标状态就不许删）"),
+        }
+        assert_eq!(attempts, MAX_ATTEMPTS);
+        assert_eq!(c.fs.removed_count(), 0);
+        assert_eq!(c.store.entries().len(), 1);
+    }
+
+    // ── 回执 / 父目录 / 登记 ──
+
+    #[test]
+    fn t_register_failure_surfaces_with_target() {
+        let fs = MockFs::new(None);
+        let store = MutexTempKeptStore::new(true);
+        let commit = |_m: CommitMode, _t: &Path, _g: &Path| Err(ReplaceError::ReplacementMoveFailed);
+        let err = atomic_write(&fs, Path::new("/d/a.md"), "hello", false, CommitMode::ReplaceExisting,
+                               ReceiptPolicy::MtimeAndSize, Durability::Sync, |_p| Ok(()), commit, &store).unwrap_err();
+        match err {
+            AtomicError::Cmd(e) => {
+                assert_eq!(e.code, ErrorCode::TempRegisterFailed);
+                assert_eq!(e.path.as_deref(), Some("/d/a.tmp"));
+                assert_eq!(e.target.as_deref(), Some("/d/a.md"));
+            }
+            _ => panic!("应为 TempRegisterFailed"),
+        }
+        assert_eq!(fs.removed_count(), 0);
+    }
+
+    #[test]
+    fn t_parent_missing_writes_nothing() {
+        let mut c = ctx(Some(st(1, 5)));
+        c.fs.parent_exists = false;
+        let r = run(&c, CommitMode::ReplaceExisting, |_m, _t, _g| Ok(()));
+        assert!(matches!(r, Err(AtomicError::Outcome(SaveOutcome::ParentMissing { .. }))));
+        assert!(c.fs.written.borrow().is_empty());
+        assert_eq!(c.fs.removed_count(), 0);
+    }
+
+    #[test]
+    fn t_receipt_stat_retry() {
+        let c = ctx(Some(st(111, 5)));
+        c.fs.stat_errors.set(1);
+        let r = run(&c, CommitMode::ReplaceExisting, |_m, _t, _g| Ok(())).unwrap();
+        assert_eq!(r.stat, st(111, 5));
+    }
+
+    #[test]
+    fn t_receipt_stat_fail_is_conservative() {
+        let c = ctx(Some(st(111, 5)));
+        c.fs.stat_errors.set(10);
+        let r = run(&c, CommitMode::ReplaceExisting, |_m, _t, _g| Ok(())).unwrap();
+        assert!(r.foreign_write);
+        assert_eq!(r.stat, st(111, 5));
+    }
+
+    #[test]
+    fn t_readback_policy_no_false_positive() {
+        let c = ctx(Some(st(1, 5)));
+        *c.fs.disk_text.borrow_mut() = "hello".into();
+        let r = atomic_write(&c.fs, Path::new("/d/a.md"), "hello", false, CommitMode::ReplaceExisting,
+                             ReceiptPolicy::ReadBack, Durability::Sync, |_p| Ok(()),
+                             |_m: CommitMode, _t: &Path, _g: &Path| Ok(()), &c.store).unwrap();
+        assert!(!r.foreign_write);
+    }
+
+    #[test]
+    fn t_write_document_maps_outcomes() {
+        let c = ctx(None);
+        let out = write_document_with(&c.fs, Path::new("/d/a.md"), "hi", Some(st(1, 5)), false, false,
+                                      ReceiptPolicy::MtimeAndSize, |_p| Ok(()),
+                                      |_m: CommitMode, _t: &Path, _g: &Path| Err(ReplaceError::NotFound), &c.store);
+        assert_eq!(out.unwrap(), SaveOutcome::NotFound);
+    }
+
+    /// settle()：目标 stat 持续失败 → 三态 Unknown，保留 + 登记（不能当"不存在"）
+    #[test]
+    fn t_settle_target_unknown_keeps_temp() {
+        let c = ctx(Some(st(1, 5)));
+        c.fs.stat_errors.set(100);
+        let r = run(&c, CommitMode::ReplaceExisting, |_m, _t, _g| Err(ReplaceError::UnknownTargetState));
+        match r {
+            Err(AtomicError::Cmd(e)) => assert_eq!(e.code, ErrorCode::TempKept),
+            _ => panic!("目标状态未知时应保留 temp"),
+        }
+        assert_eq!(c.fs.removed_count(), 0);
+        assert_eq!(c.store.entries().len(), 1);
+    }
+
+    /// pre-check 粘性分支：目标 stat 失败也不得删 temp
+    #[test]
+    fn t_sticky_precheck_target_unknown_keeps_temp() {
+        let c = ctx(Some(st(1, 5)));
+        let mut n = 0;
+        let mut pre = |_p: &Path| -> Result<(), AtomicError> {
+            n += 1;
+            if n == 1 {
+                Ok(())
+            } else {
+                Err(AtomicError::Cmd(CmdError {
+                    code: ErrorCode::Io,
+                    message: "precheck io".into(),
+                    path: None,
+                    target: None,
+                }))
+            }
+        };
+        let r = atomic_write(&c.fs, Path::new("/d/a.md"), "hello", false, CommitMode::ReplaceExisting,
+                             ReceiptPolicy::MtimeAndSize, Durability::Sync, &mut pre,
+                             |_m: CommitMode, _t: &Path, _g: &Path| Err(ReplaceError::UnknownTargetState), &c.store);
+        match r {
+            // 目标存在 → 带 tempPath 的 Conflict
+            Err(AtomicError::Outcome(SaveOutcome::Conflict { temp_path, .. })) => {
+                assert_eq!(temp_path.as_deref(), Some("/d/a.tmp"))
+            }
+            // 目标不存在/未知 → TempKept
+            Err(AtomicError::Cmd(_)) => {}
+            _ => panic!("粘性置位后不得返回成功"),
+        }
+        assert_eq!(c.fs.removed_count(), 0);
+        assert_eq!(c.store.entries().len(), 1);
+    }
+
+    /// 旧入口：1176 且目标存在 → 内部是 Conflict，外部仍映射为结构化 TempKept（带 temp/target）
+    #[test]
+    fn t_write_text_file_1176_rebuilt_is_structured() {
+        let c = ctx(Some(st(42, 9)));
+        let commit = |_m: CommitMode, _t: &Path, _g: &Path| Err(ReplaceError::ReplacementMoveFailed);
+        let err = write_text_file_sync(&c.fs, Path::new("/d/out.html"), "<h1/>", commit, &c.store).unwrap_err();
+        assert_eq!(err.code, ErrorCode::TempKept);
+        assert_eq!(err.path.as_deref(), Some("/d/out.tmp"));
+        assert_eq!(err.target.as_deref(), Some("/d/out.html"));
+        assert_eq!(c.store.entries().len(), 1);
+        assert_eq!(c.fs.removed_count(), 0);
+    }
+
+    /// Durability::Sync → sync_temp 1 次、sync_parent 1 次
+    #[test]
+    fn t_durability_sync_syncs_once() {
+        let c = ctx(Some(st(1, 5)));
+        let r = atomic_write(&c.fs, Path::new("/d/a.md"), "hello", false, CommitMode::ReplaceExisting,
+                             ReceiptPolicy::MtimeAndSize, Durability::Sync, |_p| Ok(()),
+                             |_m: CommitMode, _t: &Path, _g: &Path| Ok(()), &c.store).unwrap();
+        assert_eq!(r.stat, st(1, 5));
+        assert_eq!(c.fs.sync_temp_calls.get(), 1, "Sync 必须 sync 临时文件");
+        assert_eq!(c.fs.sync_parent_calls.get(), 1, "Sync 必须 fsync 父目录");
+    }
+
+    /// Durability::None（journal 防抖）→ 一次 fsync 都不做
+    #[test]
+    fn t_durability_none_skips_fsync() {
+        let c = ctx(Some(st(1, 5)));
+        let r = atomic_write(&c.fs, Path::new("/d/a.md"), "hello", false, CommitMode::ReplaceExisting,
+                             ReceiptPolicy::MtimeAndSize, Durability::None, |_p| Ok(()),
+                             |_m: CommitMode, _t: &Path, _g: &Path| Ok(()), &c.store).unwrap();
+        assert_eq!(r.stat, st(1, 5));
+        assert_eq!(c.fs.sync_temp_calls.get(), 0, "None 不得 sync 临时文件");
+        assert_eq!(c.fs.sync_parent_calls.get(), 0, "None 不得 fsync 父目录");
+    }
+
+    /// Unsupported → 平台内部回退成功 → Written，且**不置位**粘性标志
+    #[test]
+    fn t_unsupported_then_ok_is_written() {
+        let c = ctx(Some(st(1, 5)));
+        let mut n = 0;
+        let r = run(&c, CommitMode::ReplaceExisting, |_m, _t, _g| {
+            n += 1;
+            if n == 1 { Err(ReplaceError::Unsupported) } else { Ok(()) }
+        }).unwrap();
+        assert_eq!(r.stat, st(1, 5));
+        assert_eq!(c.fs.removed_count(), 0);
+        assert!(c.store.entries().is_empty(), "Unsupported 不应留下 temp 登记");
+    }
+
+    /// Unsupported 持续失败 → 普通 Io（不是 TempKept），temp 可清
+    #[test]
+    fn t_unsupported_exhausted_is_io() {
+        let c = ctx(Some(st(1, 5)));
+        let r = run(&c, CommitMode::ReplaceExisting, |_m, _t, _g| Err(ReplaceError::Unsupported));
+        match r {
+            Err(AtomicError::Cmd(e)) => assert_eq!(e.code, ErrorCode::Io),
+            _ => panic!("Unsupported 耗尽应为 Io"),
+        }
+        assert_eq!(c.fs.removed_count(), 1);
+        assert!(c.store.entries().is_empty());
+    }
+
+    /// recovery 写入（RegisterPolicy::Never）：1176 半失败 → 删 temp + Io，不登记
+    #[test]
+    fn t_recovery_never_registers_on_1176() {
+        let fs = MockFs::new(None);
+        let store = NoRegisterStore;
+        let err = atomic_write(&fs, Path::new("/r/drafts/a.json"), "{}", false, CommitMode::CreateOrReplace,
+                               ReceiptPolicy::MtimeAndSize, Durability::None, |_p| Ok(()),
+                               |_m: CommitMode, _t: &Path, _g: &Path| Err(ReplaceError::ReplacementMoveFailed),
+                               &store).unwrap_err();
+        match err {
+            AtomicError::Cmd(e) => assert_eq!(e.code, ErrorCode::Io),
+            _ => panic!("Never 策略下应为 Io"),
+        }
+        assert_eq!(fs.removed_count(), 1, "必须删掉临时文件");
+        assert!(store.entries().is_empty(), "绝不能登记");
+    }
+
+    /// recovery 写入：1177 不匹配 → 同样删 temp + Io
+    #[test]
+    fn t_recovery_never_registers_on_1177_mismatch() {
+        let fs = MockFs::new(Some(st(999, 5)));
+        let store = NoRegisterStore;
+        let err = atomic_write(&fs, Path::new("/r/drafts/a.json"), "{}", false, CommitMode::CreateOrReplace,
+                               ReceiptPolicy::MtimeAndSize, Durability::None, |_p| Ok(()),
+                               |_m: CommitMode, _t: &Path, _g: &Path| Err(ReplaceError::PartialState),
+                               &store).unwrap_err();
+        match err {
+            AtomicError::Cmd(e) => assert_eq!(e.code, ErrorCode::Io),
+            _ => panic!("Never 策略下应为 Io"),
+        }
+        assert_eq!(fs.removed_count(), 1);
+        assert!(store.entries().is_empty());
+    }
+
+    /// 真并发：MutexTempKeptStore 必须保留两笔（不是"顺序调两次"）
+    #[test]
+    fn t_concurrent_registration_keeps_both() {
+        let store = Arc::new(MutexTempKeptStore::new(false));
+        let s1 = store.clone();
+        let s2 = store.clone();
+        let h1 = std::thread::spawn(move || s1.register(Path::new("/d/a.tmp"), Path::new("/d/a.md")).unwrap());
+        let h2 = std::thread::spawn(move || s2.register(Path::new("/d/b.tmp"), Path::new("/d/b.md")).unwrap());
+        h1.join().unwrap();
+        h2.join().unwrap();
+        assert_eq!(store.entries().len(), 2);
+    }
+}
+
