@@ -13,12 +13,15 @@ import {
   mergeDirectoryListing,
 } from "../../lib/fileTree";
 import {
+  DELETED_SNAPSHOT_LIMIT,
   directoryRequests,
   fileRequests,
   forcedDirectoryRequests,
   intents,
+  loadDeletedSnapshots,
   loadExpandedDirs,
   markDeletedDuringLoad,
+  markTombstone,
   parentDir,
   persistBookmarks,
   persistDeletedSnapshot,
@@ -27,6 +30,8 @@ import {
   rebaseDeletedDuringLoad,
   rebasePathPrefix,
   settledPathOfRequest,
+  snapshotCharBudget,
+  snapshotEntryChars,
 } from "./shared";
 import type { WorkspaceState } from "./types";
 
@@ -257,6 +262,11 @@ export const createFileTreeSlice: StateCreator<
   },
 
   onFileRenamed: (from, to) => {
+    // 旧路径打 tombstone（#362 §5.4）：改名发生时若有保存在途，落定后不许写回旧位置
+    markTombstone(from, "renamed");
+    for (const tab of get().openTabs) {
+      if (isPathWithin(tab.path, from)) markTombstone(tab.path, "renamed");
+    }
     const {
       openTabs,
       activeTabPath,
@@ -372,25 +382,64 @@ export const createFileTreeSlice: StateCreator<
     const affectedTabs = openTabs.filter((t) => isPathWithin(t.path, path));
     const alsoBackup = new Set(options?.alsoBackup ?? []);
     const backupTabs = affectedTabs.filter((t) => t.dirty || alsoBackup.has(t.path));
-    let failedSnapshots = 0;
+
+    // 每个旧路径都打 tombstone（#362 §5.4）：写盘在途时删除/改名，落定后绝不能
+    // 在旧位置把文件或整条目录重建出来
+    markTombstone(path, "deleted");
+    for (const tab of affectedTabs) markTombstone(tab.path, "deleted");
+
+    // 快照配额：条目数 + 字符预算双条件。超额时**整批不写、保留 tab**，
+    // 绝不「淘汰旧的换新的」——那会删掉其它已删文件的唯一副本
+    const required = new Map<string, string>();
     for (const tab of backupTabs) {
-      const contentToSave = tab.path === get().activeTabPath ? currentContent : (tab.content ?? "");
-      const saved = persistDeletedSnapshot(tab.path, contentToSave);
+      required.set(tab.path, tab.path === get().activeTabPath ? currentContent : (tab.content ?? ""));
+    }
+    const existingSnapshots = loadDeletedSnapshots();
+    const existingPaths = new Set(existingSnapshots.map((s) => s.path));
+    let usedEntries = existingSnapshots.length;
+    let usedChars = existingSnapshots.reduce(
+      (acc, s) => acc + snapshotEntryChars(s.path, s.content),
+      0,
+    );
+    for (const [snapshotPath, snapshotContent] of required) {
+      if (existingPaths.has(snapshotPath)) continue; // 同 path 会被覆盖，不重复占额
+      usedEntries += 1;
+      usedChars += snapshotEntryChars(snapshotPath, snapshotContent);
+    }
+    const quotaOk =
+      usedEntries <= DELETED_SNAPSHOT_LIMIT && usedChars <= snapshotCharBudget();
+
+    /** 快照失败的 tab 保留（标记已删除），不关闭 */
+    const keptTabs = new Set<string>();
+    for (const tab of backupTabs) {
+      const contentToSave = required.get(tab.path) ?? "";
+      const saved = quotaOk && persistDeletedSnapshot(tab.path, contentToSave);
       if (!saved) {
         console.warn(`[workspace] 写入已删除文件快照失败（可能超出配额）：${tab.path}`);
-        failedSnapshots += 1;
+        keptTabs.add(tab.path);
       }
     }
-    if (failedSnapshots > 0) {
-      const msg = failedSnapshots === backupTabs.length
-        ? "删除时未能为未保存文件创建恢复备份（存储空间不足），这些文件的未保存内容将丢失。"
-        : `删除时有 ${failedSnapshots} 个未保存文件未能创建恢复备份（存储空间不足），其内容无法恢复。`;
-      void showMessage(msg, { kind: "error", title: "恢复备份写入失败" });
+    if (keptTabs.size > 0) {
+      void showMessage(
+        !quotaOk
+          ? "未保存文件过多，已保留标签页、未写恢复备份。请逐个「另存为」以免丢失内容。"
+          : `删除时有 ${keptTabs.size} 个未保存文件未能创建恢复备份（存储空间不足），已保留标签页。`,
+        { kind: "error", title: "恢复备份写入失败" },
+      );
     }
 
     // 删除目录时其下所有子文件 tab 一并关闭（#366 / #363）：只关同路径 tab 会留下
-    // 指向已删除路径的 tab，后续保存可能把整个目录重建出来。dirty 内容已在上方存快照
+    // 指向已删除路径的 tab，后续保存可能把整个目录重建出来。dirty 内容已在上方存快照；
+    // 快照写失败的保留 tab（deletedOnDisk），让用户能另存出去
     for (const tab of affectedTabs) {
+      if (keptTabs.has(tab.path)) {
+        set((current) => ({
+          openTabs: current.openTabs.map((t) =>
+            t.path === tab.path ? { ...t, deletedOnDisk: true, dirty: true } : t,
+          ),
+        }));
+        continue;
+      }
       get().closeTab(tab.path);
     }
     // 同步 recentFiles（移除被删除文件及其目录下的子项，#366）

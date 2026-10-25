@@ -83,9 +83,14 @@ describe("#123 删除快照写入失败的用户可见告警", () => {
 
     useWorkspace.getState().onFileDeleted("/workspace/note.md");
 
-    expect(useWorkspace.getState().openTabs.length).toBe(0);
+    // #362：快照写失败不再关 tab（那会连内容一起丢掉）——保留 tab 并标记已删除，
+    // 让用户能把内容另存出去
+    const tabs = useWorkspace.getState().openTabs;
+    expect(tabs).toHaveLength(1);
+    expect(tabs[0].deletedOnDisk).toBe(true);
+    expect(tabs[0].dirty).toBe(true);
     expect(showMessage).toHaveBeenCalledWith(
-      "删除时未能为未保存文件创建恢复备份（存储空间不足），这些文件的未保存内容将丢失。",
+      expect.stringContaining("未能创建恢复备份"),
       expect.objectContaining({ kind: "error", title: "恢复备份写入失败" }),
     );
   });
