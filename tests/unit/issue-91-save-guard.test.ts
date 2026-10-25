@@ -6,6 +6,16 @@ vi.mock("../../src/lib/fs", () => ({
   writeTextFile: vi.fn(),
   readTextFile: vi.fn(),
   resolveImageSrc: vi.fn((p: string) => p),
+  // #362：保存走 save_document（写盘回执）。本用例断言的是「保存抛错后的状态机」，
+  // 这里把回执实现成「调用 writeTextFile 并透传其拒绝」，观察面与旧实现一致
+  saveDocument: async (path: string, content: string, options: { expected?: unknown } = {}) => {
+    await vi.mocked(fs.writeTextFile)(path, content, options.expected ? { mustExist: true } : undefined);
+    return {
+      kind: "written",
+      stat: { mtimeUs: 1_700_000_000_000_000, size: 1 },
+      foreignWrite: false,
+    };
+  },
 }));
 
 describe("Issue #91: Save re-entrancy guard and exception handling", () => {

@@ -36,6 +36,16 @@ vi.mock("../../src/lib/fs", () => ({
     stat: { mtimeUs: 1_700_000_000_000_000, size: 1 },
   }),
   fileStat: async () => ({ mtimeUs: 1_700_000_000_000_000, size: 1 }),
+  // #362：保存走 save_document（写盘回执）。委派给 writeTextFile mock，
+  // 让既有「按 mustExist 断言写入参数」的用例保持同一观察面
+  saveDocument: async (path: string, content: string) => {
+    await writeTextFileMock(path, content, { mustExist: true });
+    return {
+      kind: "written",
+      stat: { mtimeUs: 1_700_000_000_000_000, size: 1 },
+      foreignWrite: false,
+    };
+  },
 }));
 
 import { useWorkspace } from "../../src/store/workspace";

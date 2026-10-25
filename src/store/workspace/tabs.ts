@@ -5,7 +5,14 @@
 
 import type { StateCreator } from "zustand";
 import { isTauri } from "@tauri-apps/api/core";
-import { fileMtime, fileStat, readDocument, readTextFile, writeTextFile } from "../../lib/fs";
+import {
+  fileMtime,
+  fileStat,
+  readDocument,
+  readTextFile,
+  saveDocument,
+  writeTextFile,
+} from "../../lib/fs";
 import type { DocumentSnapshot, FileStat } from "../../lib/fs";
 import { formatCmdError } from "../../lib/cmd-error";
 import { evaluateBaseline, reconcileDiskContent } from "../../lib/save-guard";
@@ -455,6 +462,18 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
    */
   const markMissingOnDisk = (targetPath: string) => {
     markDeletedOnDisk(targetPath);
+  };
+
+  /** 写盘回执判为冲突（#362）：标记冲突待处理，自动保存据此暂停 */
+  const markConflictPending = (targetPath: string) => {
+    set((current) => {
+      const openTabs = current.openTabs.map((t) =>
+        t.path === targetPath ? { ...t, conflictPending: true } : t,
+      );
+      return current.activeTabPath === targetPath
+        ? { openTabs, conflictPending: true }
+        : { openTabs };
+    });
   };
 
   /**
@@ -1272,17 +1291,120 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
 
         // 「已删除文件」经用户选择重新创建 / 另存为后，磁盘上多出一个文件
         let resolvedMissing = false;
+        // 基线直接取写盘回执（#362 M1）：内容与磁盘身份来自同一次提交，
+        // 不再「写完再 stat」——那中间的任意外写都会让基线指向别人的内容
+        let savedStat: FileStat | undefined;
         try {
-          // issue #363：保存已有文档只覆盖「仍在原处」的文件——被删除 / 改名 / 所在目录
-          // 被删 / 原路径被占用时写盘被拒，绝不悄悄写回。草稿的保存目标由用户在
-          // 另存为对话框中选定，照常写入
           if (tab.isUntitled) {
+            // 草稿另存为：目标由用户在对话框选定，允许创建
             await writeTextFile(savePath, contentToSave);
-          } else {
+            try {
+              savedStat = await fileStat(savePath);
+            } catch {
+              // 取不到身份就留空基线，下次读盘重建
+            }
+          } else if (!tab.diskStat) {
+            // 没有成对基线（旧 tab / 恢复出来的 tab）：退回「必须存在」的写盘，
+            // 仍不允许复活已删文件，但没有身份可比，也就无法改判冲突
             await writeTextFile(savePath, contentToSave, { mustExist: true });
+            try {
+              savedStat = await fileStat(savePath);
+            } catch {
+              // 留空基线
+            }
+          } else {
+            const attempt = (expected?: FileStat) =>
+              saveDocument(savePath, contentToSave, { expected });
+
+            // expected = 上次成对读到的磁盘身份：目标消失 → notFound，身份变了 → conflict
+            let outcome = await attempt(tab.diskStat);
+            if (outcome.kind === "conflict") {
+              // 磁盘内容仍等于我们的基线 → 只是 mtime 变了（touch / 基线过期），
+              // adopt 新身份后重试一次（M2 三路里的 touch-only，不打扰用户）
+              const disk = await readDocument(savePath).catch(() => null);
+              if (disk && tab.diskContent !== undefined && disk.content === tab.diskContent) {
+                set((current) => ({
+                  openTabs: current.openTabs.map((t) =>
+                    t.path === activeTabPath ? { ...t, diskStat: disk.stat } : t,
+                  ),
+                }));
+                outcome = await attempt(disk.stat);
+              }
+            }
+
+            if (outcome.kind === "written") {
+              // foreignWrite = 写后回执降级（拿不到可信 stat）：不登记基线，
+              // 宁可下一轮多读一次盘，也不把可疑身份当基线
+              savedStat = outcome.foreignWrite ? undefined : outcome.stat;
+            } else if (outcome.kind === "conflict") {
+              if (!interactive) {
+                // 自动保存不打扰用户：只标记冲突待处理（下次切回/保存时再问）
+                markConflictPending(activeTabPath);
+                applyTabSaving(activeTabPath, false);
+                return;
+              }
+              // 回执说磁盘变了：读最新内容开冲突对话框（引擎已完成「同内容 → written」判定）
+              const disk = await readDocument(savePath).catch(() => null);
+              if (disk) {
+                set((current) => ({
+                  openTabs: current.openTabs.map((t) =>
+                    t.path === activeTabPath ? { ...t, diskStat: disk.stat } : t,
+                  ),
+                }));
+              }
+              useConflict.getState().openConflict({
+                filePath: savePath,
+                localContent: contentToSave,
+                diskContent: disk?.content ?? "",
+                detectedAt: Date.now(),
+              });
+              if (outcome.tempPath) {
+                const { showMessage } = await import("../../lib/dialogs");
+                void showMessage(
+                  `本次写入的内容保留在临时文件：${outcome.tempPath}` +
+                    (outcome.registerFailed
+                      ? "\n登记失败：重启后可能找不到，请立即另存。"
+                      : ""),
+                  { kind: "warning", title: "保存未完成" },
+                );
+              }
+              applyTabSaving(activeTabPath, false);
+              return;
+            } else {
+              // notFound / parentMissing：文件已不在原处（#363），交给三选项
+              let code: WriteErrorCode = outcome.kind === "notFound" ? "TARGET_MISSING" : "PARENT_MISSING";
+              if (outcome.kind === "parentMissing") {
+                // 细分「父目录缺失」：路径被同名文件占用时不能提供「重新创建」（必然失败）。
+                // 用一次必然失败的写盘拿准确 code，避免把 PARENT_NOT_DIR 说成 PARENT_MISSING
+                try {
+                  await writeTextFile(savePath, contentToSave);
+                } catch (e) {
+                  code = writeErrorCode(e) ?? code;
+                }
+              }
+              markMissingOnDisk(activeTabPath);
+              if (!interactive) {
+                applyTabSaving(activeTabPath, false);
+                return;
+              }
+              const resolvedPath = await resolveMissingFileSave(savePath, code, contentToSave);
+              if (!resolvedPath) {
+                applyTabSaving(activeTabPath, false);
+                return;
+              }
+              savePath = resolvedPath;
+              resolvedMissing = true;
+              try {
+                savedStat = await fileStat(savePath);
+              } catch {
+                // 同上：留空基线
+              }
+            }
           }
         } catch (e) {
-          const code = tab.isUntitled ? null : writeErrorCode(e);
+          // 只处理「可归类的写盘异常」（权限 / Io / 半失败）；其余照旧上抛
+          if (tab.isUntitled) throw e;
+          const code = writeErrorCode(e);
           if (!code) throw e;
           markMissingOnDisk(activeTabPath);
           if (!interactive) {
@@ -1299,15 +1421,6 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
         }
         const pathChanged = savePath !== activeTabPath;
         const now = Date.now();
-        // 写盘成功后的基线（#362 §12 ③）：内容与磁盘身份尽量同源。
-        // PR-2 会换成写盘回执（pathRev）；在此之前先补一次 fileStat，
-        // 否则 diskContent 已是新内容而 diskStat 还停在旧身份，下一轮 switchTab 必判「变了」
-        let savedStat: FileStat | undefined;
-        try {
-          savedStat = await fileStat(savePath);
-        } catch {
-          // 取不到身份（权限 / 瞬时错误）：宁可保留空基线（下次读盘重建），也不写假基线
-        }
         const savedMtime = savedStat ? mtimeMsOf(savedStat) : undefined;
         // 异步窗口结束后重新获取最新 store 状态，避免覆盖窗口期间其他 tab / 分屏并发发布的编辑内容
         const latestState = get();

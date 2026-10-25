@@ -172,6 +172,67 @@ export async function fileStat(filePath: string): Promise<FileStat> {
   return { ...stat };
 }
 
+/** 保存结果（与 Rust `SaveOutcome` 一一对应）：可预期业务结果，不是异常 */
+export type SaveOutcome =
+  | { kind: "written"; stat: FileStat; foreignWrite: boolean }
+  | { kind: "conflict"; disk: FileStat; tempPath?: string; registerFailed: boolean }
+  | { kind: "notFound" }
+  | { kind: "parentMissing"; parent: string };
+
+export interface SaveDocumentOptions {
+  /**
+   * 上次成对读取的磁盘身份。给了就要求「目标仍在原处且身份未变」：
+   * 目标消失返回 `notFound`（绝不复活），身份变化返回 `conflict`。
+   */
+  expected?: FileStat;
+  /** 父目录缺失时补建：仅用于用户确认「在原位置重新创建」 */
+  createParentDirs?: boolean;
+  /** 用户已在原生保存对话框确认覆盖；false 时目标出现即 `conflict` */
+  overwriteExisting?: boolean;
+}
+
+/**
+ * 保存文档：替换语义 + 写盘回执（#362 M1）。
+ *
+ * 与 `writeTextFile` 的区别：写与「新基线」来自同一次提交，不再「写完再 stat」——
+ * 那中间的任意外写都会让基线指向别人的内容。
+ */
+export async function saveDocument(
+  filePath: string,
+  content: string,
+  options: SaveDocumentOptions = {},
+): Promise<SaveOutcome> {
+  if (isTauri()) {
+    try {
+      return await invoke<SaveOutcome>("save_document", { filePath, content, ...options });
+    } catch (e) {
+      throw new CmdError(formatCmdError(e));
+    }
+  }
+  // 浏览器 mock：按同一套语义判定，否则 E2E 里「删除后保存」「覆盖确认」全都测不到
+  const { MOCK_FILE_CONTENT, MOCK_FILE_STAT, touchMockStat } = await import("./mockFs");
+  const exists = Object.prototype.hasOwnProperty.call(MOCK_FILE_CONTENT, filePath);
+  if (!exists) {
+    if (options.expected) return { kind: "notFound" };
+    MOCK_FILE_CONTENT[filePath] = content;
+    touchMockStat(filePath, content);
+    return { kind: "written", stat: { ...MOCK_FILE_STAT[filePath] }, foreignWrite: false };
+  }
+  const current = MOCK_FILE_STAT[filePath];
+  if (
+    options.expected &&
+    (current.mtimeUs !== options.expected.mtimeUs || current.size !== options.expected.size)
+  ) {
+    return { kind: "conflict", disk: { ...current }, registerFailed: false };
+  }
+  if (!options.expected && !options.overwriteExisting) {
+    return { kind: "conflict", disk: { ...current }, registerFailed: false };
+  }
+  MOCK_FILE_CONTENT[filePath] = content;
+  touchMockStat(filePath, content);
+  return { kind: "written", stat: { ...MOCK_FILE_STAT[filePath] }, foreignWrite: false };
+}
+
 /**
  * 写入文本文件。默认不补建父目录（缺失抛 PARENT_MISSING），目标被目录等占用抛 NOT_A_FILE。
  */

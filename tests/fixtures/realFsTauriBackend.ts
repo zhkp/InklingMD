@@ -146,6 +146,40 @@ export function createRealFsBackend() {
       return { content, stat: toFileStat(after) };
     },
     file_stat: ({ filePath }) => toFileStat(statOfFile(filePath)),
+    // #362 写路径：替换语义 + 回执。语义必须与 Rust `save_document` 一致，
+    // 否则「删除后保存」「外部改动」这些真实 FS 用例会变成伪断言
+    save_document: (a: Record<string, any>) => {
+      const { filePath, content, expected, createParentDirs, overwriteExisting } = a as {
+        filePath: string;
+        content: string;
+        expected?: { mtimeUs: number; size: number } | null;
+        createParentDirs?: boolean;
+        overwriteExisting?: boolean;
+      };
+      const parent = nodePath.dirname(filePath);
+      if (!nodeFs.existsSync(parent) || !nodeFs.statSync(parent).isDirectory()) {
+        if (!createParentDirs) return { kind: "parentMissing", parent };
+        nodeFs.mkdirSync(parent, { recursive: true });
+      }
+      const exists = nodeFs.existsSync(filePath);
+      if (exists && !nodeFs.statSync(filePath).isFile()) {
+        return cmdError("notAFile", `目标路径不是普通文件: ${filePath}`);
+      }
+      if (exists) {
+        const current = toFileStat(nodeFs.statSync(filePath));
+        if (expected && (current.mtimeUs !== expected.mtimeUs || current.size !== expected.size)) {
+          return { kind: "conflict", disk: current, registerFailed: false };
+        }
+        if (!expected && !overwriteExisting) {
+          return { kind: "conflict", disk: current, registerFailed: false };
+        }
+      } else if (expected) {
+        // 目标消失绝不复活（#363）
+        return { kind: "notFound" };
+      }
+      atomicWrite(filePath, Buffer.from(content, "utf8"));
+      return { kind: "written", stat: toFileStat(nodeFs.statSync(filePath)), foreignWrite: false };
+    },
     file_mtime: ({ filePath }) => {
       if (!nodeFs.existsSync(filePath)) throw `文件不存在: ${filePath}`;
       const stat = nodeFs.statSync(filePath);

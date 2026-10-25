@@ -48,6 +48,15 @@ vi.mock("../../src/lib/fs", async (importOriginal) => {
     writeTextFile: writeTextFileMock,
     fileMtime: fileMtimeMock,
     listDir: listDirMock,
+    // #362：保存走 save_document（写盘回执），委派给 writeTextFile mock 保持既有断言
+    saveDocument: async (path: string, content: string) => {
+      await writeTextFileMock(path, content, { mustExist: true });
+      return {
+        kind: "written",
+        stat: { mtimeUs: 1_700_000_000_000_000, size: 1 },
+        foreignWrite: false,
+      };
+    },
   };
 });
 
