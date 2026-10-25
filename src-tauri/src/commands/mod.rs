@@ -30,7 +30,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -267,6 +267,126 @@ mod tests {
     impl Drop for TestDir {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.path);
+        }
+    }
+
+    // ── #362 写路径：save_document 的替换语义与三路判定 ──
+
+    /// 写成功：内容落盘、回执可用、目录里不残留临时文件
+    #[test]
+    fn save_document_replaces_existing_and_leaves_no_temp() {
+        let dir = TestDir::new("save-replace");
+        let file = dir.path.join("doc.md");
+        fs::write(&file, "old").unwrap();
+        let expected = write_engine::read_document_sync(&file.to_string_lossy()).unwrap().stat;
+
+        let outcome =
+            save_document_sync(&file.to_string_lossy(), "new".into(), Some(expected), false, false)
+                .unwrap();
+
+        match outcome {
+            write_engine::SaveOutcome::Written { stat, foreign_write } => {
+                assert_eq!(fs::read_to_string(&file).unwrap(), "new");
+                // 回执必须描述「刚写下去的内容」，而不是写之前的旧 stat
+                assert_eq!(stat.size, 3);
+                assert!(!foreign_write);
+            }
+            other => panic!("expected Written, got {other:?}"),
+        }
+        assert_no_dot_temp(&dir.path);
+    }
+
+    /// 目标在提交前消失：返回 NotFound，且绝不把文件重建出来（#363 的核心）
+    #[test]
+    fn save_document_never_resurrects_a_deleted_file() {
+        let dir = TestDir::new("save-deleted");
+        let file = dir.path.join("doc.md");
+        fs::write(&file, "old").unwrap();
+        let expected = write_engine::read_document_sync(&file.to_string_lossy()).unwrap().stat;
+        fs::remove_file(&file).unwrap();
+
+        let outcome =
+            save_document_sync(&file.to_string_lossy(), "new".into(), Some(expected), false, false)
+                .unwrap();
+
+        assert!(matches!(outcome, write_engine::SaveOutcome::NotFound));
+        assert!(!file.exists(), "被删除的文件不得被写回");
+        assert_no_dot_temp(&dir.path);
+    }
+
+    /// 身份不匹配（外部已改）：返回 Conflict + 磁盘现状，且磁盘内容不被覆盖
+    #[test]
+    fn save_document_reports_conflict_when_disk_changed() {
+        let dir = TestDir::new("save-conflict");
+        let file = dir.path.join("doc.md");
+        fs::write(&file, "old").unwrap();
+        let expected = write_engine::read_document_sync(&file.to_string_lossy()).unwrap().stat;
+        // 外部写入：内容与 mtime 都变
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        fs::write(&file, "external").unwrap();
+
+        let outcome =
+            save_document_sync(&file.to_string_lossy(), "mine".into(), Some(expected), false, false)
+                .unwrap();
+
+        match outcome {
+            write_engine::SaveOutcome::Conflict { disk, .. } => {
+                assert_eq!(disk.size, "external".len() as u64);
+            }
+            other => panic!("expected Conflict, got {other:?}"),
+        }
+        assert_eq!(fs::read_to_string(&file).unwrap(), "external", "冲突时不得覆盖");
+        assert_no_dot_temp(&dir.path);
+    }
+
+    /// 另存为未确认覆盖：目标已存在 → Conflict（不静默覆盖别人的文件）
+    #[test]
+    fn save_document_save_as_refuses_to_overwrite_without_consent() {
+        let dir = TestDir::new("save-as");
+        let file = dir.path.join("doc.md");
+        fs::write(&file, "someone else").unwrap();
+
+        let outcome = save_document_sync(&file.to_string_lossy(), "mine".into(), None, false, false)
+            .unwrap();
+
+        assert!(matches!(outcome, write_engine::SaveOutcome::Conflict { .. }));
+        assert_eq!(fs::read_to_string(&file).unwrap(), "someone else");
+        assert_no_dot_temp(&dir.path);
+    }
+
+    /// 父目录缺失且未授权创建：ParentMissing，且不写 temp、不建目录
+    #[test]
+    fn save_document_reports_parent_missing_without_touching_disk() {
+        let dir = TestDir::new("save-parent");
+        let file = dir.path.join("gone/doc.md");
+
+        let outcome = save_document_sync(&file.to_string_lossy(), "x".into(), None, false, false)
+            .unwrap();
+
+        assert!(matches!(outcome, write_engine::SaveOutcome::ParentMissing { .. }));
+        assert!(!dir.path.join("gone").exists());
+        assert_no_dot_temp(&dir.path);
+    }
+
+    /// 用户确认「重新创建」：允许建父目录并落盘
+    #[test]
+    fn save_document_recreates_parents_only_on_request() {
+        let dir = TestDir::new("save-recreate");
+        let file = dir.path.join("gone/sub/doc.md");
+
+        let outcome = save_document_sync(&file.to_string_lossy(), "back".into(), None, true, true)
+            .unwrap();
+
+        assert!(matches!(outcome, write_engine::SaveOutcome::Written { .. }));
+        assert_eq!(fs::read_to_string(&file).unwrap(), "back");
+        assert_no_dot_temp(&dir.path.join("gone/sub"));
+    }
+
+    /// 目录里不得残留 `.<name>.tmp.*`（半失败时的 temp 必须登记或删除，不能凭空留下）
+    fn assert_no_dot_temp(dir: &Path) {
+        for entry in fs::read_dir(dir).unwrap() {
+            let name = entry.unwrap().file_name().to_string_lossy().to_string();
+            assert!(!name.contains(".tmp."), "不应残留临时文件: {name}");
         }
     }
 
@@ -1083,6 +1203,8 @@ pub const WRITE_ERROR_PARENT_MISSING: &str = "PARENT_MISSING";
 pub const WRITE_ERROR_NOT_A_FILE: &str = "NOT_A_FILE";
 /// 父目录（或更上层的祖先）路径被普通文件占据：补建目录也无法恢复
 pub const WRITE_ERROR_PARENT_NOT_DIR: &str = "PARENT_NOT_DIR";
+/// 半失败：本次写入只留在临时文件里（`#362` 的 1176/1177/Unknown），必须让用户另存
+pub const WRITE_ERROR_TEMP_KEPT: &str = "TEMP_KEPT";
 
 /// 文本写入意图（issue #363）：默认既不创建目录、也不要求目标已存在。
 /// 「保存已有文档」必须 must_exist——文件被外部删除/改名后不得被悄悄写回；
@@ -1147,6 +1269,144 @@ fn check_write_target(path: &Path, must_exist: bool) -> Result<(), String> {
     }
 }
 
+// ── #362 写路径：save_document（原子替换 + 写盘回执） ───────────────────────
+
+/// 半失败登记表（全局单文件 `recovery/temp-kept.json`，多窗口共用）。
+static TEMP_KEPT: std::sync::OnceLock<write_engine::TempKeptRegistry> = std::sync::OnceLock::new();
+
+/// 启动时初始化登记表；未初始化时（单测 / 早期调用）退化为临时目录，
+/// 保证保存不会因为「登记表还没就位」而整体失败。
+pub fn init_temp_kept_registry(app_data_dir: PathBuf) {
+    let file = app_data_dir.join("recovery").join("temp-kept.json");
+    let _ = TEMP_KEPT.set(write_engine::TempKeptRegistry::load(file));
+}
+
+fn temp_kept_registry() -> &'static write_engine::TempKeptRegistry {
+    TEMP_KEPT.get_or_init(|| {
+        let file = std::env::temp_dir().join("inklingmd").join("temp-kept.json");
+        write_engine::TempKeptRegistry::load(file)
+    })
+}
+
+/// 保存文档：替换语义 + 写盘回执 + 半失败登记。
+///
+/// `expected` = 上次成对读取的磁盘身份（命名文档保存必须给，目标消失即 `NotFound`，
+/// 绝不复活）；`overwrite_existing` 只在「用户已在原生保存对话框确认覆盖」时为 true，
+/// 否则目标出现即 `Conflict`（不静默覆盖）。
+#[tauri::command]
+pub async fn save_document(
+    file_path: String,
+    content: String,
+    expected: Option<write_engine::FileStat>,
+    create_parent_dirs: Option<bool>,
+    overwrite_existing: Option<bool>,
+) -> Result<write_engine::SaveOutcome, write_engine::CmdError> {
+    let create_parent_dirs = create_parent_dirs.unwrap_or(false);
+    let overwrite_existing = overwrite_existing.unwrap_or(false);
+    tauri::async_runtime::spawn_blocking(move || {
+        save_document_sync(&file_path, content, expected, create_parent_dirs, overwrite_existing)
+    })
+    .await
+    .map_err(|e| {
+        write_engine::CmdError::new(write_engine::ErrorCode::Io, format!("文件写入任务失败: {e}"))
+    })?
+}
+
+fn save_document_sync(
+    file_path: &str,
+    content: String,
+    expected: Option<write_engine::FileStat>,
+    create_parent_dirs: bool,
+    overwrite_existing: bool,
+) -> Result<write_engine::SaveOutcome, write_engine::CmdError> {
+    use write_engine::{AtomicError, CommitMode, Durability, Fs, SaveOutcome, StdFs};
+
+    let path = Path::new(file_path);
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    if !parent.is_dir() {
+        if !create_parent_dirs {
+            return Ok(SaveOutcome::ParentMissing { parent: parent.display().to_string() });
+        }
+        fs::create_dir_all(parent)?;
+    }
+    // 目标被同名目录等占据：与 file_stat / write_text_file 同码（NOT_A_FILE）
+    if let Ok(meta) = fs::metadata(path) {
+        if !meta.is_file() {
+            return Err(write_engine::CmdError::new(
+                write_engine::ErrorCode::NotAFile,
+                format!("目标路径不是普通文件: {file_path}"),
+            ));
+        }
+    }
+
+    let mode = match (expected, overwrite_existing) {
+        (Some(_), _) => CommitMode::ReplaceExisting,
+        (None, true) => CommitMode::CreateOrReplace,
+        (None, false) => CommitMode::CreateExclusive,
+    };
+
+    let result = write_engine::atomic_write(
+        &StdFs,
+        path,
+        &content,
+        false, // 父目录已在上面处理，引擎内不再建
+        mode,
+        write_engine::receipt_policy(),
+        Durability::Sync,
+        |target| precheck_save(target, expected, overwrite_existing),
+        write_engine::platform_commit,
+        temp_kept_registry(),
+    );
+
+    match result {
+        Ok(receipt) => Ok(SaveOutcome::Written {
+            stat: receipt.stat,
+            foreign_write: receipt.foreign_write,
+        }),
+        Err(AtomicError::Outcome(outcome)) => Ok(outcome),
+        Err(AtomicError::Cmd(e)) => Err(e),
+    }
+}
+
+/// 每次提交前复核（引擎会在每次尝试前调用）：
+/// * 命名文档：目标必须仍在原处，且身份与 `expected` 一致；
+/// * 另存为（未确认覆盖）：目标必须不存在。
+///
+/// 这里返回 `Outcome` 而不是 `Cmd`：这些是**可预期业务结果**，前端要弹冲突框而不是报错。
+fn precheck_save(
+    target: &Path,
+    expected: Option<write_engine::FileStat>,
+    overwrite_existing: bool,
+) -> Result<(), write_engine::AtomicError> {
+    use write_engine::{AtomicError, CmdError, Fs, SaveOutcome, StdFs};
+
+    let current = StdFs
+        .stat(target)
+        .map_err(|e| AtomicError::Cmd(CmdError::from(e)))?;
+
+    if let Some(exp) = expected {
+        return match current {
+            None => Err(AtomicError::Outcome(SaveOutcome::NotFound)),
+            Some(now) if now != exp => Err(AtomicError::Outcome(SaveOutcome::Conflict {
+                disk: now,
+                temp_path: None,
+                register_failed: false,
+            })),
+            Some(_) => Ok(()),
+        };
+    }
+    if !overwrite_existing {
+        if let Some(now) = current {
+            return Err(AtomicError::Outcome(SaveOutcome::Conflict {
+                disk: now,
+                temp_path: None,
+                register_failed: false,
+            }));
+        }
+    }
+    Ok(())
+}
+
 /// 写入文本文件（原子写入：写入临时文件再重命名，避免写盘崩溃导致截断损坏）
 #[tauri::command]
 pub async fn write_text_file(
@@ -1185,55 +1445,72 @@ fn write_text_file_with(
     // 预检：目标缺失时不必白写一份临时文件
     check_write_target(path, options.must_exist)?;
 
-    let file_name = path
-        .file_name()
-        .map(|n| n.to_string_lossy())
-        .unwrap_or_default();
-    let temp_path = generate_atomic_temp_path(parent, &file_name);
+    // 交给写盘引擎（#362）：替换语义 + 每次尝试前复核 + 半失败登记。
+    // `before_replace` 仍是最贴近提交的那一步（测试用它注入「提交前目标被删」）。
+    let mut before = Some(before_replace);
+    let result = write_engine::atomic_write(
+        &write_engine::StdFs,
+        path,
+        &content,
+        false, // 父目录已在上面按 #391 的语义处理完
+        if options.must_exist {
+            write_engine::CommitMode::ReplaceExisting
+        } else {
+            write_engine::CommitMode::CreateOrReplace
+        },
+        write_engine::receipt_policy(),
+        // 文档保存要求落盘；导出/资源写入不承诺掉电不丢，避免大文件同步代价
+        if options.must_exist {
+            write_engine::Durability::Sync
+        } else {
+            write_engine::Durability::None
+        },
+        |target| {
+            if let Some(hook) = before.take() {
+                hook();
+            }
+            check_write_target(target, options.must_exist).map_err(|msg| {
+                write_engine::AtomicError::Cmd(write_engine::CmdError::new(
+                    write_engine::ErrorCode::Io,
+                    msg,
+                ))
+            })
+        },
+        write_engine::platform_commit,
+        temp_kept_registry(),
+    );
 
-    let mut temp_file = fs::File::create(&temp_path)
-        .map_err(|e| format!("创建临时文件失败 {}: {}", temp_path.display(), e))?;
-    if let Err(e) = temp_file.write_all(content.as_bytes()) {
-        let _ = fs::remove_file(&temp_path);
-        return Err(format!("写入临时文件失败 {}: {}", temp_path.display(), e));
-    }
-    if let Err(e) = temp_file.sync_all() {
-        let _ = fs::remove_file(&temp_path);
-        return Err(format!("临时文件物理落盘(sync_all)失败 {}: {}", temp_path.display(), e));
-    }
-    drop(temp_file);
-    before_replace();
-
-    // Codex 复审 P1：写临时文件 + sync_all 可能耗时数百毫秒（大文件 / 慢盘），
-    // 预检之后目标被删除时 rename 会把它重建。紧贴替换前复检，把窗口压到
-    // 两个相邻系统调用之间
-    if let Err(e) = check_write_target(path, options.must_exist) {
-        let _ = fs::remove_file(&temp_path);
-        return Err(e);
-    }
-
-    // 重命名原子替换目标文件
-    if let Err(e) = fs::rename(&temp_path, path) {
-        // Windows 上如果目标已存在，短暂退避重试原子替换（issue #146：
-        // 绝不先删除用户原件再替换，避免两步之间崩溃导致文档丢失）
-        #[cfg(windows)]
-        {
-            if path.exists() {
-                if let Err(e2) = replace_file_with_retry(&temp_path, path) {
-                    let _ = fs::remove_file(&temp_path);
-                    return Err(format!(
-                        "替换目标文件失败 {}（已保留原文件）: {}",
-                        file_path, e2
-                    ));
-                }
-                return Ok(());
+    match result {
+        Ok(_) => Ok(()),
+        Err(write_engine::AtomicError::Outcome(outcome)) => Err(match outcome {
+            write_engine::SaveOutcome::NotFound => format!(
+                "{}: 目标文件已不存在: {}",
+                WRITE_ERROR_TARGET_MISSING, file_path
+            ),
+            write_engine::SaveOutcome::ParentMissing { parent } => format!(
+                "{}: 所在目录已不存在: {}",
+                WRITE_ERROR_PARENT_MISSING, parent
+            ),
+            write_engine::SaveOutcome::Conflict { temp_path: Some(temp), .. } => format!(
+                "{}: 内容保留在临时文件 {}（目标 {}）",
+                WRITE_ERROR_TEMP_KEPT, temp, file_path
+            ),
+            write_engine::SaveOutcome::Conflict { temp_path: None, .. } => {
+                format!("替换目标失败 {}: 目标已被其他程序修改", file_path)
+            }
+            // 引擎返回 Written 时上面已经 `Ok`，这里只为穷尽匹配
+            write_engine::SaveOutcome::Written { .. } => String::new(),
+        }),
+        Err(write_engine::AtomicError::Cmd(e)) => {
+            // check_write_target 的文案自带 TARGET_MISSING / NOT_A_FILE 前缀，原样透出；
+            // 半失败（内容只在 temp）额外带上 temp 路径
+            if e.path.is_some() {
+                Err(format!("{}: {}", WRITE_ERROR_TEMP_KEPT, e.message))
+            } else {
+                Err(e.message)
             }
         }
-        let _ = fs::remove_file(&temp_path);
-        return Err(format!("替换目标文件失败 {}: {}", file_path, e));
     }
-
-    Ok(())
 }
 
 /// 写入二进制文件（图片等，原子写入：Base64 解码后写入临时文件再重命名，避免截断损坏和 IPC 膨胀）

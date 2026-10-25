@@ -77,8 +77,18 @@ pub struct CmdError {
 }
 
 impl CmdError {
-    fn new(code: ErrorCode, message: impl Into<String>) -> Self {
+    pub fn new(code: ErrorCode, message: impl Into<String>) -> Self {
         CmdError { code, message: message.into(), path: None, target: None }
+    }
+
+    /// 半失败：内容只在 temp 里，UI 必须带 temp 路径提示「另存为」。
+    pub fn temp_kept(temp: &Path, target: &Path, message: impl Into<String>) -> Self {
+        CmdError {
+            code: ErrorCode::TempKept,
+            message: message.into(),
+            path: Some(temp.display().to_string()),
+            target: Some(target.display().to_string()),
+        }
     }
 }
 
@@ -286,6 +296,8 @@ pub enum ReceiptPolicy {
 // 回执策略只由 `receipt_policy()` 决定（不设同名常量，避免两处真值源）
 
 pub trait Fs {
+    /// 入参是**目标文件路径**（不是父目录）：实现内部要自己取 `path.parent()`。
+    /// 错当成「传父目录」会让所有保存在真实 FS 上直接 ParentMissing。
     fn parent_exists(&self, path: &Path) -> std::io::Result<bool>;
     fn create_parent_dirs(&self, path: &Path) -> std::io::Result<()>;
     fn stat(&self, path: &Path) -> std::io::Result<Option<FileStat>>;
@@ -828,7 +840,8 @@ static TEMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::ne
 
 impl Fs for StdFs {
     fn parent_exists(&self, path: &Path) -> std::io::Result<bool> {
-        match std::fs::metadata(path) {
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        match std::fs::metadata(parent) {
             Ok(meta) => Ok(meta.is_dir()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
             Err(e) => Err(e),
@@ -868,7 +881,12 @@ impl Fs for StdFs {
     }
 
     fn sync_temp(&self, temp: &Path) -> std::io::Result<()> {
-        File::open(temp)?.sync_all()
+        // 必须带写权限：Windows 上对只读句柄调用 FlushFileBuffers 直接 ACCESS_DENIED，
+        // 会让每次 Durability::Sync 的保存都失败
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(temp)?
+            .sync_all()
     }
 
     fn sync_parent(&self, target: &Path) -> std::io::Result<()> {
