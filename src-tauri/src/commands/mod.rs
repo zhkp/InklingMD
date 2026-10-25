@@ -19,6 +19,12 @@ pub use assets::{download_remote_image, find_asset_by_hash};
 pub mod themes;
 pub use themes::{copy_path, extract_zip, resource_themes_dir, scan_theme_dir};
 
+// 文档 IO 契约与写盘引擎（Epic #384 · B1 数据安全）：
+// PR-1 提供成对读取（read_document / file_stat）与结构化 CmdError；
+// 写盘引擎（atomic_write / 平台替换原语 / TempKeptRegistry）随 PR-2 追加。
+pub mod write_engine;
+pub use write_engine::{CmdError, DocumentSnapshot, ErrorCode, FileStat};
+
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -1352,6 +1358,39 @@ fn read_text_file_sync(file_path: String) -> Result<String, String> {
             READ_ERROR_ENCODING_UNSUPPORTED
         )
     })
+}
+
+/// 查询文件磁盘身份（#362）：微秒级 mtime + 字节数。
+///
+/// 与 `read_document` 分开是为了让「只看 stat」的场景（切换 tab 核验、后续的
+/// watcher 轮询）不必读全文。缺失文件返回 `NotFound`，与 IO 错误分流。
+#[tauri::command]
+pub async fn file_stat(file_path: String) -> Result<FileStat, CmdError> {
+    tauri::async_runtime::spawn_blocking(move || write_engine::file_stat_sync(&file_path))
+        .await
+        .map_err(|e| CmdError {
+            code: ErrorCode::Io,
+            message: format!("文件状态查询任务失败: {e}"),
+            path: None,
+            target: None,
+        })?
+}
+
+/// 成对读取文档（#362 M0）：内容与磁盘身份来自同一次打开/同一句柄的双检。
+///
+/// 读在 `spawn_blocking` 里执行（10MB 读取不得占用 async runtime 线程）。
+/// `changedDuringRead` 由前端重试一次；仍失败即按读取失败提示，绝不把可疑
+/// pair 当基线。
+#[tauri::command]
+pub async fn read_document(file_path: String) -> Result<DocumentSnapshot, CmdError> {
+    tauri::async_runtime::spawn_blocking(move || write_engine::read_document_sync(&file_path))
+        .await
+        .map_err(|e| CmdError {
+            code: ErrorCode::Io,
+            message: format!("文件读取任务失败: {e}"),
+            path: None,
+            target: None,
+        })?
 }
 
 /// 读取文件的最后修改时间（Unix 毫秒，浮点）

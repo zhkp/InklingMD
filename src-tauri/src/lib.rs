@@ -4,9 +4,9 @@ mod navigation_guard;
 
 use commands::{
     allow_asset_dir, copy_path, create_dir, create_file, delete_path, download_remote_image,
-    extract_zip, file_mtime, find_asset_by_hash, list_dir, list_workspace_files, pandoc_check,
-    pandoc_export_docx, read_text_file, rename_path, resource_themes_dir, scan_theme_dir,
-    search_in_workspace, write_binary_file, write_text_file,
+    extract_zip, file_mtime, file_stat, find_asset_by_hash, list_dir, list_workspace_files,
+    pandoc_check, pandoc_export_docx, read_document, read_text_file, rename_path,
+    resource_themes_dir, scan_theme_dir, search_in_workspace, write_binary_file, write_text_file,
 };
 use std::sync::Mutex;
 use tauri::{Emitter, Manager};
@@ -120,6 +120,8 @@ pub fn run() {
             write_text_file,
             write_binary_file,
             file_mtime,
+            file_stat,
+            read_document,
             pandoc_check,
             pandoc_export_docx,
             rename_path,

@@ -44,6 +44,30 @@ function parentBlockedByFile(parent: string): boolean {
   return !isDir(p);
 }
 
+/** 结构化读盘错误（与 Rust `CmdError { code, message }` 同形，前端按 code 分流） */
+function cmdError(code: string, message: string): never {
+  throw { code, message };
+}
+
+/** stat 或按 Rust 语义抛 notFound / notAFile（#362：读路径必须给出可分类的错误） */
+function statOfFile(filePath: string): nodeFs.Stats {
+  let stat: nodeFs.Stats;
+  try {
+    stat = nodeFs.statSync(filePath);
+  } catch {
+    return cmdError("notFound", `文件不存在: ${filePath}`);
+  }
+  if (!stat.isFile()) {
+    return cmdError("notAFile", `目标路径不是普通文件: ${filePath}`);
+  }
+  return stat;
+}
+
+/** 与 Rust `FileStat` 对齐：微秒 mtime + 字节数 */
+function toFileStat(stat: nodeFs.Stats) {
+  return { mtimeUs: Math.round(stat.mtimeMs * 1000), size: stat.size };
+}
+
 function atomicWrite(filePath: string, bytes: Buffer): void {
   const parent = nodePath.dirname(filePath);
   const tmp = nodePath.join(
@@ -111,6 +135,17 @@ export function createRealFsBackend() {
       if (!nodeFs.existsSync(filePath)) throw `读取失败 ${filePath}: 文件不存在`;
       return nodeFs.readFileSync(filePath, "utf8");
     },
+    // #362 成对读取：内容与 stat 成对返回，并复刻 meta1/meta2 双检
+    read_document: ({ filePath }) => {
+      const before = statOfFile(filePath);
+      const content = nodeFs.readFileSync(filePath, "utf8");
+      const after = statOfFile(filePath);
+      if (before.mtimeMs !== after.mtimeMs || before.size !== after.size) {
+        return cmdError("changedDuringRead", `读取期间文件被修改: ${filePath}`);
+      }
+      return { content, stat: toFileStat(after) };
+    },
+    file_stat: ({ filePath }) => toFileStat(statOfFile(filePath)),
     file_mtime: ({ filePath }) => {
       if (!nodeFs.existsSync(filePath)) throw `文件不存在: ${filePath}`;
       const stat = nodeFs.statSync(filePath);

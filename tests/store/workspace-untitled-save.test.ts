@@ -1,13 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { OpenTab } from "../../src/store/workspace";
 
-const { isTauriMock, saveMock, askMock, writeTextFileMock, readTextFileMock, fileMtimeMock } = vi.hoisted(() => ({
+const { isTauriMock, saveMock, askMock, writeTextFileMock, readTextFileMock, fileMtimeMock, fileStatMock } = vi.hoisted(() => ({
   isTauriMock: vi.fn(() => true),
   saveMock: vi.fn(),
   askMock: vi.fn(),
   writeTextFileMock: vi.fn(),
   readTextFileMock: vi.fn(),
   fileMtimeMock: vi.fn(),
+  fileStatMock: vi.fn(),
 }));
 vi.mock("@tauri-apps/api/core", () => ({ isTauri: isTauriMock }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ save: saveMock, ask: askMock }));
@@ -15,6 +16,8 @@ vi.mock("../../src/lib/fs", () => ({
   writeTextFile: writeTextFileMock,
   readTextFile: readTextFileMock,
   fileMtime: fileMtimeMock,
+  // #362：写盘成功后用 fileStat 登记成对基线（diskStat + 由它换算的 diskMtime）
+  fileStat: fileStatMock,
 }));
 
 import { useWorkspace } from "../../src/store/workspace";
@@ -51,6 +54,7 @@ describe("saveCurrent untitled first-save migration", () => {
     saveMock.mockReset().mockResolvedValue("/docs/saved.md");
     writeTextFileMock.mockReset().mockResolvedValue(undefined);
     fileMtimeMock.mockReset().mockResolvedValue(1_234);
+    fileStatMock.mockReset().mockResolvedValue({ mtimeUs: 1_234_000, size: 5 });
     isTauriMock.mockReturnValue(true);
     localStorage.clear();
     reset();

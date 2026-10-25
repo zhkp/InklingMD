@@ -28,6 +28,13 @@ vi.mock("../../src/lib/fs", () => ({
   readTextFile: readTextFileMock,
   writeTextFile: writeTextFileMock,
   fileMtime: fileMtimeMock,
+  // #362：reloadFile 走成对读取；switchTab 核验用 fileStat（本文件只测保存前比对，
+  // stat 取固定值让基线判定稳定）
+  readDocument: async (path: string) => ({
+    content: await readTextFileMock(path),
+    stat: { mtimeUs: 1_700_000_000_000_000, size: 1 },
+  }),
+  fileStat: async () => ({ mtimeUs: 1_700_000_000_000_000, size: 1 }),
 }));
 
 import { useWorkspace } from "../../src/store/workspace";

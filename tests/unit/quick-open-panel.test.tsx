@@ -112,7 +112,11 @@ describe("QuickOpenPanel（交互）", () => {
 
   it("打开失败时保持面板开启、在面板内提示，且不误报成功（文件已被删除的场景）", async () => {
     stubIndexFiles(["/w/gone.md"]);
-    vi.spyOn(fsApi, "readTextFile").mockRejectedValue(new Error("文件不存在"));
+    // #362：打开走 readDocument，失败必须是结构化 notFound（不是裸字符串）
+    vi.spyOn(fsApi, "readDocument").mockRejectedValue({
+      code: "notFound",
+      message: "文件不存在: /w/gone.md",
+    });
     const { input, onClose } = await renderQuickOpen();
 
     fireEvent.keyDown(input, { key: "Enter" });
