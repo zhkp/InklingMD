@@ -2,6 +2,7 @@
 // localStorage 持久化读写、路径工具、防过期覆盖的操作序号与请求去重表。
 // 这些不是响应式状态，保留模块级单例语义（跨 slice 共享同一份数据）。
 
+import type { DocumentSnapshot } from "../../lib/fs";
 import { parentDir, rebasePathPrefix } from "../../lib/path";
 import { loadJSON, writeJSON } from "../../lib/storage";
 
@@ -157,14 +158,47 @@ export const directoryRequests = new Map<string, Promise<void>>();
 /** 加载中的目录发生文件变更时，合并为一次后续强制刷新 */
 export const forcedDirectoryRequests = new Map<string, Promise<void>>();
 
-/** 同一文件的并发读取复用一个 Promise，避免重复读取和重复创建 tab */
-export const fileRequests = new Map<string, Promise<string>>();
+/** 同一文件的并发读取复用一个 Promise，避免重复读取和重复创建 tab。
+ *  值必须是**成对快照**（#362）：并发加入方共享同一份内容 + stat，一次读取只产生一个基线。 */
+export const fileRequests = new Map<string, Promise<DocumentSnapshot>>();
 
 /** 请求落定时的最终注册路径（issue #200 评审修复）：
  *  创建方在 .finally 内、删条目前写入；命中 existing 分支的并发加入方在各自
  *  追加的 .finally 里读取——Promise 反应按注册顺序执行，加入方必然晚于创建方，
  *  读取时必已填充。Weak 语义：请求被回收即自动消失，无需手动清理。 */
-export const settledPathOfRequest = new WeakMap<Promise<string>, string>();
+export const settledPathOfRequest = new WeakMap<Promise<DocumentSnapshot>, string>();
+
+/**
+ * 同 path 的 tab 建/合并互斥锁（#362）。
+ *
+ * 与 `fileRequests` 分开：那个条目在读取 settle 时就被删了，生命周期短于
+ * 「建 tab / 合并 draft」。临界区是 `tabs.ts` 的 `createTabFromDisk`（由 `ensureTab`
+ * 持锁进入）；任何新增的「为某个 path 建 tab 或合并 draft」逻辑都必须同样经
+ * `ensureTab` / `withPathLock` 走这把锁，否则同 path 会建出两个 tab。
+ */
+export const pathLocks = new Map<string, Promise<void>>();
+
+/**
+ * 在 path 锁内串行执行 `run`。
+ *
+ * 锁只表达「串行」，不传播错误：前一笔失败也必须放行后一笔（否则该 path 的
+ * 打开会永久挂住）。条目在本笔结束（成功或失败）后清理，且只删自己那一笔。
+ */
+export function withPathLock<T>(path: string, run: () => Promise<T>): Promise<T> {
+  const prev = pathLocks.get(path);
+  // 无争用时同步进入：多一个微任务跳变会让「打开文件」的同步前缀（登记在途请求）
+  // 推迟到下一个 tick，破坏调用方对「点击后立刻进入加载态」的既有断言。
+  const start = prev ? prev.then(run, run) : run();
+  const tail = start.then(
+    () => undefined,
+    () => undefined,
+  );
+  pathLocks.set(path, tail);
+  void tail.then(() => {
+    if (pathLocks.get(path) === tail) pathLocks.delete(path);
+  });
+  return start;
+}
 
 /**
  * 删除时仍在途读取的文件路径黑名单（issue #166）：

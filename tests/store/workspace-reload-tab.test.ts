@@ -8,6 +8,12 @@ vi.mock("@tauri-apps/api/core", () => ({
 
 vi.mock("../../src/lib/fs", () => ({
   readTextFile: vi.fn().mockResolvedValue("reloaded disk content"),
+  // #362：reloadFile / ensureTab 走成对读取
+  readDocument: vi.fn().mockResolvedValue({
+    content: "reloaded disk content",
+    stat: { mtimeUs: 1_700_000_000_000_000, size: 20 },
+  }),
+  fileStat: vi.fn().mockResolvedValue({ mtimeUs: 1_700_000_000_000_000, size: 20 }),
   writeTextFile: vi.fn().mockResolvedValue(undefined),
   exists: vi.fn().mockResolvedValue(true),
   watchFileChanges: vi.fn(),

@@ -318,6 +318,65 @@ export const MOCK_FILE_CONTENT: Record<string, string> = {
   "/mock-workspace/notes/toc-long.md": TOC_LONG_DEMO,
 };
 
+/** mock 磁盘身份（与 Rust `FileStat` 同形状：微秒 mtime + 字节数） */
+export interface MockFileStat {
+  mtimeUs: number;
+  size: number;
+}
+
+/**
+ * mock 文件磁盘身份表（#362 mock 保真）。
+ *
+ * 目的：`fileStat` / `readDocument` / `fileMtime` 必须有**稳定的真实 stat**，
+ * 否则「两次读取之间文件没变」与「文件被外部改写」在浏览器里无法区分，
+ * 成对读取与基线比对会退化成恒真断言。
+ *
+ * 同步点（与 Rust 侧读写一一对应）：writeTextFile / createFile / renamePath / deletePath。
+ */
+export const MOCK_FILE_STAT: Record<string, MockFileStat> = {};
+
+/** mock 时钟起点（2024-01-01T00:00:00Z）：不依赖真实时间，用例可复现 */
+const MOCK_EPOCH_US = Date.UTC(2024, 0, 1) * 1000;
+let mockClockUs = MOCK_EPOCH_US;
+
+/** 单调递增的 mock mtime（每次写 +1ms） */
+function nextMockMtimeUs(): number {
+  mockClockUs += 1_000;
+  return mockClockUs;
+}
+
+/** 与 Rust 侧 `meta.len()` 同口径：UTF-8 字节数，不是 UTF-16 字符数 */
+export function mockUtf8Length(text: string): number {
+  return new TextEncoder().encode(text).byteLength;
+}
+
+/** 写入/覆盖后刷新 stat */
+export function touchMockStat(path: string, content: string): void {
+  MOCK_FILE_STAT[path] = { mtimeUs: nextMockMtimeUs(), size: mockUtf8Length(content) };
+}
+
+/** 重命名/移动：stat 随内容迁移（目录按前缀一并迁移） */
+export function rebaseMockStat(from: string, to: string): void {
+  for (const key of Object.keys(MOCK_FILE_STAT)) {
+    if (key === from || key.startsWith(from + "/")) {
+      MOCK_FILE_STAT[to + key.slice(from.length)] = MOCK_FILE_STAT[key];
+      delete MOCK_FILE_STAT[key];
+    }
+  }
+}
+
+/** 删除：连同子路径一起移除（目录递归删除同语义） */
+export function dropMockStat(path: string): void {
+  for (const key of Object.keys(MOCK_FILE_STAT)) {
+    if (key === path || key.startsWith(path + "/")) delete MOCK_FILE_STAT[key];
+  }
+}
+
+// 初始 fixture 的 stat：内容表建立即登记，保证「刚打开就已存在基线」
+for (const [path, content] of Object.entries(MOCK_FILE_CONTENT)) {
+  touchMockStat(path, content);
+}
+
 /** 递归查找路径对应的节点（返回引用，可就地修改） */
 export function findNode(root: FileNode, path: string): FileNode | null {
   if (root.path === path) return root;

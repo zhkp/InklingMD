@@ -20,6 +20,13 @@ const { readTextFileMock, fileMtimeMock, listDirMock } = vi.hoisted(() => ({
 
 vi.mock("../../src/lib/fs", () => ({
   readTextFile: readTextFileMock,
+  // #362：打开/重载走 readDocument。内容仍由 readTextFile mock 驱动（含 deferred 与
+  // 失败注入），stat 与之成对返回；本文件锁 #166/#177/#200 的路径归属与清理，
+  // 不依赖 stat 细节。
+  readDocument: async (path: string) => ({
+    content: await readTextFileMock(path),
+    stat: { mtimeUs: 1_700_000_000_000_000, size: 1 },
+  }),
   fileMtime: fileMtimeMock,
   listDir: listDirMock,
 }));
