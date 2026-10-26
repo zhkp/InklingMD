@@ -177,7 +177,9 @@ export type SaveOutcome =
   | { kind: "written"; stat: FileStat; foreignWrite: boolean }
   | { kind: "conflict"; disk: FileStat; tempPath?: string; registerFailed: boolean }
   | { kind: "notFound" }
-  | { kind: "parentMissing"; parent: string };
+  | { kind: "parentMissing"; parent: string }
+  /** 父路径被同名文件占用：补建目录必然失败，不能提供「重新创建」 */
+  | { kind: "parentNotDir"; parent: string };
 
 export interface SaveDocumentOptions {
   /**

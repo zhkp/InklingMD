@@ -158,7 +158,19 @@ export function createRealFsBackend() {
       };
       const parent = nodePath.dirname(filePath);
       if (!nodeFs.existsSync(parent) || !nodeFs.statSync(parent).isDirectory()) {
-        if (!createParentDirs) return { kind: "parentMissing", parent };
+        if (!createParentDirs) {
+          // 与 Rust 同分类：最近的已存在祖先是**文件** → parentNotDir（不能提供「重新创建」）
+          let probe = parent;
+          while (!nodeFs.existsSync(probe)) {
+            const up = nodePath.dirname(probe);
+            if (up === probe) break;
+            probe = up;
+          }
+          const blocked = nodeFs.existsSync(probe) && !nodeFs.statSync(probe).isDirectory();
+          return blocked
+            ? { kind: "parentNotDir", parent }
+            : { kind: "parentMissing", parent };
+        }
         nodeFs.mkdirSync(parent, { recursive: true });
       }
       const exists = nodeFs.existsSync(filePath);

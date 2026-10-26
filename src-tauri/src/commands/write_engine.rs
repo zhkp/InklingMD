@@ -266,6 +266,9 @@ pub enum SaveOutcome {
     },
     NotFound,
     ParentMissing { parent: String },
+    /// 父路径被同名**文件**占用（不是「目录不存在」）：补建目录必然失败，
+    /// UI 不能提供「重新创建」，只能另存为
+    ParentNotDir { parent: String },
 }
 
 #[derive(Debug)]
@@ -330,6 +333,7 @@ pub enum RegisterPolicy {
 
 /// recovery/ 专用：任何半失败都删 temp + Io，不登记
 pub struct NoRegisterStore;
+#[cfg(test)]
 impl TempKeptStore for NoRegisterStore {
     fn register(&self, _t: &Path, _g: &Path) -> Result<(), CmdError> {
         unreachable!("Never policy 不走 register")
@@ -363,15 +367,18 @@ pub struct TempKeptFile {
 }
 
 /// 真实实现：Mutex 串行化 read-modify-write（同窗口多个 spawn_blocking 会并发）
+#[cfg(test)]
 pub struct MutexTempKeptStore {
     entries: Mutex<Vec<TempKeptEntry>>,
     fail: bool,
 }
+#[cfg(test)]
 impl MutexTempKeptStore {
     pub fn new(fail: bool) -> Self {
         MutexTempKeptStore { entries: Mutex::new(vec![]), fail }
     }
 }
+#[cfg(test)]
 impl TempKeptStore for MutexTempKeptStore {
     fn register(&self, temp: &Path, target: &Path) -> Result<(), CmdError> {
         if self.fail {
@@ -731,6 +738,7 @@ fn probe<F: Fs>(fs: &F, p: &Path) -> Probe {
 }
 
 /// 旧写盘入口（导出/备份用）：必须共享同一个登记表，否则 1176 会留下未登记孤儿
+#[cfg(test)]
 pub fn write_text_file_sync<F, C, S>(
     fs: &F,
     path: &Path,
@@ -768,6 +776,12 @@ where
             path: None,
             target: Some(path.display().to_string()),
         }),
+        Err(AtomicError::Outcome(SaveOutcome::ParentNotDir { parent })) => Err(CmdError {
+            code: ErrorCode::NotAFile,
+            message: format!("父路径被文件占用：{}", parent),
+            path: None,
+            target: Some(path.display().to_string()),
+        }),
         Err(AtomicError::Outcome(SaveOutcome::ParentMissing { parent })) => Err(CmdError {
             code: ErrorCode::ParentMissing,
             message: format!("父目录不存在：{}", parent),
@@ -791,6 +805,7 @@ pub fn receipt_policy() -> ReceiptPolicy {
 /// 公开测试入口：只做 mode 映射 + atomic_write。
 /// 注意：`atomic_write` **会**做写后回执（receipt_for），本函数只是不做 §5.2 ② 的 initial stat。
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 pub fn write_document_with<F, P, C, S>(
     fs: &F,
     file_path: &Path,

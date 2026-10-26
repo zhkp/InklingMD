@@ -250,37 +250,6 @@ export function wasDeletedDuringLoad(path: string): boolean {
 export function consumeDeletedDuringLoad(path: string): void {
   deletedDuringLoad.delete(path);
 }
-
-/**
- * 保存 tombstone（#362 §5.4）：rename / delete 发生时给**旧路径**打标。
- *
- * 目的：写盘在途时路径被改名或删除，落定后如果还往旧路径写，就等于把旧位置
- * 复活出来（目录也会被重建）。保存入口在写之前查这张表，命中即按「文件已不在
- * 原处」处理；消费一次即失效，同路径重建后可正常保存。
- */
-export const saveTombstones = new Map<string, { kind: "deleted" | "renamed"; at: number }>();
-
-/** tombstone 有效期：覆盖正常在途保存窗口即可，过后不误拦同路径重建 */
-export const TOMBSTONE_TTL = 60_000;
-
-export function markTombstone(path: string, kind: "deleted" | "renamed"): void {
-  saveTombstones.set(path, { kind, at: Date.now() });
-}
-
-export function hasTombstone(path: string): boolean {
-  const entry = saveTombstones.get(path);
-  if (!entry) return false;
-  if (Date.now() - entry.at > TOMBSTONE_TTL) {
-    saveTombstones.delete(path);
-    return false;
-  }
-  return true;
-}
-
-export function consumeTombstone(path: string): void {
-  saveTombstones.delete(path);
-}
-
 /**
  * 文件 / 目录改名后迁移黑名单的键。
  *

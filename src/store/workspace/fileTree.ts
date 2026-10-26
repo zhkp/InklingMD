@@ -21,7 +21,6 @@ import {
   loadDeletedSnapshots,
   loadExpandedDirs,
   markDeletedDuringLoad,
-  markTombstone,
   parentDir,
   persistBookmarks,
   persistDeletedSnapshot,
@@ -262,11 +261,6 @@ export const createFileTreeSlice: StateCreator<
   },
 
   onFileRenamed: (from, to) => {
-    // 旧路径打 tombstone（#362 §5.4）：改名发生时若有保存在途，落定后不许写回旧位置
-    markTombstone(from, "renamed");
-    for (const tab of get().openTabs) {
-      if (isPathWithin(tab.path, from)) markTombstone(tab.path, "renamed");
-    }
     const {
       openTabs,
       activeTabPath,
@@ -384,10 +378,6 @@ export const createFileTreeSlice: StateCreator<
     const backupTabs = affectedTabs.filter((t) => t.dirty || alsoBackup.has(t.path));
 
     // 每个旧路径都打 tombstone（#362 §5.4）：写盘在途时删除/改名，落定后绝不能
-    // 在旧位置把文件或整条目录重建出来
-    markTombstone(path, "deleted");
-    for (const tab of affectedTabs) markTombstone(tab.path, "deleted");
-
     // 快照配额：条目数 + 字符预算双条件。超额时**整批不写、保留 tab**，
     // 绝不「淘汰旧的换新的」——那会删掉其它已删文件的唯一副本
     const required = new Map<string, string>();

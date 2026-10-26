@@ -1273,12 +1273,22 @@ fn check_write_target(path: &Path, must_exist: bool) -> Result<(), String> {
 
 /// 半失败登记表（全局单文件 `recovery/temp-kept.json`，多窗口共用）。
 static TEMP_KEPT: std::sync::OnceLock<write_engine::TempKeptRegistry> = std::sync::OnceLock::new();
+#[allow(unused_imports)]
+use write_engine::TempKeptStore as _TempKeptStoreTrait;
 
 /// 启动时初始化登记表；未初始化时（单测 / 早期调用）退化为临时目录，
 /// 保证保存不会因为「登记表还没就位」而整体失败。
 pub fn init_temp_kept_registry(app_data_dir: PathBuf) {
     let file = app_data_dir.join("recovery").join("temp-kept.json");
-    let _ = TEMP_KEPT.set(write_engine::TempKeptRegistry::load(file));
+    let registry = write_engine::TempKeptRegistry::load(file);
+    // 启动清理：temp 已经不存在的登记条目必须注销，否则 `temp-kept.json` 只增不减，
+    // 重启后全是悬空条目（用户在两次启动之间另存/放弃的那些 temp）
+    for entry in registry.entries() {
+        if !Path::new(&entry.temp_path).exists() {
+            let _ = registry.release(Path::new(&entry.temp_path));
+        }
+    }
+    let _ = TEMP_KEPT.set(registry);
 }
 
 fn temp_kept_registry() -> &'static write_engine::TempKeptRegistry {
@@ -1325,7 +1335,17 @@ fn save_document_sync(
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     if !parent.is_dir() {
         if !create_parent_dirs {
-            return Ok(SaveOutcome::ParentMissing { parent: parent.display().to_string() });
+            // 区分「父目录不存在」与「父路径被同名字**文件**占用」：后者补建目录必然失败，
+            // UI 不能提供「重新创建」。用只读 metadata 判断，不做任何副作用写盘探测
+            let blocked = parent
+                .ancestors()
+                .find(|p| p.exists())
+                .is_some_and(|existing| !existing.is_dir());
+            return Ok(if blocked {
+                SaveOutcome::ParentNotDir { parent: parent.display().to_string() }
+            } else {
+                SaveOutcome::ParentMissing { parent: parent.display().to_string() }
+            });
         }
         fs::create_dir_all(parent)?;
     }
@@ -1459,12 +1479,9 @@ fn write_text_file_with(
             write_engine::CommitMode::CreateOrReplace
         },
         write_engine::receipt_policy(),
-        // 文档保存要求落盘；导出/资源写入不承诺掉电不丢，避免大文件同步代价
-        if options.must_exist {
-            write_engine::Durability::Sync
-        } else {
-            write_engine::Durability::None
-        },
+        // 显式 Sync，**不从 must_exist 反推**：草稿首次保存与「重新创建」走的正是
+        // must_exist=false 分支，若反推成 None，用户第一次保存新文档就不落盘
+        write_engine::Durability::Sync,
         |target| {
             if let Some(hook) = before.take() {
                 hook();
@@ -1498,8 +1515,12 @@ fn write_text_file_with(
             write_engine::SaveOutcome::Conflict { temp_path: None, .. } => {
                 format!("替换目标失败 {}: 目标已被其他程序修改", file_path)
             }
-            // 引擎返回 Written 时上面已经 `Ok`，这里只为穷尽匹配
-            write_engine::SaveOutcome::Written { .. } => String::new(),
+            write_engine::SaveOutcome::ParentNotDir { parent } => format!(
+                "{}: 所在文件夹路径已被文件占用: {}",
+                WRITE_ERROR_PARENT_NOT_DIR, parent
+            ),
+            // 引擎成功走 `Ok`，这里不可达；但绝不能返回空错误串（前端只会显示空白）
+            write_engine::SaveOutcome::Written { .. } => "写盘结果异常：引擎返回成功但未给出回执".into(),
         }),
         Err(write_engine::AtomicError::Cmd(e)) => {
             // check_write_target 的文案自带 TARGET_MISSING / NOT_A_FILE 前缀，原样透出；

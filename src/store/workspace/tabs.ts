@@ -22,9 +22,7 @@ import { runWysiwygAnchorSampler } from "../../lib/wysiwyg-anchor-sampler";
 import { useConflict } from "../conflict";
 import {
   consumeDeletedDuringLoad,
-  consumeTombstone,
   fileRequests,
-  hasTombstone,
   intents,
   parentDir,
   persistDeletedSnapshot,
@@ -295,7 +293,6 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
     // 主拦截在 readFileOnce 请求体内（见上，所有并发等待方共享同一拒绝）；
     // 黑名单登记落在请求级检查之后、本续体之前的极窄窗口内时，此守卫兜底。
     // 黑名单按删除瞬间 fileRequests 的注册路径登记：若先重命名后删除，
-    // 黑名单在新路径下，故须用 tabPath 对照（#200 场景 3）。
     if (wasDeletedDuringLoad(tabPath)) {
       consumeDeletedDuringLoad(tabPath);
       persistDeletedSnapshot(tabPath, snapshot.content);
@@ -721,8 +718,9 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
       if (!isTauri()) return;
       // 在途保存时不核验：写完会自己登记基线，中途读盘只会制造假冲突
       if (initial.saving) return;
-      // 已标记冲突待处理：不重复弹窗（watcher 每 3s 会再轮到它）
-      if (initial.conflictPending) return;
+      // 只有当**同一文件**的冲突对话框已经打开时才跳过；
+      // 后台 tab 被标记 conflictPending 后，用户切回来时必须补弹（否则唯一出口是 Ctrl+S）
+      if (useConflict.getState().conflict?.filePath === filePath) return;
 
       // ① stat 分类：notFound / notAFile 才是删除态，其余只报错、保留基线
       let current: FileStat | null = null;
@@ -747,7 +745,8 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
       }
 
       if (tabAfterStat.deletedOnDisk) {
-        // 文件被恢复（例如 git checkout 回来）：解除标记，继续按基线判定
+        // 文件被恢复（例如 git checkout 回来）：解除标记、清掉删除 tombstone，
+        // 继续按基线判定（否则 60s 内的正常保存会被旧 tombstone 误拦）
         set((state) => ({
           openTabs: state.openTabs.map((t) =>
             t.path === filePath ? { ...t, deletedOnDisk: false } : t,
@@ -1015,6 +1014,10 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
       let savePath = tab.path;
       // 记录本次保存发起时快照内容
       const contentToSave = tab.content;
+      // 用户在上面「是否覆盖外部修改」里确认后：把 expected 换成当前磁盘身份，
+      // 并显式 overwriteExisting——否则回执会拿旧身份再判一次冲突（双弹窗）
+      let forcedExpected: FileStat | undefined;
+      let overwriteConfirmed = false;
 
       try {
         // 未命名草稿：首次保存弹另存为对话框选择保存位置
@@ -1096,6 +1099,11 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
                 applyTabSaving(activeTabPath, false);
                 return;
               }
+              // 确认覆盖：把基线推进到**当前**磁盘身份，并让写盘走「允许覆盖」，
+              // 否则回执会用外部改动前的老身份再判一次冲突（用户点了覆盖却再弹一次框）
+              const latestOnDisk = await readDocument(savePath).catch(() => null);
+              forcedExpected = latestOnDisk?.stat;
+              overwriteConfirmed = true;
             } catch {
               // 弹窗异常或被 reject/取消时，视为放弃覆盖并安全退出
               applyTabSaving(activeTabPath, false);
@@ -1304,30 +1312,11 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
 
         // 「已删除文件」经用户选择重新创建 / 另存为后，磁盘上多出一个文件
         let resolvedMissing = false;
-        // 第三道防线（#362 §5.4）：保存启动后路径被改名 / 删除 → 绝不写回旧位置。
-        // tombstone 由 onFileDeleted / onFileRenamed 打在旧路径上，消费一次即失效
-        if (!tab.isUntitled && hasTombstone(savePath)) {
-          consumeTombstone(savePath);
-          markMissingOnDisk(activeTabPath);
-          if (!interactive) {
-            applyTabSaving(activeTabPath, false);
-            return;
-          }
-          const resolvedPath = await resolveMissingFileSave(
-            savePath,
-            "TARGET_MISSING",
-            contentToSave,
-          );
-          if (!resolvedPath) {
-            applyTabSaving(activeTabPath, false);
-            return;
-          }
-          savePath = resolvedPath;
-          resolvedMissing = true;
-        }
         // 基线直接取写盘回执（#362 M1）：内容与磁盘身份来自同一次提交，
         // 不再「写完再 stat」——那中间的任意外写都会让基线指向别人的内容
         let savedStat: FileStat | undefined;
+        /** 写后回执降级：内容可能被别人覆盖，不能当「已保存」 */
+        let receiptUntrusted = false;
         try {
           if (tab.isUntitled) {
             // 草稿另存为：目标由用户在对话框选定，允许创建
@@ -1347,11 +1336,12 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
               // 留空基线
             }
           } else {
-            const attempt = (expected?: FileStat) =>
-              saveDocument(savePath, contentToSave, { expected });
+            const attempt = (expected?: FileStat, overwrite = false) =>
+              saveDocument(savePath, contentToSave, { expected, overwriteExisting: overwrite });
 
-            // expected = 上次成对读到的磁盘身份：目标消失 → notFound，身份变了 → conflict
-            let outcome = await attempt(tab.diskStat);
+            // expected = 上次成对读到的磁盘身份：目标消失 → notFound，身份变了 → conflict。
+            // 用户已确认覆盖时用**当前磁盘身份** + overwriteExisting，避免回执二次拦
+            let outcome = await attempt(forcedExpected ?? tab.diskStat, overwriteConfirmed);
             if (outcome.kind === "conflict") {
               // 磁盘内容仍等于我们的基线 → 只是 mtime 变了（touch / 基线过期），
               // adopt 新身份后重试一次（M2 三路里的 touch-only，不打扰用户）
@@ -1367,9 +1357,15 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
             }
 
             if (outcome.kind === "written") {
-              // foreignWrite = 写后回执降级（拿不到可信 stat）：不登记基线，
-              // 宁可下一轮多读一次盘，也不把可疑身份当基线
-              savedStat = outcome.foreignWrite ? undefined : outcome.stat;
+              // foreignWrite = 写后回执降级（写后 stat 与写入内容对不上，可能被别人覆盖）：
+              // 不能当「已保存」——否则下一轮 watcher 会把干净 tab 静默重载，
+              // 刚写下去的内容从编辑器消失且毫无提示。保持 dirty 并给可见提示
+              if (outcome.foreignWrite) {
+                receiptUntrusted = true;
+                savedStat = undefined;
+              } else {
+                savedStat = outcome.stat;
+              }
             } else if (outcome.kind === "conflict") {
               if (!interactive) {
                 // 自动保存不打扰用户：只标记冲突待处理（下次切回/保存时再问）
@@ -1405,17 +1401,15 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
               applyTabSaving(activeTabPath, false);
               return;
             } else {
-              // notFound / parentMissing：文件已不在原处（#363），交给三选项
-              let code: WriteErrorCode = outcome.kind === "notFound" ? "TARGET_MISSING" : "PARENT_MISSING";
-              if (outcome.kind === "parentMissing") {
-                // 细分「父目录缺失」：路径被同名文件占用时不能提供「重新创建」（必然失败）。
-                // 用一次必然失败的写盘拿准确 code，避免把 PARENT_NOT_DIR 说成 PARENT_MISSING
-                try {
-                  await writeTextFile(savePath, contentToSave);
-                } catch (e) {
-                  code = writeErrorCode(e) ?? code;
-                }
-              }
+              // notFound / parentMissing / parentNotDir：文件已不在原处（#363），交给三选项。
+              // 错误分类由 Rust 的 SaveOutcome 直接给出，**不做副作用写盘探测**
+              // （探测若恰好赶上目录重现，会把内容真的写回旧路径）
+              const code: WriteErrorCode =
+                outcome.kind === "notFound"
+                  ? "TARGET_MISSING"
+                  : outcome.kind === "parentNotDir"
+                    ? "PARENT_NOT_DIR"
+                    : "PARENT_MISSING";
               markMissingOnDisk(activeTabPath);
               if (!interactive) {
                 applyTabSaving(activeTabPath, false);
@@ -1454,7 +1448,11 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
           resolvedMissing = true;
         }
         // 写盘成功：旧路径的 tombstone 可以消费了（此后同路径重建可正常保存）
-        if (!tab.isUntitled) consumeTombstone(savePath);
+        if (receiptUntrusted) {
+          set({
+            saveError: "保存可能未完成：写入后磁盘内容与预期不一致，请检查后另存副本。",
+          });
+        }
         const pathChanged = savePath !== activeTabPath;
         const now = Date.now();
         const savedMtime = savedStat ? mtimeMsOf(savedStat) : undefined;
@@ -1465,18 +1463,19 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
             // 如果写盘期间内容又发生了新的修改，保持 dirty 为 true
             const isStillDirty = t.content !== contentToSave;
             return {
-              ...t,
-              path: savePath,
-              isUntitled: false,
-              dirty: isStillDirty,
-              conflictPending: false,
-              saving: false,
-              // 写盘成功即说明文件已（重新）落在 savePath 上
-              deletedOnDisk: false,
-              lastSavedAt: now,
-              diskContent: contentToSave,
-              diskStat: savedStat,
-              diskMtime: savedMtime,
+            ...t,
+            path: savePath,
+            isUntitled: false,
+            // 回执不可信时保持 dirty，并保留旧基线（下一轮按冲突处理，不静默重载）
+            dirty: isStillDirty || receiptUntrusted,
+            conflictPending: false,
+            saving: false,
+            // 写盘成功即说明文件已（重新）落在 savePath 上
+            deletedOnDisk: false,
+            lastSavedAt: now,
+            diskContent: receiptUntrusted ? t.diskContent : contentToSave,
+            diskStat: receiptUntrusted ? t.diskStat : savedStat,
+            diskMtime: receiptUntrusted ? t.diskMtime : savedMtime,
             };
           }
           return t;
