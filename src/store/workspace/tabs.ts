@@ -1494,7 +1494,13 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
           saving: currentActiveTab ? !!currentActiveTab.saving : false,
           dirty: currentActiveTab ? currentActiveTab.dirty : false,
           conflictPending: currentActiveTab ? !!currentActiveTab.conflictPending : false,
-          saveError: latestState.activeTabPath === activeTabPath ? null : latestState.saveError,
+          // 回执不可信时必须留下可见错误（否则用户以为存好了）
+          saveError:
+            latestState.activeTabPath === activeTabPath
+              ? receiptUntrusted
+                ? "保存可能未完成：写入后磁盘内容与预期不一致，请检查后另存副本。"
+                : null
+              : latestState.saveError,
           lastSavedAt: latestState.activeTabPath === activeTabPath ? now : latestState.lastSavedAt,
           recentFiles: nextRecent,
         });
