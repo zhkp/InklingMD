@@ -377,7 +377,6 @@ export const createFileTreeSlice: StateCreator<
     const alsoBackup = new Set(options?.alsoBackup ?? []);
     const backupTabs = affectedTabs.filter((t) => t.dirty || alsoBackup.has(t.path));
 
-    // 每个旧路径都打 tombstone（#362 §5.4）：写盘在途时删除/改名，落定后绝不能
     // 快照配额：条目数 + 字符预算双条件。超额时**整批不写、保留 tab**，
     // 绝不「淘汰旧的换新的」——那会删掉其它已删文件的唯一副本
     const required = new Map<string, string>();

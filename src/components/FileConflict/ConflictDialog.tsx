@@ -31,7 +31,8 @@ async function saveLocalBackup(
     // 列目录失败（如单文件模式目录已移除）：退化为无冲突检测的直接命名
   }
   const backupPath = nextBackupPath(filePath, existing);
-  await writeTextFile(backupPath, localContent);
+  // 备份是「丢了还能从编辑器重来」的副本人，不需要掉电保证：省掉两次 fsync
+  await writeTextFile(backupPath, localContent, { durability: "none" });
   return backupPath;
 }
 

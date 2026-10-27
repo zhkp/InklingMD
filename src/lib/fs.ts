@@ -127,6 +127,11 @@ export interface WriteTextOptions {
   mustExist?: boolean;
   /** 父目录缺失时补建整条目录链。仅用于用户明确同意「在原位置重新创建」 */
   createParents?: boolean;
+  /**
+   * 耐久：文档保存用 `"sync"`（默认，掉电不丢）；导出 / 备份等「丢了能重做」的写入传
+   * `"none"`，避免大文件多付一次数据 fsync + 一次目录 fsync。
+   */
+  durability?: "sync" | "none";
 }
 
 /**
@@ -221,14 +226,18 @@ export async function saveDocument(
     return { kind: "written", stat: { ...MOCK_FILE_STAT[filePath] }, foreignWrite: false };
   }
   const current = MOCK_FILE_STAT[filePath];
-  if (
-    options.expected &&
-    (current.mtimeUs !== options.expected.mtimeUs || current.size !== options.expected.size)
-  ) {
-    return { kind: "conflict", disk: { ...current }, registerFailed: false };
-  }
-  if (!options.expected && !options.overwriteExisting) {
-    return { kind: "conflict", disk: { ...current }, registerFailed: false };
+  // 与 Rust 同语义：用户已确认覆盖时跳过身份比对；未确认覆盖时
+  // 「有 expected 比身份、无 expected 要求目标不存在」
+  if (!options.overwriteExisting) {
+    if (
+      options.expected &&
+      (current.mtimeUs !== options.expected.mtimeUs || current.size !== options.expected.size)
+    ) {
+      return { kind: "conflict", disk: { ...current }, registerFailed: false };
+    }
+    if (!options.expected) {
+      return { kind: "conflict", disk: { ...current }, registerFailed: false };
+    }
   }
   MOCK_FILE_CONTENT[filePath] = content;
   touchMockStat(filePath, content);

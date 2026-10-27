@@ -332,6 +332,7 @@ pub enum RegisterPolicy {
 }
 
 /// recovery/ 专用：任何半失败都删 temp + Io，不登记
+#[cfg(test)]
 pub struct NoRegisterStore;
 #[cfg(test)]
 impl TempKeptStore for NoRegisterStore {
@@ -1194,6 +1195,21 @@ impl TempKeptRegistry {
             .map(|f| f.entries)
             .unwrap_or_default();
         TempKeptRegistry { file, entries: Mutex::new(entries) }
+    }
+
+    /// 启动清理：把 temp 已不存在的条目一次删掉并**只写一次盘**。
+    ///
+    /// 逐条调 `release()` 会让每条 stale 都做一遍「序列化 + rename + sync_all +
+    /// 父目录 fsync」，启动路径上 N 条 = N 次同步 IO。
+    pub fn prune_missing(&self) -> Result<usize, CmdError> {
+        let mut guard = self.entries.lock().expect("registry poisoned");
+        let before = guard.len();
+        guard.retain(|e| Path::new(&e.temp_path).exists());
+        let removed = before - guard.len();
+        if removed > 0 {
+            self.persist(&guard)?;
+        }
+        Ok(removed)
     }
 
     fn persist(&self, entries: &[TempKeptEntry]) -> Result<(), CmdError> {

@@ -382,6 +382,63 @@ mod tests {
         assert_no_dot_temp(&dir.path.join("gone/sub"));
     }
 
+    /// 用户已确认覆盖：即便 `expected` 是外部改动前的旧身份也必须写入
+    /// （否则「确认覆盖 → 回执再判一次冲突」的双弹窗会回来）
+    #[test]
+    fn save_document_overwrite_confirmed_ignores_stale_expected() {
+        let dir = TestDir::new("save-overwrite");
+        let file = dir.path.join("doc.md");
+        fs::write(&file, "old").unwrap();
+        let stale = write_engine::read_document_sync(&file.to_string_lossy()).unwrap().stat;
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        fs::write(&file, "external").unwrap();
+
+        let outcome = save_document_sync(
+            &file.to_string_lossy(),
+            "mine".into(),
+            Some(stale),
+            false,
+            true,
+        )
+        .unwrap();
+
+        assert!(matches!(outcome, write_engine::SaveOutcome::Written { .. }));
+        assert_eq!(fs::read_to_string(&file).unwrap(), "mine");
+        assert_no_dot_temp(&dir.path);
+    }
+
+    /// 启动 prune：temp 已不存在的登记条目被清掉，且只写一次盘
+    #[test]
+    fn temp_kept_prune_drops_missing_temps_in_one_pass() {
+        let dir = TestDir::new("registry-prune");
+        let registry_file = dir.path.join("recovery").join("temp-kept.json");
+        let live_temp = dir.path.join(".doc.md.tmp.1-0");
+        fs::write(&live_temp, "x").unwrap();
+        let stale_temp = dir.path.join(".doc.md.tmp.1-1"); // 不创建：模拟已被清理
+
+        let seeded = serde_json::json!({
+            "version": 1,
+            "entries": [
+                { "tempPath": live_temp.display().to_string(), "targetPath": "t1", "createdAt": 1 },
+                { "tempPath": stale_temp.display().to_string(), "targetPath": "t2", "createdAt": 2 },
+            ]
+        });
+        fs::create_dir_all(registry_file.parent().unwrap()).unwrap();
+        fs::write(&registry_file, serde_json::to_string(&seeded).unwrap()).unwrap();
+
+        let registry = write_engine::TempKeptRegistry::load(registry_file.clone());
+        let removed = registry.prune_missing().unwrap();
+        assert_eq!(removed, 1, "只应清掉 temp 已不存在的那一条");
+        assert_eq!(registry.entries().len(), 1);
+
+        // 落盘后的文件里也只剩一条（且不是被清掉的那条）
+        let raw = fs::read_to_string(&registry_file).unwrap();
+        let saved: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let entries = saved["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0]["tempPath"].as_str().unwrap().ends_with(".tmp.1-0"));
+    }
+
     /// 目录里不得残留 `.<name>.tmp.*`（半失败时的 temp 必须登记或删除，不能凭空留下）
     fn assert_no_dot_temp(dir: &Path) {
         for entry in fs::read_dir(dir).unwrap() {
@@ -1281,13 +1338,9 @@ use write_engine::TempKeptStore as _TempKeptStoreTrait;
 pub fn init_temp_kept_registry(app_data_dir: PathBuf) {
     let file = app_data_dir.join("recovery").join("temp-kept.json");
     let registry = write_engine::TempKeptRegistry::load(file);
-    // 启动清理：temp 已经不存在的登记条目必须注销，否则 `temp-kept.json` 只增不减，
-    // 重启后全是悬空条目（用户在两次启动之间另存/放弃的那些 temp）
-    for entry in registry.entries() {
-        if !Path::new(&entry.temp_path).exists() {
-            let _ = registry.release(Path::new(&entry.temp_path));
-        }
-    }
+    // 启动清理：temp 已经不存在的登记条目必须注销，否则 `temp-kept.json` 只增不减。
+    // 一次 prune 只写一次盘（逐条 release 会是 N 次全量落盘）——失败不阻塞启动
+    let _ = registry.prune_missing();
     let _ = TEMP_KEPT.set(registry);
 }
 
@@ -1359,8 +1412,12 @@ fn save_document_sync(
         }
     }
 
+    // `overwrite_existing` 必须在**两种**情形下都生效，否则它就是命令签名里的死参数：
+    // - 有 `expected`：用户已确认覆盖 → 跳过身份比对（CreateOrReplace），否则仍按身份严格替换；
+    // - 无 `expected`：未确认覆盖 → CreateExclusive（目标在此期间出现即 Conflict，不静默覆盖）。
     let mode = match (expected, overwrite_existing) {
-        (Some(_), _) => CommitMode::ReplaceExisting,
+        (Some(_), false) => CommitMode::ReplaceExisting,
+        (Some(_), true) => CommitMode::CreateOrReplace,
         (None, true) => CommitMode::CreateOrReplace,
         (None, false) => CommitMode::CreateExclusive,
     };
@@ -1404,6 +1461,10 @@ fn precheck_save(
         .stat(target)
         .map_err(|e| AtomicError::Cmd(CmdError::from(e)))?;
 
+    // 用户已确认覆盖：身份比对整体跳过（否则这一轮修复的「确认后不再弹框」会失效）
+    if overwrite_existing {
+        return Ok(());
+    }
     if let Some(exp) = expected {
         return match current {
             None => Err(AtomicError::Outcome(SaveOutcome::NotFound)),
@@ -1434,16 +1495,27 @@ pub async fn write_text_file(
     content: String,
     must_exist: Option<bool>,
     create_parents: Option<bool>,
+    durability: Option<String>,
 ) -> Result<(), String> {
     let options = WriteTextOptions {
         must_exist: must_exist.unwrap_or(false),
         create_parents: create_parents.unwrap_or(false),
     };
-    tauri::async_runtime::spawn_blocking(move || write_text_file_sync(file_path, content, options))
-        .await
-        .map_err(|e| format!("文件写入任务失败: {e}"))?
+    // 耐久由调用方显式指定：文档保存默认 Sync（掉电不丢），
+    // 导出 / 备份等「丢了能重做」的写入传 "none"，避免大文件多付一次数据 + 目录 fsync
+    let durability = match durability.as_deref() {
+        Some("none") => write_engine::Durability::None,
+        _ => write_engine::Durability::Sync,
+    };
+    tauri::async_runtime::spawn_blocking(move || {
+        write_text_file_with_durability(file_path, content, options, durability, || {})
+    })
+    .await
+    .map_err(|e| format!("文件写入任务失败: {e}"))?
 }
 
+/// 单测入口：文档语义（Sync），避免每个既有用例都多传一个参数。
+#[cfg(test)]
 fn write_text_file_sync(
     file_path: String,
     content: String,
@@ -1452,11 +1524,29 @@ fn write_text_file_sync(
     write_text_file_with(file_path, content, options, || {})
 }
 
-/// before_replace 在临时文件落盘之后、最终替换之前调用（测试注入外部删除的接缝）
+/// before_replace 在临时文件落盘之后、最终替换之前调用（测试注入外部删除的接缝）。
+/// 默认 Sync：单测走这条；生产由命令层显式传耐久。
+#[cfg(test)]
 fn write_text_file_with(
     file_path: String,
     content: String,
     options: WriteTextOptions,
+    before_replace: impl FnOnce(),
+) -> Result<(), String> {
+    write_text_file_with_durability(
+        file_path,
+        content,
+        options,
+        write_engine::Durability::Sync,
+        before_replace,
+    )
+}
+
+fn write_text_file_with_durability(
+    file_path: String,
+    content: String,
+    options: WriteTextOptions,
+    durability: write_engine::Durability,
     before_replace: impl FnOnce(),
 ) -> Result<(), String> {
     let path = Path::new(&file_path);
@@ -1479,9 +1569,8 @@ fn write_text_file_with(
             write_engine::CommitMode::CreateOrReplace
         },
         write_engine::receipt_policy(),
-        // 显式 Sync，**不从 must_exist 反推**：草稿首次保存与「重新创建」走的正是
-        // must_exist=false 分支，若反推成 None，用户第一次保存新文档就不落盘
-        write_engine::Durability::Sync,
+        // 耐久由调用方显式给（不从 must_exist 反推：首存/重建走的正是 must_exist=false）
+        durability,
         |target| {
             if let Some(hook) = before.take() {
                 hook();

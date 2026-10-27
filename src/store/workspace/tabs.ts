@@ -532,10 +532,7 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
     if (wantsRecreate) {
       // 文档写入统一走写引擎（回执 + 半失败登记）：`createParentDirs` 只在这条
       // 「用户明确确认重建」的路径上为 true，是它唯一的生产调用方
-      const outcome = await saveDocument(savePath, content, {
-        createParentDirs: true,
-        overwriteExisting: true,
-      });
+      const outcome = await saveDocument(savePath, content, { createParentDirs: true });
       if (outcome.kind !== "written") return null;
       return { path: savePath, stat: outcome.stat };
     }
@@ -553,7 +550,7 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
       });
       return null;
     }
-    const savedAs = await saveDocument(picked, content, { overwriteExisting: true });
+    const savedAs = await saveDocument(picked, content);
     if (savedAs.kind !== "written") {
       await message(`写入「${picked.split(/[\\/]/).pop()}」失败，请重试或选择其他位置。`, {
         title: "另存为",
@@ -731,6 +728,10 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
       if (!isTauri()) return;
       // 在途保存时不核验：写完会自己登记基线，中途读盘只会制造假冲突
       if (initial.saving) return;
+      // 后台已标记冲突：不再重复核验。否则每轮轮询都会走「stat → 全量读盘 → reconcile」
+      // 一整条链路（10MB 文档 = 每 3 秒一次全量 IO + 一次订阅重渲染），
+      // 只要用户不处理就一直持续。切回时 `switchTab` 的 interactive=true 会补弹。
+      if (!interactive && initial.conflictPending) return;
       // 只有当**同一文件**的冲突对话框已经打开时才跳过；
       // 后台 tab 被标记 conflictPending 后，用户切回来时必须补弹（否则唯一出口是 Ctrl+S）
       if (useConflict.getState().conflict?.filePath === filePath) return;
@@ -758,8 +759,6 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
       }
 
       if (tabAfterStat.deletedOnDisk) {
-        // 文件被恢复（例如 git checkout 回来）：解除标记、清掉删除 tombstone，
-        // 继续按基线判定（否则 60s 内的正常保存会被旧 tombstone 误拦）
         set((state) => ({
           openTabs: state.openTabs.map((t) =>
             t.path === filePath ? { ...t, deletedOnDisk: false } : t,
@@ -1466,7 +1465,6 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
           savedStat = resolved.stat;
           resolvedMissing = true;
         }
-        // 写盘成功：旧路径的 tombstone 可以消费了（此后同路径重建可正常保存）
         if (receiptUntrusted) {
           set({
             saveError: "保存可能未完成：写入后磁盘内容与预期不一致，请检查后另存副本。",

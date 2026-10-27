@@ -204,6 +204,40 @@ describe("useFileWatcher（#362 重写后的判定）", () => {
     unmount();
   });
 
+  it("后台冲突 tab 不会每轮重复全量读盘（只核验一次）", async () => {
+    const OTHER = "/workspace/other.md";
+    const openConflictSpy = vi.fn();
+    useConflict.setState({ conflict: null, openConflict: openConflictSpy });
+    useWorkspace.setState({
+      openTabs: [
+        // 已在后台被标记冲突的 tab
+        makeTab({ path: OTHER, dirty: true, content: "# 后台未保存", conflictPending: true }),
+        makeTab({ dirty: false }),
+      ],
+      currentFile: DOC,
+      activeTabPath: DOC,
+    });
+    vi.mocked(fs.fileStat).mockImplementation(async (p: string) =>
+      p === OTHER ? EXTERNAL_STAT : OPEN_STAT,
+    );
+    vi.mocked(fs.readDocument).mockImplementation(async (p: string) =>
+      p === OTHER
+        ? { content: "# 后台外部内容", stat: EXTERNAL_STAT }
+        : { content: "# 标题\n\n正文", stat: OPEN_STAT },
+    );
+
+    const { unmount } = renderHook(() => useFileWatcher());
+    await pollOnce();
+    // 后台已标记 → 第一轮就不该读盘（否则每 3s 一次全量 IO）
+    expect(fs.readDocument).not.toHaveBeenCalled();
+
+    await pollOnce();
+    await pollOnce();
+    expect(fs.readDocument).not.toHaveBeenCalled();
+    expect(openConflictSpy).not.toHaveBeenCalled();
+    unmount();
+  });
+
   it("stat 报 notFound：进删除态并清基线", async () => {
     vi.mocked(fs.fileStat).mockRejectedValue({ code: "notFound", message: "文件不存在" });
 

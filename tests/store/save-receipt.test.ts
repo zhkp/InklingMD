@@ -172,9 +172,10 @@ describe("saveCurrent 写盘回执（#362）", () => {
     // 重建也走写引擎（唯一开启 createParentDirs 的入口），不再用 writeTextFile 旁路
     expect(writeTextFileMock).not.toHaveBeenCalled();
     expect(saveDocumentMock).toHaveBeenCalledTimes(2);
+    // 重建不带 expected、也不带 overwriteExisting → Rust 侧走 CreateExclusive：
+    // 若这期间文件又被别人建出来，会得到 conflict 而不是静默覆盖
     expect(saveDocumentMock).toHaveBeenLastCalledWith(DOC, "本地编辑", {
       createParentDirs: true,
-      overwriteExisting: true,
     });
     const tab = useWorkspace.getState().openTabs[0];
     expect(tab.deletedOnDisk).toBe(false);

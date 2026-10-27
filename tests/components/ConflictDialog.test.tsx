@@ -75,7 +75,9 @@ describe("ConflictDialog", () => {
     render(<ConflictDialog />);
     fireEvent.click(screen.getByText("保留本地并另存副本（.backup.md）"));
     await waitFor(() => {
-      expect(writeTextFileMock).toHaveBeenCalledWith("/docs/note.backup.md", "本地版本");
+      expect(writeTextFileMock).toHaveBeenCalledWith("/docs/note.backup.md", "本地版本", {
+        durability: "none",
+      });
       expect(reloadFileMock).toHaveBeenCalledWith("/docs/note.md");
       expect(alertMock).toHaveBeenCalledWith(expect.stringContaining("note.backup.md"));
     });
@@ -93,7 +95,9 @@ describe("ConflictDialog", () => {
     render(<ConflictDialog />);
     fireEvent.click(screen.getByText("保留本地并另存副本（.backup.md）"));
     await waitFor(() => {
-      expect(writeTextFileMock).toHaveBeenCalledWith("/docs/note.backup.2.md", "本地版本");
+      expect(writeTextFileMock).toHaveBeenCalledWith("/docs/note.backup.2.md", "本地版本", {
+        durability: "none",
+      });
     });
   });
 
