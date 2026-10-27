@@ -73,6 +73,18 @@ describe("fs.saveDocument（mock 分支）", () => {
     expect(MOCK_FILE_CONTENT[FILE]).toBe("someone else");
   });
 
+  it("另存为到已存在的文件（无 expected + overwriteExisting）：覆盖写入", async () => {
+    // 原生保存对话框已经问过「是否替换」，用户点是之后必须能覆盖；
+    // 不带 overwriteExisting 会走 CreateExclusive → 一律 conflict，等于该功能不可用
+    MOCK_FILE_CONTENT[FILE] = "旧内容";
+    MOCK_FILE_STAT[FILE] = { mtimeUs: 5_000_000, size: 9 };
+
+    const outcome = await saveDocument(FILE, "新内容", { overwriteExisting: true });
+
+    expect(outcome.kind).toBe("written");
+    expect(MOCK_FILE_CONTENT[FILE]).toBe("新内容");
+  });
+
   it("确认覆盖（expected + overwriteExisting）：即便身份不符也写入", async () => {
     MOCK_FILE_CONTENT[FILE] = "external";
     MOCK_FILE_STAT[FILE] = { mtimeUs: 4_000_000, size: 8 };

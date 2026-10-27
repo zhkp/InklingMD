@@ -15,6 +15,7 @@ import {
 } from "../../lib/fs";
 import type { DocumentSnapshot, FileStat } from "../../lib/fs";
 import { formatCmdError } from "../../lib/cmd-error";
+import { isSamePath } from "../../lib/path-utils";
 import { evaluateBaseline, reconcileDiskContent } from "../../lib/save-guard";
 import { writeErrorCode, type WriteErrorCode } from "../../lib/writeErrors";
 import { flushAllMarkdownPublishers } from "../../components/Editor/markdown-publisher";
@@ -532,8 +533,29 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
     if (wantsRecreate) {
       // 文档写入统一走写引擎（回执 + 半失败登记）：`createParentDirs` 只在这条
       // 「用户明确确认重建」的路径上为 true，是它唯一的生产调用方
-      const outcome = await saveDocument(savePath, content, { createParentDirs: true });
-      if (outcome.kind !== "written") return null;
+      const outcome = await saveDocument(savePath, content, { createParentDirs: true }).catch(
+        async (err: unknown) => {
+          // 引擎抛错（NotAFile / create_dir_all 失败等）必须在这里收口：
+          // 否则异常冒到 saveCurrent 的 catch，会拿**旧路径**再弹一次「原文件不在了」
+          await message(`重新创建「${name}」失败：${formatCmdError(err).message}`, {
+            title: "重新创建失败",
+            kind: "warning",
+          });
+          return null;
+        },
+      );
+      if (!outcome) return null;
+      if (outcome.kind !== "written") {
+        // 期间文件被别人建出来（CreateExclusive → conflict）等：必须告诉用户，
+        // 不能「点了重新创建，界面毫无反应」
+        await message(
+          outcome.kind === "conflict"
+            ? `「${name}」在此期间已被其他程序创建，未覆盖。请重新选择操作。`
+            : `「${name}」重新创建失败，请重试或另存为。`,
+          { title: "重新创建失败", kind: "warning" },
+        );
+        return null;
+      }
       return { path: savePath, stat: outcome.stat };
     }
     if (!wantsSaveAs) return null;
@@ -543,14 +565,29 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
       filters: [{ name: "Markdown", extensions: ["md", "markdown"] }],
     });
     if (!picked) return null;
-    if (picked !== savePath && get().openTabs.some((t) => t.path === picked)) {
+    if (!isSamePath(picked, savePath) && get().openTabs.some((t) => isSamePath(t.path, picked))) {
       await message(`「${picked.split(/[\\/]/).pop()}」已在其他标签页打开，请先关闭它或选择其他位置。`, {
         title: "另存为",
         kind: "warning",
       });
       return null;
     }
-    const savedAs = await saveDocument(picked, content);
+    // 原生保存对话框已经问过「是否替换」，这里的 overwriteExisting 就是那次同意：
+    // 否则 CreateExclusive 会对已存在目标一律 conflict，「另存为覆盖旧文件」直接不可用。
+    // **例外**：用户把目标选回「原路径」时不算覆盖（那个路径上的文件刚被删/改名），
+    // 按 CreateExclusive 处理，与「重新创建」保持同一竞态保护（期间被重建 → conflict）
+    const savedAs = await saveDocument(picked, content, {
+      overwriteExisting: !isSamePath(picked, savePath),
+    }).catch(async (err: unknown) => {
+      // 与重建分支同理：异常必须在这里收口，否则冒到 saveCurrent 的 catch 会拿旧路径
+      // 再弹一次「原文件不在了」，把「目标目录被占位」这类错误归因到错误的文件上
+      await message(`写入「${picked.split(/[\\/]/).pop()}」失败：${formatCmdError(err).message}`, {
+        title: "另存为",
+        kind: "warning",
+      });
+      return null;
+    });
+    if (!savedAs) return null;
     if (savedAs.kind !== "written") {
       await message(`写入「${picked.split(/[\\/]/).pop()}」失败，请重试或选择其他位置。`, {
         title: "另存为",
@@ -1032,9 +1069,7 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
       let savePath = tab.path;
       // 记录本次保存发起时快照内容
       const contentToSave = tab.content;
-      // 用户在上面「是否覆盖外部修改」里确认后：把 expected 换成当前磁盘身份，
-      // 并显式 overwriteExisting——否则回执会拿旧身份再判一次冲突（双弹窗）
-      let forcedExpected: FileStat | undefined;
+      /** 用户在上面「是否覆盖外部修改」里确认过：只放宽回执的身份比对，不放宽目标存在性 */
       let overwriteConfirmed = false;
 
       try {
@@ -1117,10 +1152,8 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
                 applyTabSaving(activeTabPath, false);
                 return;
               }
-              // 确认覆盖：把基线推进到**当前**磁盘身份，并让写盘走「允许覆盖」，
-              // 否则回执会用外部改动前的老身份再判一次冲突（用户点了覆盖却再弹一次框）
-              const latestOnDisk = await readDocument(savePath).catch(() => null);
-              forcedExpected = latestOnDisk?.stat;
+              // 确认覆盖：只置位 overwriteConfirmed。Rust 侧据此跳过身份比对
+              // （但保留「目标必须存在」），所以不必再读一次盘取最新身份
               overwriteConfirmed = true;
             } catch {
               // 弹窗异常或被 reject/取消时，视为放弃覆盖并安全退出
@@ -1344,9 +1377,6 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
             } catch {
               // 取不到身份就留空基线，下次读盘重建
             }
-          } else if (resolvedMissing) {
-            // 「重新创建 / 另存为」已在对话框链路里写过盘（回执已给出基线）：
-            // 这里不能再写一次——第二次会带着旧 `expected`，在重建场景再判一次 notFound
           } else if (!tab.diskStat) {
             // 没有成对基线（旧 tab / 恢复出来的 tab）：退回「必须存在」的写盘，
             // 仍不允许复活已删文件，但没有身份可比，也就无法改判冲突
@@ -1361,8 +1391,8 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
               saveDocument(savePath, contentToSave, { expected, overwriteExisting: overwrite });
 
             // expected = 上次成对读到的磁盘身份：目标消失 → notFound，身份变了 → conflict。
-            // 用户已确认覆盖时用**当前磁盘身份** + overwriteExisting，避免回执二次拦
-            let outcome = await attempt(forcedExpected ?? tab.diskStat, overwriteConfirmed);
+            // 用户已确认覆盖时只置 `overwriteExisting`：Rust 侧跳过身份比对（但保留目标必须存在）
+            let outcome = await attempt(tab.diskStat, overwriteConfirmed);
             if (outcome.kind === "conflict") {
               // 磁盘内容仍等于我们的基线 → 只是 mtime 变了（touch / 基线过期），
               // adopt 新身份后重试一次（M2 三路里的 touch-only，不打扰用户）

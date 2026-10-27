@@ -42,7 +42,7 @@ pub struct DocumentSnapshot {
 /// 结构化错误码（本文件唯一副本；TS 侧 `CmdErrorCode` 必须一一对应）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
-#[allow(dead_code)] // 契约全集：部分码由 PR-2 的写盘引擎与恢复通道使用
+#[allow(dead_code)] // 契约全集：部分码仅测试辅助函数构造 / 留给恢复通道
 pub enum ErrorCode {
     NotFound,
     ParentMissing,
@@ -534,7 +534,8 @@ enum Deterministic {
     Io(String),
 }
 
-/// 耐久策略（B11）：journal 的 1.2s 防抖用 None（不 fsync），用户数据保存用 Sync。
+/// 耐久策略：None 用于「丢了能重做」的写入（导出 / 备份副本等，不 fsync），
+/// 用户文档保存用 Sync（temp + 父目录都落盘）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Durability {
@@ -610,7 +611,7 @@ where
                 // Windows 的 ReplaceFileW / MoveFileEx 已消耗 temp，这里是幂等 no-op。
                 fs.remove_temp(&temp);
                 let r = receipt_for(fs, path, temp_meta, policy, content)?;
-                // Durability::None（journal 防抖）不做任何 fsync；Sync 才落盘父目录
+                // Durability::None 不做任何 fsync；Sync 才落盘父目录
                 if durability == Durability::Sync {
                     let _ = fs.sync_parent(path);
                 }
@@ -853,7 +854,7 @@ where
 /// 真实文件系统：`std::fs` + 平台替换原语。
 ///
 /// 耐久策略由调用方决定：`write_temp` 只写不 fsync，`sync_temp` / `sync_parent`
-/// 只在 `Durability::Sync` 时被 `atomic_write` 调用（journal 的防抖写入不落盘）。
+/// 只在 `Durability::Sync` 时被 `atomic_write` 调用（`None` 的写入不落盘）。
 pub struct StdFs;
 
 static TEMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -2067,7 +2068,7 @@ mod engine_tests {
         assert_eq!(c.fs.sync_parent_calls.get(), 1, "Sync 必须 fsync 父目录");
     }
 
-    /// Durability::None（journal 防抖）→ 一次 fsync 都不做
+    /// Durability::None → 一次 fsync 都不做
     #[test]
     fn t_durability_none_skips_fsync() {
         let c = ctx(Some(st(1, 5)));

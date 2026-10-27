@@ -77,7 +77,12 @@ export async function exportHTML(
       filters: [{ name: "HTML", extensions: ["html"] }],
     });
     if (!path) return;
-    await invoke<void>("write_text_file", { filePath: path, content: fullHTML });
+    // 导出产物「丢了能重做」，不必掉电保证：省掉数据 + 目录两次 fsync
+    await invoke<void>("write_text_file", {
+      filePath: path,
+      content: fullHTML,
+      durability: "none",
+    });
   } else {
     // 浏览器：触发下载
     downloadBlob(new Blob([fullHTML], { type: "text/html" }), `${name}.html`);
@@ -356,7 +361,11 @@ export async function exportOutline(): Promise<void> {
       filters: [{ name: "Markdown", extensions: ["md"] }],
     });
     if (!path) return;
-    await invoke<void>("write_text_file", { filePath: path, content: md });
+    await invoke<void>("write_text_file", {
+      filePath: path,
+      content: md,
+      durability: "none",
+    });
   } else {
     downloadBlob(new Blob([md], { type: "text/markdown" }), `${name}-outline.md`);
   }

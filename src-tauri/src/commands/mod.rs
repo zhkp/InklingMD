@@ -407,6 +407,25 @@ mod tests {
         assert_no_dot_temp(&dir.path);
     }
 
+    /// 确认覆盖**不放宽**「目标必须存在」：确认后文件被删 → NotFound，绝不重建
+    /// （否则 `CreateOrReplace` 会在目标缺失时创建它，绕过 #363）
+    #[test]
+    fn save_document_overwrite_confirmed_still_requires_target() {
+        let dir = TestDir::new("save-overwrite-missing");
+        let file = dir.path.join("doc.md");
+        fs::write(&file, "old").unwrap();
+        let expected = write_engine::read_document_sync(&file.to_string_lossy()).unwrap().stat;
+        fs::remove_file(&file).unwrap();
+
+        let outcome =
+            save_document_sync(&file.to_string_lossy(), "mine".into(), Some(expected), false, true)
+                .unwrap();
+
+        assert!(matches!(outcome, write_engine::SaveOutcome::NotFound));
+        assert!(!file.exists(), "确认覆盖不得把已删除的文件重建出来");
+        assert_no_dot_temp(&dir.path);
+    }
+
     /// 启动 prune：temp 已不存在的登记条目被清掉，且只写一次盘
     #[test]
     fn temp_kept_prune_drops_missing_temps_in_one_pass() {
@@ -1330,8 +1349,7 @@ fn check_write_target(path: &Path, must_exist: bool) -> Result<(), String> {
 
 /// 半失败登记表（全局单文件 `recovery/temp-kept.json`，多窗口共用）。
 static TEMP_KEPT: std::sync::OnceLock<write_engine::TempKeptRegistry> = std::sync::OnceLock::new();
-#[allow(unused_imports)]
-use write_engine::TempKeptStore as _TempKeptStoreTrait;
+
 
 /// 启动时初始化登记表；未初始化时（单测 / 早期调用）退化为临时目录，
 /// 保证保存不会因为「登记表还没就位」而整体失败。
@@ -1344,6 +1362,10 @@ pub fn init_temp_kept_registry(app_data_dir: PathBuf) {
     let _ = TEMP_KEPT.set(registry);
 }
 
+/// `entries()` 是 trait 方法，只有测试会直接读整表；生产走 inherent 的 `load` / `prune_missing`
+#[cfg(test)]
+use write_engine::TempKeptStore as _;
+
 fn temp_kept_registry() -> &'static write_engine::TempKeptRegistry {
     TEMP_KEPT.get_or_init(|| {
         let file = std::env::temp_dir().join("inklingmd").join("temp-kept.json");
@@ -1353,9 +1375,10 @@ fn temp_kept_registry() -> &'static write_engine::TempKeptRegistry {
 
 /// 保存文档：替换语义 + 写盘回执 + 半失败登记。
 ///
-/// `expected` = 上次成对读取的磁盘身份（命名文档保存必须给，目标消失即 `NotFound`，
-/// 绝不复活）；`overwrite_existing` 只在「用户已在原生保存对话框确认覆盖」时为 true，
-/// 否则目标出现即 `Conflict`（不静默覆盖）。
+/// `expected` = 上次成对读取的磁盘身份：给了就要求目标仍在原处（消失即 `NotFound`，绝不复活），
+/// 无基线的命名文档（恢复出来的 tab）由前端退回 `write_text_file(mustExist)`，不走这里。
+/// `overwrite_existing` = 用户已在原生对话框确认覆盖：只跳过身份比对，**不**放宽目标存在性；
+/// 未确认时无 `expected` 走 CreateExclusive（目标出现即 `Conflict`，不静默覆盖）。
 #[tauri::command]
 pub async fn save_document(
     file_path: String,
@@ -1384,21 +1407,29 @@ fn save_document_sync(
 ) -> Result<write_engine::SaveOutcome, write_engine::CmdError> {
     use write_engine::{AtomicError, CommitMode, Durability, Fs, SaveOutcome, StdFs};
 
+    // 必须最先判：放到建目录之后，目录链已经被重建，守卫只拦住写盘、拦不住副作用
+    if expected.is_some() && create_parent_dirs {
+        return Err(write_engine::CmdError::new(
+            write_engine::ErrorCode::InvalidArgument,
+            "已有基线的保存不能同时补建父目录".to_string(),
+        ));
+    }
+
     let path = Path::new(file_path);
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     if !parent.is_dir() {
+        // 父路径被同名字**文件**占用时，补建目录必然失败：无论是否允许建目录，
+        // 都必须给出 ParentNotDir（否则 create_dir_all 会退化成一条无分类的 Io 串，
+        // 前端认不出、用户看到的只是 saveError，且「重新创建」没有任何可选动作）
+        let blocked = parent
+            .ancestors()
+            .find(|p| p.exists())
+            .is_some_and(|existing| !existing.is_dir());
+        if blocked {
+            return Ok(SaveOutcome::ParentNotDir { parent: parent.display().to_string() });
+        }
         if !create_parent_dirs {
-            // 区分「父目录不存在」与「父路径被同名字**文件**占用」：后者补建目录必然失败，
-            // UI 不能提供「重新创建」。用只读 metadata 判断，不做任何副作用写盘探测
-            let blocked = parent
-                .ancestors()
-                .find(|p| p.exists())
-                .is_some_and(|existing| !existing.is_dir());
-            return Ok(if blocked {
-                SaveOutcome::ParentNotDir { parent: parent.display().to_string() }
-            } else {
-                SaveOutcome::ParentMissing { parent: parent.display().to_string() }
-            });
+            return Ok(SaveOutcome::ParentMissing { parent: parent.display().to_string() });
         }
         fs::create_dir_all(parent)?;
     }
@@ -1412,12 +1443,11 @@ fn save_document_sync(
         }
     }
 
-    // `overwrite_existing` 必须在**两种**情形下都生效，否则它就是命令签名里的死参数：
-    // - 有 `expected`：用户已确认覆盖 → 跳过身份比对（CreateOrReplace），否则仍按身份严格替换；
-    // - 无 `expected`：未确认覆盖 → CreateExclusive（目标在此期间出现即 Conflict，不静默覆盖）。
+    // 模式由「有无 expected」+「是否已确认覆盖」共同决定，但确认覆盖只放宽**身份比对**，
+    // 不放宽「目标必须存在」：若对 `(Some(_), true)` 用 CreateOrReplace 且 precheck 整体跳过，
+    // 就会在「确认覆盖后文件被删」的窗口里把它**创建**出来——绕过 #363「绝不复活已删文件」。
     let mode = match (expected, overwrite_existing) {
-        (Some(_), false) => CommitMode::ReplaceExisting,
-        (Some(_), true) => CommitMode::CreateOrReplace,
+        (Some(_), _) => CommitMode::ReplaceExisting,
         (None, true) => CommitMode::CreateOrReplace,
         (None, false) => CommitMode::CreateExclusive,
     };
@@ -1461,8 +1491,17 @@ fn precheck_save(
         .stat(target)
         .map_err(|e| AtomicError::Cmd(CmdError::from(e)))?;
 
-    // 用户已确认覆盖：身份比对整体跳过（否则这一轮修复的「确认后不再弹框」会失效）
+    // 用户已确认覆盖：跳过身份比对（否则「确认后不再弹框」会失效）。
+    // - 带 expected（覆盖某个已打开的文档）：**目标必须仍在**，否则就成了静默复活；
+    // - 不带 expected（另存为并确认覆盖）：允许创建，这里不拦。
+    //   注意「重新创建」不走这条：它不传 overwrite_existing，按 CreateExclusive 处理。
     if overwrite_existing {
+        if expected.is_some() {
+            return match current {
+                None => Err(AtomicError::Outcome(SaveOutcome::NotFound)),
+                Some(_) => Ok(()),
+            };
+        }
         return Ok(());
     }
     if let Some(exp) = expected {
@@ -1476,14 +1515,13 @@ fn precheck_save(
             Some(_) => Ok(()),
         };
     }
-    if !overwrite_existing {
-        if let Some(now) = current {
-            return Err(AtomicError::Outcome(SaveOutcome::Conflict {
-                disk: now,
-                temp_path: None,
-                register_failed: false,
-            }));
-        }
+    // 走到这里只剩 (None, false) 的 CreateExclusive：目标必须不存在
+    if let Some(now) = current {
+        return Err(AtomicError::Outcome(SaveOutcome::Conflict {
+            disk: now,
+            temp_path: None,
+            register_failed: false,
+        }));
     }
     Ok(())
 }

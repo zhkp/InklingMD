@@ -125,7 +125,10 @@ export async function readTextFile(filePath: string): Promise<string> {
 export interface WriteTextOptions {
   /** 覆盖已有文档：目标不存在（被删除/改名）时拒绝写入，抛 TARGET_MISSING（issue #363） */
   mustExist?: boolean;
-  /** 父目录缺失时补建整条目录链。仅用于用户明确同意「在原位置重新创建」 */
+  /**
+   * 父目录缺失时补建整条目录链。**当前无生产调用方**：重建已统一走
+   * saveDocument({ createParentDirs })，这里仅为命令契约保留（测试夹具在用）。
+   */
   createParents?: boolean;
   /**
    * 耐久：文档保存用 `"sync"`（默认，掉电不丢）；导出 / 备份等「丢了能重做」的写入传
