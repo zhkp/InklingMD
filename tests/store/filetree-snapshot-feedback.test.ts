@@ -8,9 +8,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { useWorkspace } from "../../src/store/workspace";
 import {
+  DELETED_FILE_SNAPSHOTS_KEY,
+  DELETED_SNAPSHOT_LIMIT,
   persistDeletedSnapshot,
   probeSnapshotStorageHealth,
   clearDeletedSnapshots,
+  loadDeletedSnapshots,
 } from "../../src/store/workspace/shared";
 import { showMessage } from "../../src/lib/dialogs";
 
@@ -92,6 +95,39 @@ describe("#123 删除快照写入失败的用户可见告警", () => {
     expect(showMessage).toHaveBeenCalledWith(
       expect.stringContaining("未能创建恢复备份"),
       expect.objectContaining({ kind: "error", title: "恢复备份写入失败" }),
+    );
+  });
+
+  it("快照条目数已达上限：不写新快照、不淘汰旧副本，保留 tab 让用户另存（R7）", () => {
+    // 先塞满 DELETED_SNAPSHOT_LIMIT 条历史快照（每条都是别的文件的唯一副本）
+    const seeded = Array.from({ length: DELETED_SNAPSHOT_LIMIT }, (_, i) => ({
+      path: `/workspace/old-${i}.md`,
+      content: `旧内容 ${i}`,
+      deletedAt: Date.now() - i * 1000,
+    }));
+    window.localStorage.setItem(DELETED_FILE_SNAPSHOTS_KEY, JSON.stringify(seeded));
+
+    useWorkspace.setState({
+      openTabs: [tab("/workspace/note.md", "# 未保存内容", true)],
+      activeTabPath: "/workspace/note.md",
+      currentFile: "/workspace/note.md",
+      currentContent: "# 未保存内容",
+      dirty: true,
+    });
+
+    useWorkspace.getState().onFileDeleted("/workspace/note.md");
+
+    // 超额：整批不写，旧副本一条都不能少（绝不「淘汰最旧换最新」）
+    const snapshots = loadDeletedSnapshots();
+    expect(snapshots).toHaveLength(DELETED_SNAPSHOT_LIMIT);
+    expect(snapshots.some((s) => s.path === "/workspace/note.md")).toBe(false);
+    // tab 必须保留：内容还在编辑器里，用户能另存出去
+    const tabs = useWorkspace.getState().openTabs;
+    expect(tabs).toHaveLength(1);
+    expect(tabs[0].deletedOnDisk).toBe(true);
+    expect(showMessage).toHaveBeenCalledWith(
+      expect.stringContaining("未保存文件过多"),
+      expect.objectContaining({ kind: "error" }),
     );
   });
 

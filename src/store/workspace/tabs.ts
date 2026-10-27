@@ -493,7 +493,7 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
     savePath: string,
     code: WriteErrorCode,
     content: string,
-  ): Promise<string | null> => {
+  ): Promise<{ path: string; stat: FileStat } | null> => {
     const { message, save } = await import("@tauri-apps/plugin-dialog");
     const name = savePath.split(/[\\/]/).pop();
     const RECREATE = "重新创建";
@@ -530,8 +530,14 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
       choice === SAVE_AS || (canRecreate ? choice === "No" : choice === "Ok");
 
     if (wantsRecreate) {
-      await writeTextFile(savePath, content, { createParents: true });
-      return savePath;
+      // 文档写入统一走写引擎（回执 + 半失败登记）：`createParentDirs` 只在这条
+      // 「用户明确确认重建」的路径上为 true，是它唯一的生产调用方
+      const outcome = await saveDocument(savePath, content, {
+        createParentDirs: true,
+        overwriteExisting: true,
+      });
+      if (outcome.kind !== "written") return null;
+      return { path: savePath, stat: outcome.stat };
     }
     if (!wantsSaveAs) return null;
 
@@ -547,8 +553,15 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
       });
       return null;
     }
-    await writeTextFile(picked, content);
-    return picked;
+    const savedAs = await saveDocument(picked, content, { overwriteExisting: true });
+    if (savedAs.kind !== "written") {
+      await message(`写入「${picked.split(/[\\/]/).pop()}」失败，请重试或选择其他位置。`, {
+        title: "另存为",
+        kind: "warning",
+      });
+      return null;
+    }
+    return { path: picked, stat: savedAs.stat };
   };
 
   return {
@@ -807,9 +820,15 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
       set((state) => {
         const openTabs = state.openTabs.map((t) =>
           t.path === filePath
-            ? // 读到内容即证明文件在磁盘上存在：必须退出删除态，
-              // 否则保存链路会一直按"已被删除"暂停（"删除后同 stat 重建"正是这条）
-              { ...t, conflictPending: true, deletedOnDisk: false }
+            ?               // 读到内容即证明文件在磁盘上存在：必须退出删除态，
+              // 否则保存链路会一直按"已被删除"暂停（"删除后同 stat 重建"正是这条）。
+              //
+              // 同时把 stat 身份推进到刚读到的这一版：否则 watcher 每 3s 都会发现
+              // "基线又变了"，用户点「继续编辑」关掉对话框后会被反复弹（同一版只问一次）。
+              // **但 `diskMtime` 故意留在旧值**：`saveCurrent` 的写前比对用它，
+              // 保留旧值才能让用户下次 Ctrl+S 仍被提示「将覆盖外部修改」——
+              // 若一并推进，冲突就变成静默覆盖了。
+              { ...t, conflictPending: true, deletedOnDisk: false, diskStat: snapshot.stat }
             : t,
         );
         return state.activeTabPath === filePath
@@ -1326,6 +1345,9 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
             } catch {
               // 取不到身份就留空基线，下次读盘重建
             }
+          } else if (resolvedMissing) {
+            // 「重新创建 / 另存为」已在对话框链路里写过盘（回执已给出基线）：
+            // 这里不能再写一次——第二次会带着旧 `expected`，在重建场景再判一次 notFound
           } else if (!tab.diskStat) {
             // 没有成对基线（旧 tab / 恢复出来的 tab）：退回「必须存在」的写盘，
             // 仍不允许复活已删文件，但没有身份可比，也就无法改判冲突
@@ -1415,18 +1437,14 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
                 applyTabSaving(activeTabPath, false);
                 return;
               }
-              const resolvedPath = await resolveMissingFileSave(savePath, code, contentToSave);
-              if (!resolvedPath) {
+              const resolved = await resolveMissingFileSave(savePath, code, contentToSave);
+              if (!resolved) {
                 applyTabSaving(activeTabPath, false);
                 return;
               }
-              savePath = resolvedPath;
+              savePath = resolved.path;
+              savedStat = resolved.stat;
               resolvedMissing = true;
-              try {
-                savedStat = await fileStat(savePath);
-              } catch {
-                // 同上：留空基线
-              }
             }
           }
         } catch (e) {
@@ -1439,12 +1457,13 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
             applyTabSaving(activeTabPath, false);
             return;
           }
-          const resolvedPath = await resolveMissingFileSave(savePath, code, contentToSave);
-          if (!resolvedPath) {
+          const resolved = await resolveMissingFileSave(savePath, code, contentToSave);
+          if (!resolved) {
             applyTabSaving(activeTabPath, false);
             return;
           }
-          savePath = resolvedPath;
+          savePath = resolved.path;
+          savedStat = resolved.stat;
           resolvedMissing = true;
         }
         // 写盘成功：旧路径的 tombstone 可以消费了（此后同路径重建可正常保存）

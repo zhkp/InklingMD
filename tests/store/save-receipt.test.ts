@@ -6,17 +6,24 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { OpenTab } from "../../src/store/workspace";
 
-const { saveDocumentMock, readDocumentMock, writeTextFileMock, showMessageMock, fileMtimeMock, readTextFileMock } = vi.hoisted(() => ({
+const { saveDocumentMock, readDocumentMock, writeTextFileMock, showMessageMock, fileMtimeMock, readTextFileMock, messageMock, saveDialogMock, askMock } = vi.hoisted(() => ({
   saveDocumentMock: vi.fn(),
   readDocumentMock: vi.fn(),
   writeTextFileMock: vi.fn(),
   showMessageMock: vi.fn(),
   fileMtimeMock: vi.fn(),
   readTextFileMock: vi.fn(),
+  messageMock: vi.fn(),
+  saveDialogMock: vi.fn(),
+  askMock: vi.fn(),
 }));
 
 vi.mock("@tauri-apps/api/core", () => ({ isTauri: () => true }));
-vi.mock("@tauri-apps/plugin-dialog", () => ({ ask: vi.fn(), save: vi.fn(), message: vi.fn() }));
+vi.mock("@tauri-apps/plugin-dialog", () => ({
+  ask: askMock,
+  save: saveDialogMock,
+  message: messageMock,
+}));
 vi.mock("../../src/lib/fs", () => ({
   saveDocument: saveDocumentMock,
   writeTextFile: writeTextFileMock,
@@ -73,6 +80,9 @@ describe("saveCurrent 写盘回执（#362）", () => {
     showMessageMock.mockReset();
     fileMtimeMock.mockReset().mockResolvedValue(1);
     readTextFileMock.mockReset().mockResolvedValue("基线");
+    messageMock.mockReset();
+    saveDialogMock.mockReset();
+    askMock.mockReset();
     reset();
   });
 
@@ -144,6 +154,33 @@ describe("saveCurrent 写盘回执（#362）", () => {
     // registerFailed 必须提示「重启后可能找不到」
     expect(showMessageMock.mock.calls[0][0]).toContain("重启后可能找不到");
     expect(useWorkspace.getState().openTabs[0].dirty).toBe(true);
+  });
+
+  it("回执 notFound 且用户选「重新创建」：走写引擎一次（createParentDirs），不重复写", async () => {
+    // 第一次：回执 notFound（文件已不在原处）；第二次：用户确认后由写引擎重建并返回回执
+    saveDocumentMock
+      .mockResolvedValueOnce({ kind: "notFound" })
+      .mockResolvedValueOnce({
+        kind: "written",
+        stat: { mtimeUs: 9_000_000, size: 12 },
+        foreignWrite: false,
+      });
+    messageMock.mockResolvedValue("重新创建");
+
+    await useWorkspace.getState().saveCurrent();
+
+    // 重建也走写引擎（唯一开启 createParentDirs 的入口），不再用 writeTextFile 旁路
+    expect(writeTextFileMock).not.toHaveBeenCalled();
+    expect(saveDocumentMock).toHaveBeenCalledTimes(2);
+    expect(saveDocumentMock).toHaveBeenLastCalledWith(DOC, "本地编辑", {
+      createParentDirs: true,
+      overwriteExisting: true,
+    });
+    const tab = useWorkspace.getState().openTabs[0];
+    expect(tab.deletedOnDisk).toBe(false);
+    expect(tab.dirty).toBe(false);
+    // 基线直接取重建回执，不再补一次 fileStat
+    expect(tab.diskStat).toEqual({ mtimeUs: 9_000_000, size: 12 });
   });
 
   it("回执 foreignWrite（写后身份不可信）：保持 dirty 并给可见错误，不静默当成功", async () => {

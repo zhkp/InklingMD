@@ -178,6 +178,32 @@ describe("useFileWatcher（#362 重写后的判定）", () => {
     unmount();
   });
 
+  it("同一版磁盘内容只弹一次：用户「继续编辑」后轮询不得反复弹窗", async () => {
+    const openConflictSpy = vi.fn();
+    useConflict.setState({ conflict: null, openConflict: openConflictSpy });
+    useWorkspace.setState({
+      dirty: true,
+      openTabs: [makeTab({ dirty: true, content: "# 本地未保存" })],
+    });
+    vi.mocked(fs.fileStat).mockResolvedValue(EXTERNAL_STAT);
+    vi.mocked(fs.readDocument).mockResolvedValue({
+      content: "# 外部磁盘内容",
+      stat: EXTERNAL_STAT,
+    });
+
+    const { unmount } = renderHook(() => useFileWatcher());
+    await pollOnce();
+    expect(openConflictSpy).toHaveBeenCalledTimes(1);
+
+    // 用户点「继续编辑」关掉对话框：磁盘这一版已经问过了
+    useConflict.setState({ conflict: null });
+    await pollOnce();
+    await pollOnce();
+
+    expect(openConflictSpy).toHaveBeenCalledTimes(1);
+    unmount();
+  });
+
   it("stat 报 notFound：进删除态并清基线", async () => {
     vi.mocked(fs.fileStat).mockRejectedValue({ code: "notFound", message: "文件不存在" });
 
