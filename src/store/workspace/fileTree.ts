@@ -27,6 +27,7 @@ import {
   persistExpandedDirs,
   persistRecentFiles,
   rebaseDeletedDuringLoad,
+  rebasePathRevs,
   rebasePathPrefix,
   settledPathOfRequest,
   snapshotCharBudget,
@@ -325,6 +326,8 @@ export const createFileTreeSlice: StateCreator<
     // 请求迁走而黑名单不迁，会出现「删除 → 改名 → 落定」时双双 miss，
     // 为已删除文件建出干净 tab 且不写恢复快照
     rebaseDeletedDuringLoad(from, to);
+    // #364：pathRevs 跟着改名迁移（不是删除——否则该 path 的防抖断裂、订阅键回退）
+    rebasePathRevs(from, to);
 
     const patch: Partial<WorkspaceState> = {
       openTabs: nextTabs,

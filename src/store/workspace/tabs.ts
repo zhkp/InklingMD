@@ -22,13 +22,16 @@ import { flushAllMarkdownPublishers } from "../../components/Editor/markdown-pub
 import { runWysiwygAnchorSampler } from "../../lib/wysiwyg-anchor-sampler";
 import { useConflict } from "../conflict";
 import {
+  bumpPathRev,
   consumeDeletedDuringLoad,
+  dropPathRev,
   fileRequests,
   intents,
   parentDir,
   persistDeletedSnapshot,
   persistRecentFiles,
   pushRecent,
+  rebasePathRevs,
   settledPathOfRequest,
   wasDeletedDuringLoad,
   withPathLock,
@@ -41,6 +44,45 @@ import type { OpenTab, WorkspaceState } from "./types";
  */
 function mtimeMsOf(stat: FileStat): number {
   return stat.mtimeUs / 1000;
+}
+
+// ── 保存串行队列（#364） ────────────────────────────────────────────────────
+// `saveQueue`：已入队、尚未启动；`inflightSaves`：已启动、到 adopt 完成。
+// 意图升级必须**同时**查两张表：排队中尚未启动的保存不在 inflight 里，
+// 只查 inflight 会让交互保存直接入队排在后面，用户按 Ctrl+S 看起来没反应。
+const saveQueue = new Map<string, Promise<void>>();
+const inflightSaves = new Map<string, Promise<void>>();
+/** 全局串行链：保证任意时刻只有一个 tab 在写盘 */
+let saveChain: Promise<void> = Promise.resolve();
+
+/**
+ * 入队一次保存；返回的 promise 在该次保存（含 store adopt）完成后 resolve。
+ *
+ * 空闲时**立刻启动**（不经过 microtask）：`saveTab` 必须在返回前同步置 `saving`，
+ * 否则重入守卫（issue #91）与「Ctrl+S 后立刻再按」的语义都会变。
+ * 只有已有保存在跑时才排到链尾，保证同一时刻只有一个 tab 在写盘。
+ */
+function enqueueSave(path: string, task: () => Promise<void>): Promise<void> {
+  const start = (): Promise<void> => {
+    saveQueue.delete(path);
+    const running = task();
+    inflightSaves.set(path, running);
+    return running.finally(() => {
+      if (inflightSaves.get(path) === running) inflightSaves.delete(path);
+    });
+  };
+
+  // 判空闲必须同时看排队表：队列里可能已有「已排队、尚未启动」的项
+  if (inflightSaves.size === 0 && saveQueue.size === 0) {
+    const done = start();
+    saveChain = done.catch(() => undefined);
+    return done;
+  }
+
+  const queued = saveChain.catch(() => undefined).then(start);
+  saveChain = queued.catch(() => undefined);
+  saveQueue.set(path, queued);
+  return queued;
 }
 
 /** 标签页 / 活跃文档 / 分屏 slice */
@@ -136,7 +178,20 @@ export interface TabsSlice {
   /** 更新指定分屏文件的内容（绑定文件，避免 swap/close 后串写，PR #34） */
   setSplitContentFor: (path: string, content: string) => void;
   /** 保存当前文件到磁盘 */
+  /**
+   * 保存指定 tab（#364）：**不要求它是活跃 tab**。所有镜像更新（`currentContent` /
+   * 顶层 `dirty` / `saveError`）只在目标恰好是活跃 tab 时才写。
+   */
+  saveTab: (
+    path: string,
+    options?: { interactive?: boolean },
+  ) => Promise<void>;
+  /** 兼容入口：保存当前活跃 tab */
   saveCurrent: (options?: { interactive?: boolean }) => Promise<void>;
+  /** 等待在途保存结束；给 path 时只等该 path（同时覆盖排队中尚未启动的任务） */
+  waitForSaves: (path?: string) => Promise<void>;
+  /** 该 path 是否有已启动、尚未 adopt 完成的保存 */
+  isSaveInFlight: (path: string) => boolean;
   /** 设置当前光标所在标题 slug（编辑器选区变化时调用） */
   setCurrentHeadingSlug: (slug: string | null) => void;
   /** 保存指定 tab 的编辑位置（光标 pos + 滚动 offset）。绑定文件路径，
@@ -886,6 +941,9 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
       intents.mainFile += 1;
       // 切换 tab 时重置大纲高亮，等编辑器更新后由 tracker 重新计算
       set((current) => mainTabPatch(current, tab));
+      // 这里**不**顺手保存离开的 tab：一次机会式写盘会在「切走」这个用户无感的时刻
+      // 制造冲突标记/删除标记（评审 R2 明确要求后台 tab 不得被置 conflictPending）。
+      // 后台 tab 的落盘由按 path 独立防抖的调度器负责（#364 §7.2）。
 
       // 切换激活时核验磁盘状态（#362 §4.4）：实现见 `verifyTabOnDisk`，
       // 与 watcher 共用同一份逻辑，避免两处判定漂移
@@ -897,6 +955,8 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
       const { openTabs, activeTabPath } = get();
       const idx = openTabs.findIndex((t) => t.path === filePath);
       if (idx === -1) return;
+      // #364：关闭即移除订阅键条目（否则 pathRevs 只增不减）
+      dropPathRev(filePath);
       const nextTabs = openTabs.filter((t) => t.path !== filePath);
       // 若关闭的是分屏文件，同步关闭分屏面板
       const splitClosing = get().splitFile === filePath;
@@ -1008,6 +1068,8 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
     setContent: (content) => {
       const { currentContent, activeTabPath, openTabs } = get();
       if (content === currentContent) return;
+      // #364：内容真正变化才 bump（唯一 bump 点之一）；保存成功不重置
+      if (activeTabPath) bumpPathRev(activeTabPath);
       // 更新活跃 tab 的内容与 dirty
       if (activeTabPath) {
         const nextTabs = openTabs.map((t) =>
@@ -1023,6 +1085,8 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
       const { activeTabPath, openTabs } = get();
       const tab = openTabs.find((t) => t.path === path);
       if (!tab || tab.content === content) return;
+      // #364：内容真正变化才 bump（唯一 bump 点之一）
+      bumpPathRev(path);
       const nextTabs = openTabs.map((t) =>
         t.path === path ? { ...t, content, dirty: true } : t,
       );
@@ -1045,13 +1109,32 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
       get().setContentFor(path, content);
     },
 
-    saveCurrent: async (options) => {
+    saveTab: async (filePath, options) => {
       const interactive = options?.interactive ?? true;
+
+      // 意图升级（#364 §7.1）：排队中或已在途的保存不能把这次调用吞掉。
+      // 非交互直接搭车；交互要先等旧的（可能失败）跑完，再以交互模式执行一次——
+      // 否则用户按 Ctrl+S 什么都没发生。
+      if (saveQueue.has(filePath) || inflightSaves.has(filePath)) {
+        const doing = inflightSaves.get(filePath) ?? saveQueue.get(filePath);
+        if (!interactive) return doing ?? Promise.resolve();
+        try {
+          await doing;
+        } catch {
+          // 旧的非交互保存失败不能连带吞掉这次交互保存
+        }
+        const after = get().openTabs.find((t) => t.path === filePath);
+        if (!after || (!after.dirty && !after.conflictPending && !after.deletedOnDisk)) return;
+      }
+
+      const run = async () => {
       flushAllMarkdownPublishers();
-      const { dirty, activeTabPath, openTabs } = get();
-      if (!activeTabPath) return;
+      const { openTabs } = get();
+      // 目标可以是**后台 tab**（#364）：下面的镜像更新都按「是不是活跃 tab」判定
+      const activeTabPath = filePath;
       const tab = openTabs.find((t) => t.path === activeTabPath);
       if (!tab) return;
+      const dirty = tab.dirty;
       // 保存互斥按 tab 判定（issue #148）：其他 tab 的保存挂在对话框期间，
       // 不应吞掉本 tab 的保存；同一 tab 的重复保存仍被拦截防重入
       // 文件已不在原处时，干净 tab 的交互保存也要放行：用户可借此重新创建
@@ -1061,10 +1144,13 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
       // issue #363：文件已不在原处时自动保存暂停，等用户处理（Ctrl+S / 状态栏入口）
       // 或文件恢复后由监听器解除标记
       if (!interactive && tab.deletedOnDisk) return;
+      // 冲突待处理：非交互保存直接返回，否则调度器每 2s 会「写 → 冲突 → 弹窗」空转
+      if (!interactive && tab.conflictPending) return;
 
       // 立即置位本 tab 的 saving，防止重入（例如弹窗期间定时保存触发）
       applyTabSaving(activeTabPath, true);
-      set({ saveError: null });
+      // 只清「目标就是活跃 tab」的错误提示：后台 tab 的保存不能抹掉用户正在看的报错
+      if (get().activeTabPath === activeTabPath) set({ saveError: null });
 
       let savePath = tab.path;
       // 记录本次保存发起时快照内容
@@ -1419,7 +1505,7 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
               }
             } else if (outcome.kind === "conflict") {
               if (!interactive) {
-                // 自动保存不打扰用户：只标记冲突待处理（下次切回/保存时再问）
+                // 自动保存不打扰用户：只标记冲突待处理（下次切回/保存时再问）。
                 markConflictPending(activeTabPath);
                 applyTabSaving(activeTabPath, false);
                 return;
@@ -1505,13 +1591,22 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
         const savedMtime = savedStat ? mtimeMsOf(savedStat) : undefined;
         // 异步窗口结束后重新获取最新 store 状态，避免覆盖窗口期间其他 tab / 分屏并发发布的编辑内容
         const latestState = get();
+        // 保存期间 tab 被改名：原路径已不在 openTabs 里。按「saving 且内容相同」的唯一候选接手，
+        // 否则 `saving` 会永久卡在 true，该 tab 之后的所有保存都会被重入守卫拦掉
+        const renamedAway =
+          !latestState.openTabs.some((t) => t.path === activeTabPath) &&
+          latestState.openTabs.filter((t) => t.saving && t.content === contentToSave).length === 1;
+        const adoptionPath = renamedAway
+          ? latestState.openTabs.find((t) => t.saving && t.content === contentToSave)!.path
+          : activeTabPath;
         const nextTabs = latestState.openTabs.map((t) => {
-          if (t.path === activeTabPath) {
+          if (t.path === adoptionPath) {
             // 如果写盘期间内容又发生了新的修改，保持 dirty 为 true
             const isStillDirty = t.content !== contentToSave;
             return {
             ...t,
-            path: savePath,
+            // 改名场景保持新路径（不能再改回旧名）
+            path: renamedAway ? t.path : savePath,
             isUntitled: false,
             // 回执不可信时保持 dirty，并保留旧基线（下一轮按冲突处理，不静默重载）
             dirty: isStillDirty || receiptUntrusted,
@@ -1529,7 +1624,11 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
         });
         // 草稿转正与「已删除文件另存为」都会让 tab 换到新路径
         const nextRecent = pathChanged ? pushRecent(latestState.recentFiles, savePath) : latestState.recentFiles;
-        if (pathChanged) persistRecentFiles(nextRecent);
+        if (pathChanged) {
+          persistRecentFiles(nextRecent);
+          // #364：草稿转正 / 已删除文件另存为 → rev 跟着换到新路径（否则旧 key 泄漏）
+          rebasePathRevs(activeTabPath, savePath);
+        }
 
         const currentActiveTab = nextTabs.find((t) => t.path === (latestState.activeTabPath === activeTabPath ? savePath : latestState.activeTabPath));
         set({
@@ -1575,7 +1674,41 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
           };
         });
       }
+      };
+      // 串行队列只约束**调度器驱动的保存**（非交互）。交互保存必须立刻执行：
+      // 某个 tab 卡在另存为对话框时，其它 tab 的 Ctrl+S 不能被一起挂住（issue #148）。
+      // 但交互保存**同样要登记在途**：否则 `waitForSaves()` / `isSaveInFlight()` 看不到它，
+      // 「按了 Ctrl+S 立刻关窗」会被判成「没保存」（#367 的核心场景）。
+      if (!interactive) return enqueueSave(filePath, run);
+
+      const running = run();
+      inflightSaves.set(filePath, running);
+      const done = running.finally(() => {
+        if (inflightSaves.get(filePath) === running) inflightSaves.delete(filePath);
+      });
+      saveChain = saveChain.then(() => done).catch(() => undefined);
+      return done;
     },
+
+    saveCurrent: (options) => {
+      const activePath = get().activeTabPath;
+      return activePath ? get().saveTab(activePath, options) : Promise.resolve();
+    },
+
+    waitForSaves: async (targetPath) => {
+      // 同时等「排队中尚未启动」与「已启动但在 adopt 前」——两者都挂在 saveChain 上
+      if (targetPath) {
+        await Promise.all(
+          [inflightSaves.get(targetPath), saveQueue.get(targetPath)].filter(
+            (p): p is Promise<void> => !!p,
+          ),
+        ).catch(() => undefined);
+        return;
+      }
+      await saveChain.catch(() => undefined);
+    },
+
+    isSaveInFlight: (targetPath) => inflightSaves.has(targetPath),
 
     setCurrentHeadingSlug: (slug) => {
       if (slug === get().currentHeadingSlug) return;

@@ -388,9 +388,10 @@ describe("issue #363：手动保存与退出流程", () => {
     });
 
     // 退出路径与 Ctrl+S / 状态栏一致：每个「文件已不在原处」的 dirty tab 各弹一次
-    // 三选项（`saveCurrent` 的 interactive 默认为 true），而不是静默跳过。
-    // 锁住这条断言：退出链路若被改成非交互保存，用户就只剩「放弃并退出」。
-    expect(h.messageMock).toHaveBeenCalledTimes(2);
+    // 三选项（`saveTab` 的 interactive 默认为 true），而不是静默跳过；
+    // 之后还有一次「有 N 个文件未能保存」的重试 / 放弃 / 取消（#367 三选一）。
+    expect(h.messageMock).toHaveBeenCalledTimes(3);
+    expect(String(h.messageMock.mock.calls[2][0])).toContain("未能保存");
     expect(nodeFs.existsSync(W("a.md"))).toBe(false);
     expect(nodeFs.existsSync(W("b.md"))).toBe(false);
     expect(h.destroyMock).not.toHaveBeenCalled();
