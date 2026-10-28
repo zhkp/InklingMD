@@ -63,15 +63,32 @@ export interface DeletedFileSnapshot {
   deletedAt: number;
 }
 
-/** 持久化被删除 dirty 文件的快照备份，返回是否成功写入 */
+/** 快照条目上限 */
+export const DELETED_SNAPSHOT_LIMIT = 20;
+
+/** 单条快照占用的字符数（与 `probeSnapshotStorageHealth` 的估算口径一致） */
+export function snapshotEntryChars(path: string, content: string): number {
+  return path.length + content.length + 16;
+}
+
+/** 快照字符预算：localStorage 约 5MB，留一半余量给其它键 */
+export function snapshotCharBudget(): number {
+  return 1_000_000;
+}
+
+/**
+ * 持久化被删除 dirty 文件的快照备份，返回是否成功写入。
+ *
+ * 写失败**只放弃本条**：绝不用「只保留最新一条」把其它已删文件的唯一副本清掉
+ * （旧实现就是这样丢数据的）。调用方按「快照失败 → 保留 tab」处理。
+ */
 export function persistDeletedSnapshot(path: string, content: string): boolean {
   const list = loadJSON<DeletedFileSnapshot[]>(DELETED_FILE_SNAPSHOTS_KEY, [], Array.isArray);
-  const next = [{ path, content, deletedAt: Date.now() }, ...list.filter((item) => item.path !== path)].slice(0, 20);
-  let ok = writeJSON(DELETED_FILE_SNAPSHOTS_KEY, next);
-  if (!ok && next.length > 1) {
-    // 尝试修剪历史备份只保留最新条目
-    ok = writeJSON(DELETED_FILE_SNAPSHOTS_KEY, [{ path, content, deletedAt: Date.now() }]);
-  }
+  const next = [
+    { path, content, deletedAt: Date.now() },
+    ...list.filter((item) => item.path !== path),
+  ].slice(0, DELETED_SNAPSHOT_LIMIT);
+  const ok = writeJSON(DELETED_FILE_SNAPSHOTS_KEY, next);
   if (ok) notifySnapshotsChanged();
   return ok;
 }
@@ -233,7 +250,6 @@ export function wasDeletedDuringLoad(path: string): boolean {
 export function consumeDeletedDuringLoad(path: string): void {
   deletedDuringLoad.delete(path);
 }
-
 /**
  * 文件 / 目录改名后迁移黑名单的键。
  *

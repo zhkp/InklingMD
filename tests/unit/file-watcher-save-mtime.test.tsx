@@ -1,23 +1,22 @@
-// issue #144：自家自动保存写盘被文件监听误判为外部修改
-// 三道防线（A 保存事件登记基线 / B diskMtime 容差兜底 / C 忽略窗内刷新基线）
-// 与「真实外部修改仍必须弹窗」的回归断言。
+// #362：watcher 自身写盘不误报（旧实现靠「保存后 2 秒忽略窗 + knownMtimes」，
+// 重写后不再需要这两层：保存回执把写盘后的新身份直接登记成基线，stat 比对自然命中）。
+
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { renderHook } from "@testing-library/react";
 import { useFileWatcher } from "../../src/lib/useFileWatcher";
 import { useWorkspace } from "../../src/store/workspace";
 import { useConflict } from "../../src/store/conflict";
 import * as fs from "../../src/lib/fs";
-import * as dialogs from "../../src/lib/dialogs";
 import * as tauriCore from "@tauri-apps/api/core";
 
-vi.mock("@tauri-apps/api/core", () => ({
-  isTauri: vi.fn(),
-}));
+vi.mock("@tauri-apps/api/core", () => ({ isTauri: vi.fn() }));
 
 vi.mock("../../src/lib/fs", () => ({
   fileMtime: vi.fn(),
   readTextFile: vi.fn(),
   writeTextFile: vi.fn(),
+  fileStat: vi.fn(),
+  readDocument: vi.fn(),
 }));
 
 vi.mock("../../src/lib/dialogs", () => ({
@@ -25,50 +24,47 @@ vi.mock("../../src/lib/dialogs", () => ({
   showMessage: vi.fn(),
 }));
 
-const DOC = "/workspace/笔记.md";
-/** 首次打开文件时读到的磁盘 mtime（打开时刻） */
-const OPEN_MTIME = 1_760_000_000_000;
-/** 自动保存写盘后磁盘上的新 mtime：与打开时刻相差 1.6s，远超 5ms 容差 */
-const SAVED_MTIME = OPEN_MTIME + 1_600;
-/** 外部程序改动后的 mtime：与自家写盘基线相差一分钟，明显不是自家写盘 */
-const EXTERNAL_MTIME = SAVED_MTIME + 60_000;
-const SAVE_IGNORE_WINDOW = 2000;
+vi.mock("../../src/components/Editor/markdown-publisher", () => ({
+  flushAllMarkdownPublishers: vi.fn(),
+}));
 
-/** 让 check() 内部的 await 链全部落地（真实定时器，flush 微任务 + 宏任务） */
+const DOC = "/workspace/note.md";
+const OPEN_STAT = { mtimeUs: 1_760_000_000_000_000, size: 9 };
+const SAVED_STAT = { mtimeUs: 1_760_000_005_000_000, size: 15 };
+const EXTERNAL_STAT = { mtimeUs: 1_760_000_090_000_000, size: 25 };
+
 const flush = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
-
 const pollOnce = async () => {
   window.dispatchEvent(new Event("focus"));
   await flush();
   await flush();
+  await flush();
 };
 
-const makeTab = (over: Partial<{ content: string; dirty: boolean; diskMtime?: number }> = {}) => ({
+const makeTab = (over: Record<string, unknown> = {}) => ({
   path: DOC,
-  content: over.content ?? "# 标题\n\n正在写的正文",
-  dirty: over.dirty ?? false,
-  diskMtime: "diskMtime" in over ? over.diskMtime : OPEN_MTIME,
-  diskContent: over.content ?? "# 标题\n\n正在写的正文",
+  content: "# 标题\n\n正文",
+  dirty: false,
+  diskContent: "# 标题\n\n正文",
+  diskStat: OPEN_STAT,
+  diskMtime: OPEN_STAT.mtimeUs / 1000,
   deletedOnDisk: false,
   lastSavedAt: null,
-  cursorPos: 12,
+  cursorPos: 0,
   scrollTop: 0,
+  ...over,
 });
 
-describe("useFileWatcher 自身写盘不应误报外部修改（issue #144）", () => {
-  let clock = 0;
-
+describe("useFileWatcher 自身写盘不误报（#362 回执基线）", () => {
   beforeEach(() => {
-    vi.clearAllMocks();
     vi.mocked(tauriCore.isTauri).mockReturnValue(true);
-    vi.mocked(dialogs.askConfirmation).mockResolvedValue(false);
-    clock = 1_780_000_000_000;
-    vi.spyOn(Date, "now").mockImplementation(() => clock);
-
+    vi.mocked(fs.fileStat).mockResolvedValue(OPEN_STAT);
+    vi.mocked(fs.readDocument).mockResolvedValue({ content: "# 磁盘", stat: OPEN_STAT });
     useWorkspace.setState({
       openTabs: [makeTab()],
       currentFile: DOC,
-      currentContent: "# 标题\n\n正在写的正文",
+      activeTabPath: DOC,
+      currentContent: "# 标题\n\n正文",
       dirty: false,
       lastSavedAt: null,
     });
@@ -79,151 +75,60 @@ describe("useFileWatcher 自身写盘不应误报外部修改（issue #144）", 
     vi.restoreAllMocks();
   });
 
-  const advance = (ms: number) => {
-    clock += ms;
-  };
+  it("自家保存后（回执已登记基线）：轮询不读盘、不弹窗", async () => {
+    const { unmount } = renderHook(() => useFileWatcher());
+    await pollOnce();
 
-  /**
-   * 模拟一次自动保存：写盘改变磁盘 mtime，store 登记新基线并推进 lastSavedAt。
-   * missingDiskMtime=true 表示写盘后回读 mtime 失败（A、B 都拿不到基线的最坏情况）。
-   */
-  const simulateAutosave = (
-    opts: { diskMtime?: number; missingDiskMtime?: boolean; bumpStoreLastSavedAt?: boolean } = {},
-  ) => {
-    const { bumpStoreLastSavedAt = true } = opts;
-    const diskMtime = opts.missingDiskMtime ? undefined : (opts.diskMtime ?? SAVED_MTIME);
-    vi.mocked(fs.fileMtime).mockResolvedValue(SAVED_MTIME);
-    const tab = useWorkspace.getState().openTabs[0];
+    // 模拟一次保存完成：基线换成回执里的新身份
     useWorkspace.setState({
-      openTabs: [
-        {
-          ...tab,
-          dirty: false,
-          diskMtime,
-          diskContent: tab.content,
-          lastSavedAt: clock,
-        },
-      ],
-      lastSavedAt: bumpStoreLastSavedAt ? clock : null,
+      openTabs: [makeTab({ diskStat: SAVED_STAT, lastSavedAt: Date.now() })],
+      lastSavedAt: Date.now(),
     });
-  };
-
-  it("A：自动保存写盘后，忽略窗过期的下一次轮询不再误报（原缺陷复现路径）", async () => {
-    // 打开文件时注册基线：磁盘 mtime = OPEN_MTIME
-    vi.mocked(fs.fileMtime).mockResolvedValue(OPEN_MTIME);
-    const { unmount } = renderHook(() => useFileWatcher());
+    vi.mocked(fs.fileStat).mockResolvedValue(SAVED_STAT);
     await pollOnce();
 
-    // 源码模式连续输入 → 2s 防抖自动保存：磁盘 mtime 变为 SAVED_MTIME
-    simulateAutosave();
-
-    // 越过 2s 保存忽略窗后的下一次轮询（缺陷版本的误报就发生在这里）
-    advance(SAVE_IGNORE_WINDOW + 1000);
-    await pollOnce();
-
-    expect(dialogs.askConfirmation).not.toHaveBeenCalled();
+    expect(fs.readDocument).not.toHaveBeenCalled();
     expect(useConflict.getState().conflict).toBeNull();
-    // 内容不应被「重载」打断
-    expect(useWorkspace.getState().currentContent).toBe("# 标题\n\n正在写的正文");
-
     unmount();
   });
 
-  it("B：保存事件未触发订阅（如后台保存）时，靠 tab.diskMtime 容差兜底静默登记基线", async () => {
-    vi.mocked(fs.fileMtime).mockResolvedValue(OPEN_MTIME);
-    const { unmount } = renderHook(() => useFileWatcher());
-    await pollOnce();
-
-    // 写盘已完成且 store 已登记 diskMtime，但 store 级 lastSavedAt 未变化 → A 不命中
-    simulateAutosave({ bumpStoreLastSavedAt: false });
-    expect(useWorkspace.getState().lastSavedAt).toBeNull();
-
-    await pollOnce();
-
-    expect(dialogs.askConfirmation).not.toHaveBeenCalled();
-    expect(useConflict.getState().conflict).toBeNull();
-
-    // 基线已被 B 刷成写盘后的 mtime：后续轮询同样安静
-    await pollOnce();
-    expect(dialogs.askConfirmation).not.toHaveBeenCalled();
-
-    unmount();
-  });
-
-  it("C：写盘后 mtime 读回失败（diskMtime 缺失）时，忽略窗内轮询仍刷新基线，窗后不补弹", async () => {
-    vi.mocked(fs.fileMtime).mockResolvedValue(OPEN_MTIME);
-    const { unmount } = renderHook(() => useFileWatcher());
-    await pollOnce();
-
-    // A、B 都不可用的最坏情况：diskMtime 未登记
-    simulateAutosave({ missingDiskMtime: true });
-    expect(useWorkspace.getState().openTabs[0].diskMtime).toBeUndefined();
-
-    // 忽略窗内轮询：只刷新基线，不弹窗
-    advance(SAVE_IGNORE_WINDOW - 500);
-    await pollOnce();
-    expect(dialogs.askConfirmation).not.toHaveBeenCalled();
-
-    // 窗口过期后再轮询：基线已是写盘后的 mtime，不再补一次误报
-    advance(4000);
-    await pollOnce();
-    expect(dialogs.askConfirmation).not.toHaveBeenCalled();
-    expect(useConflict.getState().conflict).toBeNull();
-
-    unmount();
-  });
-
-  it("回归：真实外部修改（mtime 与自家写盘基线不符）仍弹「文件已被外部修改」", async () => {
-    vi.mocked(fs.fileMtime).mockResolvedValue(OPEN_MTIME);
-    const { unmount } = renderHook(() => useFileWatcher());
-    await pollOnce();
-
-    // 外部程序改写文件：mtime 既不等于已知基线，也不等于自家写盘基线
-    vi.mocked(fs.fileMtime).mockResolvedValue(EXTERNAL_MTIME);
-    await pollOnce();
-
-    expect(dialogs.askConfirmation).toHaveBeenCalledTimes(1);
-    expect(dialogs.askConfirmation).toHaveBeenCalledWith(
-      expect.stringContaining("已被外部修改"),
-      expect.objectContaining({ title: "文件已被外部修改" }),
-    );
-
-    unmount();
-  });
-
-  it("回归：自家写盘之后又被外部修改，仍能识别并弹冲突对话框（不被兜底逻辑吞掉）", async () => {
-    vi.mocked(fs.fileMtime).mockResolvedValue(OPEN_MTIME);
+  it("自家保存之后又被外部修改：仍能识别（不会被回执基线吞掉）", async () => {
     const openConflictSpy = vi.fn();
     useConflict.setState({ conflict: null, openConflict: openConflictSpy });
-
     useWorkspace.setState({
-      openTabs: [makeTab({ content: "# 标题\n\n本地未保存的改动", dirty: true })],
-      currentContent: "# 标题\n\n本地未保存的改动",
+      openTabs: [makeTab({ content: "# 本地未保存", dirty: true })],
+      currentContent: "# 本地未保存",
       dirty: true,
     });
+
     const { unmount } = renderHook(() => useFileWatcher());
     await pollOnce();
 
-    // 先自家自动保存（基线刷新为 SAVED_MTIME）
-    simulateAutosave();
-    advance(SAVE_IGNORE_WINDOW + 1000);
-    await pollOnce();
-    expect(openConflictSpy).not.toHaveBeenCalled();
-
-    // 随后外部程序改动：mtime 跳到 EXTERNAL_MTIME
-    vi.mocked(fs.fileMtime).mockResolvedValue(EXTERNAL_MTIME);
-    vi.mocked(fs.readTextFile).mockResolvedValue("# 标题\n\n外部程序写的内容");
+    vi.mocked(fs.fileStat).mockResolvedValue(EXTERNAL_STAT);
+    vi.mocked(fs.readDocument).mockResolvedValue({
+      content: "# 外部程序写的内容",
+      stat: EXTERNAL_STAT,
+    });
     await pollOnce();
 
     expect(openConflictSpy).toHaveBeenCalledTimes(1);
     expect(openConflictSpy).toHaveBeenCalledWith(
-      expect.objectContaining({
-        filePath: DOC,
-        localContent: "# 标题\n\n本地未保存的改动",
-        diskContent: "# 标题\n\n外部程序写的内容",
-      }),
+      expect.objectContaining({ filePath: DOC, diskContent: "# 外部程序写的内容" }),
     );
+    unmount();
+  });
 
+  it("干净 tab 的外写：静默重载，不打扰用户", async () => {
+    const reloadMock = vi.fn().mockResolvedValue(undefined);
+    useWorkspace.setState({ reloadFile: reloadMock });
+
+    const { unmount } = renderHook(() => useFileWatcher());
+    await pollOnce();
+
+    vi.mocked(fs.fileStat).mockResolvedValue(EXTERNAL_STAT);
+    await pollOnce();
+
+    expect(reloadMock).toHaveBeenCalledWith(DOC);
     unmount();
   });
 });
