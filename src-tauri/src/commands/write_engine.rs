@@ -314,9 +314,6 @@ pub trait Fs {
 
 pub trait TempKeptStore {
     fn register(&self, temp: &Path, target: &Path) -> Result<(), CmdError>;
-    fn release(&self, temp: &Path) -> Result<(), CmdError>;
-    /// 启动 prune 与恢复面板枚举都要用；带 createdAt 供面板排序/展示
-    fn entries(&self) -> Vec<TempKeptEntry>;
     /// 半失败（1176/1177 不匹配/Unknown）时是否登记为"唯一副本"。
     /// recovery 写入（journal/session/crashed）用 Never：那是缓存，内存里还有，
     /// 登记只会造出假的"用户文档唯一副本"并让 TTL 留下悬空条目。
@@ -334,16 +331,18 @@ pub enum RegisterPolicy {
 /// recovery/ 专用：任何半失败都删 temp + Io，不登记
 #[cfg(test)]
 pub struct NoRegisterStore;
+
+#[cfg(test)]
+impl NoRegisterStore {
+    /// 断言用：Never 策略下任何半失败都不登记
+    pub fn entries(&self) -> Vec<TempKeptEntry> {
+        vec![]
+    }
+}
 #[cfg(test)]
 impl TempKeptStore for NoRegisterStore {
     fn register(&self, _t: &Path, _g: &Path) -> Result<(), CmdError> {
         unreachable!("Never policy 不走 register")
-    }
-    fn release(&self, _t: &Path) -> Result<(), CmdError> {
-        Ok(())
-    }
-    fn entries(&self) -> Vec<TempKeptEntry> {
-        vec![]
     }
     fn register_policy(&self) -> RegisterPolicy {
         RegisterPolicy::Never
@@ -378,6 +377,11 @@ impl MutexTempKeptStore {
     pub fn new(fail: bool) -> Self {
         MutexTempKeptStore { entries: Mutex::new(vec![]), fail }
     }
+
+    /// 断言用：读取当前登记表（生产走 `TempKeptRegistry::prune_missing` 的整表 retain）
+    pub fn entries(&self) -> Vec<TempKeptEntry> {
+        self.entries.lock().unwrap().clone()
+    }
 }
 #[cfg(test)]
 impl TempKeptStore for MutexTempKeptStore {
@@ -400,15 +404,6 @@ impl TempKeptStore for MutexTempKeptStore {
             });
         }
         Ok(())
-    }
-    fn release(&self, temp: &Path) -> Result<(), CmdError> {
-        let ts = temp.display().to_string();
-        let mut g = self.entries.lock().unwrap();
-        g.retain(|e| e.temp_path != ts);
-        Ok(())
-    }
-    fn entries(&self) -> Vec<TempKeptEntry> {
-        self.entries.lock().unwrap().clone()
     }
 }
 
@@ -1200,8 +1195,8 @@ impl TempKeptRegistry {
 
     /// 启动清理：把 temp 已不存在的条目一次删掉并**只写一次盘**。
     ///
-    /// 逐条调 `release()` 会让每条 stale 都做一遍「序列化 + rename + sync_all +
-    /// 父目录 fsync」，启动路径上 N 条 = N 次同步 IO。
+    /// 逐条注销会让每条 stale 都做一遍「序列化 + rename + sync_all + 父目录 fsync」，
+    /// 启动路径上 N 条 = N 次同步 IO；这里整表 retain 后只落盘一次。
     pub fn prune_missing(&self) -> Result<usize, CmdError> {
         let mut guard = self.entries.lock().expect("registry poisoned");
         let before = guard.len();
@@ -1257,17 +1252,9 @@ impl TempKeptStore for TempKeptRegistry {
         self.persist(&guard)
     }
 
-    fn release(&self, temp: &Path) -> Result<(), CmdError> {
-        let mut guard = self.entries.lock().expect("registry poisoned");
-        let key = temp.display().to_string();
-        guard.retain(|e| e.temp_path != key);
-        self.persist(&guard)
-    }
-
-    fn entries(&self) -> Vec<TempKeptEntry> {
-        self.entries.lock().expect("registry poisoned").clone()
-    }
 }
+
+
 
 
 #[cfg(test)]

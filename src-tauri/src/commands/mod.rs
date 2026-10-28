@@ -448,7 +448,6 @@ mod tests {
         let registry = write_engine::TempKeptRegistry::load(registry_file.clone());
         let removed = registry.prune_missing().unwrap();
         assert_eq!(removed, 1, "只应清掉 temp 已不存在的那一条");
-        assert_eq!(registry.entries().len(), 1);
 
         // 落盘后的文件里也只剩一条（且不是被清掉的那条）
         let raw = fs::read_to_string(&registry_file).unwrap();
@@ -1361,10 +1360,6 @@ pub fn init_temp_kept_registry(app_data_dir: PathBuf) {
     let _ = registry.prune_missing();
     let _ = TEMP_KEPT.set(registry);
 }
-
-/// `entries()` 是 trait 方法，只有测试会直接读整表；生产走 inherent 的 `load` / `prune_missing`
-#[cfg(test)]
-use write_engine::TempKeptStore as _;
 
 fn temp_kept_registry() -> &'static write_engine::TempKeptRegistry {
     TEMP_KEPT.get_or_init(|| {
