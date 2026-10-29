@@ -466,6 +466,7 @@ export function createMermaidView(
     if (!value.trim()) {
       diagram.innerHTML = "";
       lastSvg = "";
+      diagram.removeAttribute("data-source");
       diagram.setAttribute("data-placeholder", "输入 Mermaid 图表代码");
       diagram.classList.remove("has-error");
       return;
@@ -478,6 +479,7 @@ export function createMermaidView(
         diagram.innerHTML = `<pre class="mermaid-error">Mermaid 语法错误，点击「编辑」修改</pre>`;
         lastSvg = "";
         diagram.removeAttribute("data-placeholder");
+        diagram.removeAttribute("data-source");
         diagram.classList.add("has-error");
         return;
       }
@@ -485,6 +487,8 @@ export function createMermaidView(
       // 对 Mermaid 生成的 SVG 过滤危险 script/事件属性
       diagram.appendChild(sanitizeMermaidSvg(svg));
       lastSvg = svg;
+      // 记录这份 SVG 对应的源码：导出复用前要核对，避免把过期/编辑中的图带进产物
+      diagram.dataset.source = value;
       if (firstRender) {
         resetZoomPan();
       } else {
@@ -511,6 +515,7 @@ export function createMermaidView(
       diagram.innerHTML = `<pre class="mermaid-error">Mermaid 语法错误，点击「编辑」修改</pre>`;
       lastSvg = "";
       diagram.removeAttribute("data-placeholder");
+      diagram.removeAttribute("data-source");
       diagram.classList.add("has-error");
     }
   };

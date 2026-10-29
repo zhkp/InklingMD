@@ -17,6 +17,7 @@
     "dialog:allow-ask",
     "allow-list-dir",
     "allow-read-text-file",
+    "allow-read-binary-file",
     "allow-write-text-file",
     "allow-write-binary-file",
     "allow-file-mtime",

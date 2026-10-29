@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { exportOutline, copyMarkdown } from "../../src/lib/exporter";
+import { exportOutline, copyMarkdown, waitForImages } from "../../src/lib/exporter";
 import { useWorkspace } from "../../src/store/workspace";
 
 describe("exporter lib unit tests", () => {
@@ -21,6 +21,24 @@ describe("exporter lib unit tests", () => {
     const success = await copyMarkdown();
     expect(success).toBe(true);
     expect(writeTextSpy).toHaveBeenCalledWith("# Test Content\n\nHello World");
+  });
+
+  it("waitForImages：已完结但加载失败的图片不拖满超时", async () => {
+    const img = document.createElement("img");
+    Object.defineProperty(img, "complete", { value: true });
+    Object.defineProperty(img, "naturalWidth", { value: 0 });
+    const root = { querySelectorAll: () => [img] } as unknown as ParentNode;
+    vi.useFakeTimers();
+    try {
+      let settled = false;
+      void waitForImages(root, 3000).then(() => {
+        settled = true;
+      });
+      await vi.advanceTimersByTimeAsync(10);
+      expect(settled, "complete 的坏图应立即结算，而不是等满 3s").toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("exportOutline should parse outline structure and trigger download in browser", async () => {

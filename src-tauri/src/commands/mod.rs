@@ -1072,6 +1072,121 @@ mod tests {
             "失败路径不得损坏用户原件"
         );
     }
+
+    #[test]
+    fn read_binary_roundtrips_bytes_through_base64() {
+        let temp = TestDir::new("read-binary");
+        let png = temp.path.join("img.png");
+        // 含 0x00 与高位字节：文本读取通道无法承载，正是需要二进制通道的原因
+        let bytes: Vec<u8> = vec![0x89, 0x50, 0x4E, 0x47, 0x00, 0xFF, 0x0D, 0x0A, 0x1A, 0x0A];
+        fs::write(&png, &bytes).unwrap();
+
+        let encoded = read_binary_file_sync(png.to_string_lossy().to_string())
+            .expect("白名单内路径应可读");
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(&encoded)
+            .expect("返回值必须是合法 Base64");
+        assert_eq!(decoded, bytes, "Base64 往返必须逐字节相等");
+
+        // 与 write_binary_file 的传输格式互通：读出的 Base64 能原样写回
+        let copy = temp.path.join("copy.png");
+        write_binary_file_sync(copy.to_string_lossy().to_string(), encoded.clone(), false)
+            .expect("写回应成功");
+        assert_eq!(fs::read(&copy).unwrap(), bytes);
+    }
+
+    #[test]
+    fn read_binary_reports_missing_file() {
+        let temp = TestDir::new("read-binary-missing");
+        let err = read_binary_file_sync(temp.path.join("nope.png").to_string_lossy().to_string())
+            .expect_err("缺失文件必须报错而不是返回空串");
+        assert!(err.contains("文件不存在"), "错误应可定位到缺失文件: {err}");
+    }
+
+    #[test]
+    fn read_binary_empty_file_is_valid_not_an_error() {
+        let temp = TestDir::new("read-binary-empty");
+        let empty = temp.path.join("zero.svg");
+        fs::write(&empty, b"").unwrap();
+        let encoded = read_binary_file_sync(empty.to_string_lossy().to_string())
+            .expect("空文件读取应成功");
+        assert_eq!(encoded, "", "空文件的 Base64 就是空串");
+    }
+
+    #[test]
+    fn read_binary_rejects_path_outside_asset_scope() {
+        let temp = TestDir::new("read-binary-scope-deny");
+        let png = temp.path.join("secret.png");
+        fs::write(&png, b"\x89PNG\r\n\x1a\npayload").unwrap();
+        let shown = png.to_string_lossy().to_string();
+
+        let mut seen = String::new();
+        let err = check_binary_read_target(&shown, |p| {
+            seen = p.to_string();
+            false
+        })
+        .expect_err("白名单外路径必须被拒绝");
+        assert!(
+            err.contains(READ_ERROR_NOT_ALLOWED),
+            "错误必须带结构化标记: {err}"
+        );
+        assert_eq!(seen, shown, "判定必须拿原始路径去问 asset 范围");
+        // 同一路径经读取通道本身是能读出来的：拦截确实来自门禁，而非别的失败
+        assert!(read_binary_file_sync(shown).is_ok());
+    }
+
+    #[test]
+    fn read_binary_reports_missing_file_before_scope_denial() {
+        let temp = TestDir::new("read-binary-missing-scope");
+        let missing = temp.path.join("gone.png").to_string_lossy().to_string();
+        let mut asked = false;
+        let err = check_binary_read_target(&missing, |_| {
+            asked = true;
+            false
+        })
+        .expect_err("缺失文件必须报错");
+        // 白名单判定会 canonicalize，文件不存在时必然为 false；
+        // 若顺序反了，用户看到的失败原因是「不在白名单内」，与事实不符。
+        assert!(err.contains("文件不存在"), "应报真实原因: {err}");
+        assert!(!err.contains(READ_ERROR_NOT_ALLOWED));
+        assert!(!asked, "文件不存在时不必再去问白名单");
+    }
+
+    #[test]
+    fn read_binary_accepts_path_inside_asset_scope() {
+        let temp = TestDir::new("read-binary-scope-allow");
+        let png = temp.path.join("ok.png");
+        let bytes = vec![0x89u8, 0x50, 0x4E, 0x47];
+        fs::write(&png, &bytes).unwrap();
+        let shown = png.to_string_lossy().to_string();
+
+        check_binary_read_target(&shown, |p| p == shown).expect("白名单内路径应放行");
+        let encoded = read_binary_file_sync(shown).expect("放行后应能读出");
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .unwrap(),
+            bytes
+        );
+    }
+
+    #[test]
+    fn read_binary_rejects_file_over_size_cap() {
+        let temp = TestDir::new("read-binary-too-large");
+        let big = temp.path.join("huge.png");
+        let file = fs::File::create(&big).unwrap();
+        // set_len 只改文件长度（NTFS/ext4 稀疏分配），不实际写 32MB 数据
+        file.set_len(MAX_BINARY_READ_SIZE + 1).unwrap();
+        drop(file);
+
+        let err = read_binary_file_sync(big.to_string_lossy().to_string())
+            .expect_err("超过读取上限必须报错");
+        assert!(
+            err.contains(READ_ERROR_FILE_TOO_LARGE),
+            "错误必须带结构化标记: {err}"
+        );
+        assert!(err.contains("32"), "错误应说明上限值: {err}");
+    }
 }
 
 /// issue #363：写盘结构化错误标记（前端按前缀识别，契约见前端 fs.ts）。
@@ -1358,6 +1473,79 @@ fn read_text_file_sync(file_path: String) -> Result<String, String> {
             READ_ERROR_ENCODING_UNSUPPORTED
         )
     })
+}
+
+/// #372：读取本地二进制文件为 Base64（与 `write_binary_file` 的传输格式对称）。
+///
+/// 用途：导出 HTML/PDF/PNG 与富文本复制时，把文档引用的本地图片、主题字体等
+/// 资源从 `asset:` / `asset.localhost` 运行时地址换成可移植的 data URL 或旁挂文件。
+/// 之所以不能在前端 `fetch(assetUrl)`：`tauri.conf.json` 的 CSP 没有 `connect-src`，
+/// 回落 `default-src 'self'`，asset 协议只对 `img-src`/`font-src` 放行。
+///
+/// **安全边界**：复用 asset 协议运行时白名单（前端解析图片路径时经 `allow_asset_dir`
+/// 放行的目录）。白名单外一律拒绝——导出不成为绕过文件访问范围的新通道。
+#[tauri::command]
+pub async fn read_binary_file(app: tauri::AppHandle, file_path: String) -> Result<String, String> {
+    use tauri::Manager;
+    check_binary_read_target(&file_path, |p| app.asset_protocol_scope().is_allowed(p))?;
+    tauri::async_runtime::spawn_blocking(move || read_binary_file_sync(file_path))
+        .await
+        .map_err(|e| format!("二进制读取任务失败: {e}"))?
+}
+
+/// 准入判定独立成函数：判定顺序必须可单独验证。
+///
+/// **先判存在、再判白名单**：`asset_protocol_scope().is_allowed()` 会对路径做
+/// canonicalize，文件不存在时直接返回 false。若先问白名单，缺失的资源会被报成
+/// 「不在白名单内」，用户看到的原因与事实不符。存在性信息本就不是秘密——
+/// `file_stat` 等命令本来就按原始路径查询。
+///
+/// 真实 `Scope` 的放行/拒绝语义需要 `AppHandle`（`tauri::test` 特性会改变测试
+/// 二进制的动态链接，本机启动即 STATUS_ENTRYPOINT_NOT_FOUND），故这里用谓词注入
+/// 验证**判定顺序**；「复用同一个 asset Scope」由生产调用点的一行代码保证，
+/// 桌面端一次真实导出即为该边界的验证（见 PR 证据边界说明）。
+fn check_binary_read_target(
+    file_path: &str,
+    is_allowed: impl FnOnce(&str) -> bool,
+) -> Result<(), String> {
+    if !Path::new(file_path).exists() {
+        return Err(format!("文件不存在: {}", file_path));
+    }
+    if is_allowed(file_path) {
+        Ok(())
+    } else {
+        Err(format!(
+            "{}: 路径不在 asset 白名单内，拒绝读取: {}",
+            READ_ERROR_NOT_ALLOWED, file_path
+        ))
+    }
+}
+
+/// #372：二进制读取的硬上限。前端对同一次导出另有总预算，读回后超预算会降级；
+/// 这里是最后一道防线，挡住病态大文件整体进内存 + Base64 过 IPC。
+const MAX_BINARY_READ_SIZE: u64 = 32 * 1024 * 1024;
+
+/// #372：路径不在 asset 白名单内的结构化错误标记（前端据此给出可读降级提示）
+pub const READ_ERROR_NOT_ALLOWED: &str = "NOT_ALLOWED";
+
+fn read_binary_file_sync(file_path: String) -> Result<String, String> {
+    let path = Path::new(&file_path);
+    if !path.exists() {
+        return Err(format!("文件不存在: {}", file_path));
+    }
+    if let Ok(meta) = fs::metadata(path) {
+        if meta.len() > MAX_BINARY_READ_SIZE {
+            return Err(format!(
+                "{}: 资源过大（{:.1} MB，超过 {} MB 读取上限）: {}",
+                READ_ERROR_FILE_TOO_LARGE,
+                meta.len() as f64 / (1024.0 * 1024.0),
+                MAX_BINARY_READ_SIZE / (1024 * 1024),
+                file_path
+            ));
+        }
+    }
+    let bytes = fs::read(path).map_err(|e| format!("读取失败 {}: {}", file_path, e))?;
+    Ok(base64::engine::general_purpose::STANDARD.encode(&bytes))
 }
 
 /// 查询文件磁盘身份（#362）：微秒级 mtime + 字节数。

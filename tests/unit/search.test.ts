@@ -29,14 +29,17 @@ function makeSchema() {
   });
 }
 
-/** 构造带 search 插件的 EditorView，并预设查找选项（触发一次全文匹配） */
+/** 构造带 search 插件的 EditorView，并预设查找选项（触发一次全文匹配）
+ *  文档根必须是 doc 节点（ProseMirror 的真实形状）：#371 起匹配以文本块为边界，
+ *  裸 paragraph 当根会让 nodesBetween 访问不到任何文本块。 */
 function makeViewWithSearch(
   text: string,
   opts: SearchOpts,
   plugin = searchPlugin(),
 ): EditorView {
   const schema = makeSchema();
-  const doc = schema.nodes.paragraph.create(null, schema.text(text));
+  const paragraph = schema.nodes.paragraph.create(null, schema.text(text));
+  const doc = schema.nodes.doc.create(null, [paragraph]);
   const state = EditorState.create({
     doc,
     selection: TextSelection.create(doc, 1),
@@ -186,17 +189,17 @@ describe("DecorationSet 缓存（#151：无关 transaction 不重建装饰）", 
     const view = makeViewWithSearch("foo foo", plainOpts("foo"), plugin);
     const decorations = decorationsOf(plugin);
     const before = decorations(view.state);
-    // 在开头插入文本，匹配位置整体后移（顶层即 paragraph，位置从 0 起）
-    view.dispatch(view.state.tr.insertText("xx ", 0));
+    // 在段首插入文本，匹配位置整体后移（doc 根下 paragraph 的正文从位置 1 起）
+    view.dispatch(view.state.tr.insertText("xx ", 1));
     const after = decorations(view.state);
     expect(after).not.toBe(before);
     const found = after.find();
     expect(found.length).toBe(2);
-    expect(found[0].from).toBe(3);
-    expect(found[0].to).toBe(6);
+    expect(found[0].from).toBe(4);
+    expect(found[0].to).toBe(7);
     expect(decoClass(found[0])).toBe("search-match-current");
-    expect(found[1].from).toBe(7);
-    expect(found[1].to).toBe(10);
+    expect(found[1].from).toBe(8);
+    expect(found[1].to).toBe(11);
     expect(decoClass(found[1])).toBe("search-match");
     view.destroy();
   });
@@ -209,12 +212,12 @@ describe("DecorationSet 缓存（#151：无关 transaction 不重建装饰）", 
     view.dispatch(view.state.tr.setMeta(searchKey, { type: "next" }));
     const after = decorations(view.state);
     expect(after).not.toBe(before);
-    // current 从第 1 个匹配（位置 0）移到第 2 个（位置 4）
+    // current 从第 1 个匹配（位置 1）移到第 2 个（位置 5）
     const current = after
       .find()
       .filter((d) => decoClass(d) === "search-match-current")
       .map((d) => d.from);
-    expect(current).toEqual([4]);
+    expect(current).toEqual([5]);
     view.destroy();
   });
 

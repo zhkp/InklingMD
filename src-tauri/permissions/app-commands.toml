@@ -19,6 +19,13 @@ identifier = "allow-read-text-file"
 description = "Allow read_text_file command"
 commands.allow = ["read_text_file"]
 
+# 导出资源可移植化（#372）：读取本地二进制资源字节。
+# 后端实现复用 asset 协议运行时白名单，白名单外路径一律拒绝。
+[[permission]]
+identifier = "allow-read-binary-file"
+description = "Allow read_binary_file command"
+commands.allow = ["read_binary_file"]
+
 [[permission]]
 identifier = "allow-write-text-file"
 description = "Allow write_text_file command"

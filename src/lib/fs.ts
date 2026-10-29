@@ -473,6 +473,31 @@ export async function downloadRemoteImage(url: string): Promise<RemoteImage> {
 }
 
 /**
+ * 读取本地二进制文件字节（#372：导出时把 `asset:` / `asset.localhost` 运行时地址
+ * 换成可移植的 data URL 或旁挂文件）。
+ *
+ * 桌面端走 Rust `read_binary_file`。之所以不能在前端 `fetch(convertFileSrc(path))`：
+ * `tauri.conf.json` 的 CSP 没有 `connect-src`，回落 `default-src 'self'`，
+ * asset 协议只对 `img-src` / `font-src` 放行（见 scripts/probe-asset-bg-export.mjs）。
+ * 后端该命令**复用 asset 协议运行时白名单**：只有经 `allowAssetDir` 放行过的目录
+ * 才可读，白名单外返回 `NOT_ALLOWED` —— 导出不成为绕过文件访问范围的新通道。
+ *
+ * 浏览器端优先取 mock 二进制表（E2E 可直接登记夹具），否则 fetch（可用路由拦截）。
+ */
+export async function readBinaryFile(filePath: string): Promise<Uint8Array> {
+  if (isTauri()) {
+    const b64 = await invoke<string>("read_binary_file", { filePath });
+    return base64ToUint8Array(b64);
+  }
+  const { MOCK_BINARY_FILES } = await import("./mockFs");
+  const mocked = MOCK_BINARY_FILES.get(filePath);
+  if (mocked) return mocked.slice();
+  const res = await fetch(filePath);
+  if (!res.ok) throw new Error(`读取资源失败 ${filePath}: HTTP ${res.status}`);
+  return new Uint8Array(await res.arrayBuffer());
+}
+
+/**
  * 以 Markdown 文件所在目录为基准解析路径。
  * Tauri 的原生路径实现会按当前平台处理分隔符、绝对路径及 ./../ 片段。
  */
