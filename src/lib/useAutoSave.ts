@@ -30,8 +30,11 @@ export function useAutoSave() {
         (t) =>
           // 不带 `saving`：保存开始/结束都会改变它，会让 effect 重跑并提前重排一次，
         // 把「失败后退避 4s」打回 2s（退避测试正是靠这条）
-        `${t.path}#${getPathRev(t.path)}#${t.dirty ? 1 : 0}` +
-          `${t.deletedOnDisk ? 1 : 0}${t.conflictPending ? 1 : 0}${t.isUntitled ? 1 : 0}`,
+          // `lastSavedAt` 必须进键：Ctrl+S 保存期间继续输入时 rev/dirty 都不再变化，
+          // 只有「保存完成」这个信号能唤醒调度，否则该 path 落定后不再排任何定时器
+          `${t.path}#${getPathRev(t.path)}#${t.dirty ? 1 : 0}` +
+          `${t.deletedOnDisk ? 1 : 0}${t.conflictPending ? 1 : 0}${t.isUntitled ? 1 : 0}` +
+          `#${t.lastSavedAt ?? 0}`,
       )
       .join("|"),
   );
@@ -81,9 +84,6 @@ export function useAutoSave() {
         timersRef.current.delete(path);
         // 定时器到点时可能又有新输入：与手动保存同样先 flush，避免保存旧内容（PR #34 review）
         flushAllMarkdownPublishers();
-        // 先记一次尝试再写盘：失败后的重排必须按退避，不能被「保存中 / 保存完」的
-        // 状态变化提前重排一次（那会把 4s 退避打回 2s）
-        failCountRef.current.set(path, Math.min((failCountRef.current.get(path) ?? 0) + 1, 6));
         try {
           await saveTab(path, { interactive: false });
           const tab = useWorkspace.getState().openTabs.find((t) => t.path === path);
@@ -99,6 +99,11 @@ export function useAutoSave() {
           }
           // 仍是 dirty（保存期间又编辑了 / 写盘失败）：按退避再排一次
           if (tab.conflictPending || tab.deletedOnDisk) return; // 交给用户处理，不空转
+          // 只有**真失败**才升级退避：成功但保存期间又有输入（仍 dirty）时保持 2s 基线，
+          // 否则连续打字会把该 path 的自动保存一路放大到 60s
+          if (useWorkspace.getState().saveError) {
+            failCountRef.current.set(path, Math.min((failCountRef.current.get(path) ?? 0) + 1, 6));
+          }
           setRetryRevision((revision) => revision + 1);
         } catch {
           failCountRef.current.set(path, Math.min((failCountRef.current.get(path) ?? 0) + 1, 6));

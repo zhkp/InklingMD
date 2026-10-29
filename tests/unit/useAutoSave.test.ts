@@ -157,12 +157,15 @@ describe("useAutoSave hook（#364 按 path 独立防抖）", () => {
         useWorkspace.setState((state) => ({
           openTabs: state.openTabs.map((t) => (t.path === path ? { ...t, dirty: true } : t)),
           dirty: true,
+          // 失败必须有可观测信号：调度器只在 saveError 非空时升级退避
+          saveError: "boom",
         }));
         return;
       }
       useWorkspace.setState((state) => ({
         openTabs: state.openTabs.map((t) => (t.path === path ? { ...t, dirty: false } : t)),
         dirty: false,
+        saveError: null,
       }));
     });
     useWorkspace.setState({

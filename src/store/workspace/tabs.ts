@@ -999,6 +999,8 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
       const { openTabs, splitFile } = get();
       const keep = openTabs.find((t) => t.path === keepPath);
       if (!keep) return;
+      // #364：批量关闭也要清 pathRevs，否则重开同路径会从旧 rev 起步
+      for (const t of openTabs) if (t.path !== keepPath) dropPathRev(t.path);
       intents.mainFile += 1;
       if (splitFile && splitFile !== keepPath) intents.splitFile += 1;
       set((current) => ({
@@ -1016,6 +1018,7 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
       if (idx === -1) return;
       intents.mainFile += 1;
       const nextTabs = openTabs.slice(0, idx + 1);
+      for (const t of openTabs.slice(idx + 1)) dropPathRev(t.path);
       const splitRemoved = !!splitFile && !nextTabs.some((tab) => tab.path === splitFile);
       if (splitRemoved) intents.splitFile += 1;
       // 若活跃 tab 被关掉了，激活 fromPath
@@ -1037,6 +1040,8 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
 
     closeAll: () => {
       flushAllMarkdownPublishers();
+      // #364：批量关闭也要清 pathRevs，否则重开同路径会从旧 rev 起步
+      for (const t of get().openTabs) dropPathRev(t.path);
       intents.mainFile += 1;
       intents.splitFile += 1;
       set({
