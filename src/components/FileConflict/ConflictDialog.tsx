@@ -2,7 +2,7 @@
 // 场景：useFileWatcher 检测到磁盘文件被外部修改（Git 切分支/网盘同步等），
 // 且本地有未保存修改。直接 confirm 二选一太简陋：
 // - 选「取消」后继续保存会静默覆盖外部修改，无备份无感知
-// 本组件提供三选项（对齐用户口头反馈建议）：
+// 本组件提供四个动作（对齐用户口头反馈建议）：
 // 1. 保留本地并另存副本 → 本地内容写入 *.backup.md，编辑器重载磁盘最新
 // 2. 丢弃本地修改 → 直接重载磁盘最新
 // 3. 查看差异 → 行级 Diff 视图，知情后再决定（另存副本/用本地覆盖磁盘/继续编辑）
@@ -31,7 +31,8 @@ async function saveLocalBackup(
     // 列目录失败（如单文件模式目录已移除）：退化为无冲突检测的直接命名
   }
   const backupPath = nextBackupPath(filePath, existing);
-  await writeTextFile(backupPath, localContent);
+  // 备份是「丢了还能从编辑器重来」的副本，不需要掉电保证：省掉两次 fsync
+  await writeTextFile(backupPath, localContent, { durability: "none" });
   return backupPath;
 }
 

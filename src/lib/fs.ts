@@ -125,8 +125,16 @@ export async function readTextFile(filePath: string): Promise<string> {
 export interface WriteTextOptions {
   /** 覆盖已有文档：目标不存在（被删除/改名）时拒绝写入，抛 TARGET_MISSING（issue #363） */
   mustExist?: boolean;
-  /** 父目录缺失时补建整条目录链。仅用于用户明确同意「在原位置重新创建」 */
+  /**
+   * 父目录缺失时补建整条目录链。**当前无生产调用方**：重建已统一走
+   * saveDocument({ createParentDirs })，这里仅为命令契约保留（测试夹具在用）。
+   */
   createParents?: boolean;
+  /**
+   * 耐久：文档保存用 `"sync"`（默认，掉电不丢）；导出 / 备份等「丢了能重做」的写入传
+   * `"none"`，避免大文件多付一次数据 fsync + 一次目录 fsync。
+   */
+  durability?: "sync" | "none";
 }
 
 /**
@@ -170,6 +178,73 @@ export async function fileStat(filePath: string): Promise<FileStat> {
   const stat = MOCK_FILE_STAT[filePath];
   if (!stat) throw new CmdError({ code: "notFound", message: `文件不存在: ${filePath}` });
   return { ...stat };
+}
+
+/** 保存结果（与 Rust `SaveOutcome` 一一对应）：可预期业务结果，不是异常 */
+export type SaveOutcome =
+  | { kind: "written"; stat: FileStat; foreignWrite: boolean }
+  | { kind: "conflict"; disk: FileStat; tempPath?: string; registerFailed: boolean }
+  | { kind: "notFound" }
+  | { kind: "parentMissing"; parent: string }
+  /** 父路径被同名文件占用：补建目录必然失败，不能提供「重新创建」 */
+  | { kind: "parentNotDir"; parent: string };
+
+export interface SaveDocumentOptions {
+  /**
+   * 上次成对读取的磁盘身份。给了就要求「目标仍在原处且身份未变」：
+   * 目标消失返回 `notFound`（绝不复活），身份变化返回 `conflict`。
+   */
+  expected?: FileStat;
+  /** 父目录缺失时补建：仅用于用户确认「在原位置重新创建」 */
+  createParentDirs?: boolean;
+  /** 用户已在原生保存对话框确认覆盖；false 时目标出现即 `conflict` */
+  overwriteExisting?: boolean;
+}
+
+/**
+ * 保存文档：替换语义 + 写盘回执（#362 M1）。
+ *
+ * 与 `writeTextFile` 的区别：写与「新基线」来自同一次提交，不再「写完再 stat」——
+ * 那中间的任意外写都会让基线指向别人的内容。
+ */
+export async function saveDocument(
+  filePath: string,
+  content: string,
+  options: SaveDocumentOptions = {},
+): Promise<SaveOutcome> {
+  if (isTauri()) {
+    try {
+      return await invoke<SaveOutcome>("save_document", { filePath, content, ...options });
+    } catch (e) {
+      throw new CmdError(formatCmdError(e));
+    }
+  }
+  // 浏览器 mock：按同一套语义判定，否则 E2E 里「删除后保存」「覆盖确认」全都测不到
+  const { MOCK_FILE_CONTENT, MOCK_FILE_STAT, touchMockStat } = await import("./mockFs");
+  const exists = Object.prototype.hasOwnProperty.call(MOCK_FILE_CONTENT, filePath);
+  if (!exists) {
+    if (options.expected) return { kind: "notFound" };
+    MOCK_FILE_CONTENT[filePath] = content;
+    touchMockStat(filePath, content);
+    return { kind: "written", stat: { ...MOCK_FILE_STAT[filePath] }, foreignWrite: false };
+  }
+  const current = MOCK_FILE_STAT[filePath];
+  // 与 Rust 同语义：用户已确认覆盖时跳过身份比对；未确认覆盖时
+  // 「有 expected 比身份、无 expected 要求目标不存在」
+  if (!options.overwriteExisting) {
+    if (
+      options.expected &&
+      (current.mtimeUs !== options.expected.mtimeUs || current.size !== options.expected.size)
+    ) {
+      return { kind: "conflict", disk: { ...current }, registerFailed: false };
+    }
+    if (!options.expected) {
+      return { kind: "conflict", disk: { ...current }, registerFailed: false };
+    }
+  }
+  MOCK_FILE_CONTENT[filePath] = content;
+  touchMockStat(filePath, content);
+  return { kind: "written", stat: { ...MOCK_FILE_STAT[filePath] }, foreignWrite: false };
 }
 
 /**

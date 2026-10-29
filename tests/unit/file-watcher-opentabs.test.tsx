@@ -29,6 +29,8 @@ describe("useFileWatcher & deletedOnDisk", () => {
           path: "/workspace/doc1.md",
           content: "# Doc 1",
           dirty: false,
+          diskContent: "# Doc 1",
+          diskStat: { mtimeUs: 1_000_000, size: 6 },
           diskMtime: 1000,
           deletedOnDisk: false,
           lastSavedAt: null,
@@ -53,12 +55,12 @@ describe("useFileWatcher & deletedOnDisk", () => {
     useConflict.setState({ conflict: null });
   });
 
-  it("marks tab as deletedOnDisk when fileMtime throws error", async () => {
-    vi.mocked(fs.fileMtime).mockImplementation(async (path: string) => {
+  it("marks tab as deletedOnDisk when fileStat reports notFound", async () => {
+    vi.mocked(fs.fileStat).mockImplementation(async (path: string) => {
       if (path === "/workspace/doc2.md") {
-        throw new Error("File not found");
+        throw { code: "notFound", message: "文件不存在" };
       }
-      return 1000;
+      return { mtimeUs: 1_000_000, size: 6 };
     });
 
     renderHook(() => useFileWatcher());

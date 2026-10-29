@@ -5,22 +5,33 @@
 
 import type { StateCreator } from "zustand";
 import { isTauri } from "@tauri-apps/api/core";
-import { fileMtime, fileStat, readDocument, readTextFile, writeTextFile } from "../../lib/fs";
+import {
+  fileMtime,
+  fileStat,
+  readDocument,
+  readTextFile,
+  saveDocument,
+  writeTextFile,
+} from "../../lib/fs";
 import type { DocumentSnapshot, FileStat } from "../../lib/fs";
 import { formatCmdError } from "../../lib/cmd-error";
+import { isSamePath } from "../../lib/path-utils";
 import { evaluateBaseline, reconcileDiskContent } from "../../lib/save-guard";
 import { writeErrorCode, type WriteErrorCode } from "../../lib/writeErrors";
 import { flushAllMarkdownPublishers } from "../../components/Editor/markdown-publisher";
 import { runWysiwygAnchorSampler } from "../../lib/wysiwyg-anchor-sampler";
 import { useConflict } from "../conflict";
 import {
+  bumpPathRev,
   consumeDeletedDuringLoad,
+  dropPathRev,
   fileRequests,
   intents,
   parentDir,
   persistDeletedSnapshot,
   persistRecentFiles,
   pushRecent,
+  rebasePathRevs,
   settledPathOfRequest,
   wasDeletedDuringLoad,
   withPathLock,
@@ -33,6 +44,45 @@ import type { OpenTab, WorkspaceState } from "./types";
  */
 function mtimeMsOf(stat: FileStat): number {
   return stat.mtimeUs / 1000;
+}
+
+// ── 保存串行队列（#364） ────────────────────────────────────────────────────
+// `saveQueue`：已入队、尚未启动；`inflightSaves`：已启动、到 adopt 完成。
+// 意图升级必须**同时**查两张表：排队中尚未启动的保存不在 inflight 里，
+// 只查 inflight 会让交互保存直接入队排在后面，用户按 Ctrl+S 看起来没反应。
+const saveQueue = new Map<string, Promise<void>>();
+const inflightSaves = new Map<string, Promise<void>>();
+/** 全局串行链：保证任意时刻只有一个 tab 在写盘 */
+let saveChain: Promise<void> = Promise.resolve();
+
+/**
+ * 入队一次保存；返回的 promise 在该次保存（含 store adopt）完成后 resolve。
+ *
+ * 空闲时**立刻启动**（不经过 microtask）：`saveTab` 必须在返回前同步置 `saving`，
+ * 否则重入守卫（issue #91）与「Ctrl+S 后立刻再按」的语义都会变。
+ * 只有已有保存在跑时才排到链尾，保证同一时刻只有一个 tab 在写盘。
+ */
+function enqueueSave(path: string, task: () => Promise<void>): Promise<void> {
+  const start = (): Promise<void> => {
+    saveQueue.delete(path);
+    const running = task();
+    inflightSaves.set(path, running);
+    return running.finally(() => {
+      if (inflightSaves.get(path) === running) inflightSaves.delete(path);
+    });
+  };
+
+  // 判空闲必须同时看排队表：队列里可能已有「已排队、尚未启动」的项
+  if (inflightSaves.size === 0 && saveQueue.size === 0) {
+    const done = start();
+    saveChain = done.catch(() => undefined);
+    return done;
+  }
+
+  const queued = saveChain.catch(() => undefined).then(start);
+  saveChain = queued.catch(() => undefined);
+  saveQueue.set(path, queued);
+  return queued;
 }
 
 /** 标签页 / 活跃文档 / 分屏 slice */
@@ -102,6 +152,15 @@ export interface TabsSlice {
   openUntitledTabWithContent: (initialContent: string) => void;
   /** 切换活跃标签页 */
   switchTab: (filePath: string) => void;
+  /**
+   * 核验单个 tab 的磁盘状态（#362 §4.4）：stat 分类 → 基线判定 → 成对读盘 →
+   * 先比内容 → adopt / 静默重载 / 冲突。`switchTab` 与 watcher 共用同一份实现。
+   * `interactive=false`（后台 tab）时不弹窗，只标记 `conflictPending`。
+   */
+  verifyTabOnDisk: (
+    filePath: string,
+    options?: { interactive?: boolean; markBackgroundConflict?: boolean },
+  ) => Promise<void>;
   /** 关闭标签页（若关闭的是活跃 tab，自动激活相邻 tab） */
   closeTab: (filePath: string) => void;
   /** 关闭除指定 tab 外的所有 tab（不处理未保存确认，由调用方负责） */
@@ -119,7 +178,20 @@ export interface TabsSlice {
   /** 更新指定分屏文件的内容（绑定文件，避免 swap/close 后串写，PR #34） */
   setSplitContentFor: (path: string, content: string) => void;
   /** 保存当前文件到磁盘 */
+  /**
+   * 保存指定 tab（#364）：**不要求它是活跃 tab**。所有镜像更新（`currentContent` /
+   * 顶层 `dirty` / `saveError`）只在目标恰好是活跃 tab 时才写。
+   */
+  saveTab: (
+    path: string,
+    options?: { interactive?: boolean },
+  ) => Promise<void>;
+  /** 兼容入口：保存当前活跃 tab */
   saveCurrent: (options?: { interactive?: boolean }) => Promise<void>;
+  /** 等待在途保存结束；给 path 时只等该 path（同时覆盖排队中尚未启动的任务） */
+  waitForSaves: (path?: string) => Promise<void>;
+  /** 该 path 是否有已启动、尚未 adopt 完成的保存 */
+  isSaveInFlight: (path: string) => boolean;
   /** 设置当前光标所在标题 slug（编辑器选区变化时调用） */
   setCurrentHeadingSlug: (slug: string | null) => void;
   /** 保存指定 tab 的编辑位置（光标 pos + 滚动 offset）。绑定文件路径，
@@ -277,7 +349,6 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
     // 主拦截在 readFileOnce 请求体内（见上，所有并发等待方共享同一拒绝）；
     // 黑名单登记落在请求级检查之后、本续体之前的极窄窗口内时，此守卫兜底。
     // 黑名单按删除瞬间 fileRequests 的注册路径登记：若先重命名后删除，
-    // 黑名单在新路径下，故须用 tabPath 对照（#200 场景 3）。
     if (wasDeletedDuringLoad(tabPath)) {
       consumeDeletedDuringLoad(tabPath);
       persistDeletedSnapshot(tabPath, snapshot.content);
@@ -457,6 +528,18 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
     markDeletedOnDisk(targetPath);
   };
 
+  /** 写盘回执判为冲突（#362）：标记冲突待处理，自动保存据此暂停 */
+  const markConflictPending = (targetPath: string) => {
+    set((current) => {
+      const openTabs = current.openTabs.map((t) =>
+        t.path === targetPath ? { ...t, conflictPending: true } : t,
+      );
+      return current.activeTabPath === targetPath
+        ? { openTabs, conflictPending: true }
+        : { openTabs };
+    });
+  };
+
   /**
    * 交互式保存遇到「文件已不在原处」时由用户决定去向（issue #363）：
    * 在原位置重新创建 / 另存为 / 取消。返回最终写入的路径，取消返回 null。
@@ -466,7 +549,7 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
     savePath: string,
     code: WriteErrorCode,
     content: string,
-  ): Promise<string | null> => {
+  ): Promise<{ path: string; stat: FileStat } | null> => {
     const { message, save } = await import("@tauri-apps/plugin-dialog");
     const name = savePath.split(/[\\/]/).pop();
     const RECREATE = "重新创建";
@@ -503,8 +586,32 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
       choice === SAVE_AS || (canRecreate ? choice === "No" : choice === "Ok");
 
     if (wantsRecreate) {
-      await writeTextFile(savePath, content, { createParents: true });
-      return savePath;
+      // 文档写入统一走写引擎（回执 + 半失败登记）：`createParentDirs` 只在这条
+      // 「用户明确确认重建」的路径上为 true，是它唯一的生产调用方
+      const outcome = await saveDocument(savePath, content, { createParentDirs: true }).catch(
+        async (err: unknown) => {
+          // 引擎抛错（NotAFile / create_dir_all 失败等）必须在这里收口：
+          // 否则异常冒到 saveCurrent 的 catch，会拿**旧路径**再弹一次「原文件不在了」
+          await message(`重新创建「${name}」失败：${formatCmdError(err).message}`, {
+            title: "重新创建失败",
+            kind: "warning",
+          });
+          return null;
+        },
+      );
+      if (!outcome) return null;
+      if (outcome.kind !== "written") {
+        // 期间文件被别人建出来（CreateExclusive → conflict）等：必须告诉用户，
+        // 不能「点了重新创建，界面毫无反应」
+        await message(
+          outcome.kind === "conflict"
+            ? `「${name}」在此期间已被其他程序创建，未覆盖。请重新选择操作。`
+            : `「${name}」重新创建失败，请重试或另存为。`,
+          { title: "重新创建失败", kind: "warning" },
+        );
+        return null;
+      }
+      return { path: savePath, stat: outcome.stat };
     }
     if (!wantsSaveAs) return null;
 
@@ -513,15 +620,37 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
       filters: [{ name: "Markdown", extensions: ["md", "markdown"] }],
     });
     if (!picked) return null;
-    if (picked !== savePath && get().openTabs.some((t) => t.path === picked)) {
+    if (!isSamePath(picked, savePath) && get().openTabs.some((t) => isSamePath(t.path, picked))) {
       await message(`「${picked.split(/[\\/]/).pop()}」已在其他标签页打开，请先关闭它或选择其他位置。`, {
         title: "另存为",
         kind: "warning",
       });
       return null;
     }
-    await writeTextFile(picked, content);
-    return picked;
+    // 原生保存对话框已经问过「是否替换」，这里的 overwriteExisting 就是那次同意：
+    // 否则 CreateExclusive 会对已存在目标一律 conflict，「另存为覆盖旧文件」直接不可用。
+    // **例外**：用户把目标选回「原路径」时不算覆盖（那个路径上的文件刚被删/改名），
+    // 按 CreateExclusive 处理，与「重新创建」保持同一竞态保护（期间被重建 → conflict）
+    const savedAs = await saveDocument(picked, content, {
+      overwriteExisting: !isSamePath(picked, savePath),
+    }).catch(async (err: unknown) => {
+      // 与重建分支同理：异常必须在这里收口，否则冒到 saveCurrent 的 catch 会拿旧路径
+      // 再弹一次「原文件不在了」，把「目标目录被占位」这类错误归因到错误的文件上
+      await message(`写入「${picked.split(/[\\/]/).pop()}」失败：${formatCmdError(err).message}`, {
+        title: "另存为",
+        kind: "warning",
+      });
+      return null;
+    });
+    if (!savedAs) return null;
+    if (savedAs.kind !== "written") {
+      await message(`写入「${picked.split(/[\\/]/).pop()}」失败，请重试或选择其他位置。`, {
+        title: "另存为",
+        kind: "warning",
+      });
+      return null;
+    }
+    return { path: picked, stat: savedAs.stat };
   };
 
   return {
@@ -682,6 +811,129 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
       set({ splitFile: currentFile, splitContent: latestMainTab?.content ?? mainTab.content });
     },
 
+    verifyTabOnDisk: async (filePath, options) => {
+      const interactive = options?.interactive ?? true;
+      const initial = get().openTabs.find((t) => t.path === filePath);
+      if (!initial || initial.isUntitled) return;
+      // 浏览器 mock 的 stat 已保真（#362），但检测路径只在桌面端启用：
+      // E2E 覆盖不到这条链路，避免在浏览器里引入未验证的行为
+      if (!isTauri()) return;
+      // 在途保存时不核验：写完会自己登记基线，中途读盘只会制造假冲突
+      if (initial.saving) return;
+      // 后台已标记冲突：不再重复核验。否则每轮轮询都会走「stat → 全量读盘 → reconcile」
+      // 一整条链路（10MB 文档 = 每 3 秒一次全量 IO + 一次订阅重渲染），
+      // 只要用户不处理就一直持续。切回时 `switchTab` 的 interactive=true 会补弹。
+      if (!interactive && initial.conflictPending) return;
+      // 只有当**同一文件**的冲突对话框已经打开时才跳过；
+      // 后台 tab 被标记 conflictPending 后，用户切回来时必须补弹（否则唯一出口是 Ctrl+S）
+      if (useConflict.getState().conflict?.filePath === filePath) return;
+
+      // ① stat 分类：notFound / notAFile 才是删除态，其余只报错、保留基线
+      let current: FileStat | null = null;
+      let statCode = "io";
+      let statMessage = "";
+      try {
+        current = await fileStat(filePath);
+      } catch (err) {
+        const shape = formatCmdError(err);
+        statCode = shape.code;
+        statMessage = shape.message;
+      }
+
+      // ② 每个 await 之后都重取 tab（并发保存可能已更新基线、或 tab 已关闭）
+      const tabAfterStat = get().openTabs.find((t) => t.path === filePath);
+      if (!tabAfterStat) return;
+
+      if (!current) {
+        if (statCode === "notFound" || statCode === "notAFile") markDeletedOnDisk(filePath);
+        else markTabError(filePath, statMessage);
+        return;
+      }
+
+      if (tabAfterStat.deletedOnDisk) {
+        set((state) => ({
+          openTabs: state.openTabs.map((t) =>
+            t.path === filePath ? { ...t, deletedOnDisk: false } : t,
+          ),
+        }));
+      } else if (evaluateBaseline(tabAfterStat.diskStat, current) === "unchanged") {
+        return;
+      }
+
+      // ③ 变了才成对读盘
+      let snapshot: DocumentSnapshot;
+      try {
+        snapshot = await readDocument(filePath);
+      } catch (err) {
+        const shape = formatCmdError(err);
+        if (shape.code === "notFound" || shape.code === "notAFile") markDeletedOnDisk(filePath);
+        else markTabError(filePath, shape.message);
+        return;
+      }
+
+      // ④ 读盘往返期间可能有新输入/并发保存：先 flush，再取最新 tab 作为比较对象
+      flushAllMarkdownPublishers();
+      const tabAfterRead = get().openTabs.find((t) => t.path === filePath);
+      if (!tabAfterRead) return;
+
+      // ⑤ 先比内容：磁盘就是编辑器内容 → 视为已保存；内容 == 旧基线 → 只是 touch
+      const verdict = reconcileDiskContent(
+        snapshot.content,
+        tabAfterRead.content,
+        tabAfterRead.diskContent,
+      );
+      if (verdict.kind === "same-as-write") {
+        adoptDiskBaseline(filePath, snapshot, { clearDirty: true });
+        return;
+      }
+      if (verdict.kind === "touch-only") {
+        adoptDiskBaseline(filePath, snapshot);
+        return;
+      }
+
+      // ⑥ 后台 tab 不打扰用户：干净则静默对齐，dirty 保留编辑（watcher 可要求标记待处理，
+      // 切走场景（switchTab）则不标记——那时用户刚离开，下一次切回会重新核验并弹窗）
+      if (!interactive || get().activeTabPath !== filePath) {
+        if (!tabAfterRead.dirty) await get().reloadFile(filePath);
+        else if (options?.markBackgroundConflict) markConflictPending(filePath);
+        return;
+      }
+      if (!tabAfterRead.dirty) {
+        await get().reloadFile(filePath);
+        return;
+      }
+
+      // ⑦ 真冲突：对话框不能拿过期内容，再 flush 一次并重取，并再次确认仍活跃
+      flushAllMarkdownPublishers();
+      const tabForDialog = get().openTabs.find((t) => t.path === filePath);
+      if (!tabForDialog) return;
+      if (get().activeTabPath !== filePath) return;
+      set((state) => {
+        const openTabs = state.openTabs.map((t) =>
+          t.path === filePath
+            ?               // 读到内容即证明文件在磁盘上存在：必须退出删除态，
+              // 否则保存链路会一直按"已被删除"暂停（"删除后同 stat 重建"正是这条）。
+              //
+              // 同时把 stat 身份推进到刚读到的这一版：否则 watcher 每 3s 都会发现
+              // "基线又变了"，用户点「继续编辑」关掉对话框后会被反复弹（同一版只问一次）。
+              // **但 `diskMtime` 故意留在旧值**：`saveCurrent` 的写前比对用它，
+              // 保留旧值才能让用户下次 Ctrl+S 仍被提示「将覆盖外部修改」——
+              // 若一并推进，冲突就变成静默覆盖了。
+              { ...t, conflictPending: true, deletedOnDisk: false, diskStat: snapshot.stat }
+            : t,
+        );
+        return state.activeTabPath === filePath
+          ? { openTabs, conflictPending: true }
+          : { openTabs };
+      });
+      useConflict.getState().openConflict({
+        filePath,
+        localContent: tabForDialog.content,
+        diskContent: snapshot.content,
+        detectedAt: Date.now(),
+      });
+    },
+
     switchTab: (filePath) => {
       flushAllMarkdownPublishers();
       const tab = get().openTabs.find((t) => t.path === filePath);
@@ -689,121 +941,13 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
       intents.mainFile += 1;
       // 切换 tab 时重置大纲高亮，等编辑器更新后由 tracker 重新计算
       set((current) => mainTabPatch(current, tab));
+      // 这里**不**顺手保存离开的 tab：一次机会式写盘会在「切走」这个用户无感的时刻
+      // 制造冲突标记/删除标记（评审 R2 明确要求后台 tab 不得被置 conflictPending）。
+      // 后台 tab 的落盘由按 path 独立防抖的调度器负责（#364 §7.2）。
 
-      if (tab.isUntitled) return;
-      // 浏览器 mock 的 stat 已保真（#362），但门禁的移除随 watcher 重写（PR-2）同批进行，
-      // 避免 PR-1 在浏览器里引入尚未被 E2E 覆盖的检测路径。
-      if (!isTauri()) return;
-
-      // 切换激活时核验磁盘状态（#362 §4.4）：
-      // ① 每个 await 之后都重取 tab（并发保存可能已更新基线、或 tab 已关闭）
-      // ② stat 错误分类：NotFound 才是删除态，其余只报错、保留基线
-      // ③ 基线未变直接返回；④ 变了才成对读盘；⑤⑥ 先比内容再三路判定
-      void (async () => {
-        let current: FileStat | null = null;
-        let statCode: string = "io";
-        let statMessage = "";
-        try {
-          current = await fileStat(filePath);
-        } catch (err) {
-          const shape = formatCmdError(err);
-          statCode = shape.code;
-          statMessage = shape.message;
-        }
-
-        const tabAfterStat = get().openTabs.find((t) => t.path === filePath);
-        if (!tabAfterStat) return;
-
-        if (!current) {
-          // notFound 与 notAFile 都表示「原文档已不在原处」：前者被删/改名，后者被同名目录等
-          // 占位（#391 的 file_mtime 对非普通文件同样报错，watcher 也按删除态处理）。
-          // 其余错误（权限 / Io）只记 tab 错误，不动删除标记与基线。
-          if (statCode === "notFound" || statCode === "notAFile") markDeletedOnDisk(filePath);
-          else markTabError(filePath, statMessage);
-          return;
-        }
-
-        // 删除态下 stat 相同也不能短路：外部"删除后以同 mtime+size 重建"内容可能已变
-        if (
-          !tabAfterStat.deletedOnDisk &&
-          evaluateBaseline(tabAfterStat.diskStat, current) === "unchanged"
-        ) {
-          return;
-        }
-
-        let snapshot: DocumentSnapshot;
-        try {
-          snapshot = await readDocument(filePath);
-        } catch (err) {
-          const shape = formatCmdError(err);
-          if (shape.code === "notFound" || shape.code === "notAFile") markDeletedOnDisk(filePath);
-          else markTabError(filePath, shape.message);
-          return;
-        }
-
-        // ⑤ 读盘往返期间可能有新输入/并发保存：先 flush，再取最新 tab 作为比较对象
-        flushAllMarkdownPublishers();
-        const tabAfterRead = get().openTabs.find((t) => t.path === filePath);
-        if (!tabAfterRead) return;
-
-        // ⑥ 旧基线必须取最后一次 re-check 的 diskContent（tab1/tab2 期间可能已被并发保存更新）
-        const verdict = reconcileDiskContent(
-          snapshot.content,
-          tabAfterRead.content,
-          tabAfterRead.diskContent,
-        );
-
-        if (verdict.kind === "same-as-write") {
-          // 磁盘就是编辑器内容：视为已保存，清 dirty / 冲突，不写盘
-          adoptDiskBaseline(filePath, snapshot, { clearDirty: true });
-          return;
-        }
-        if (verdict.kind === "touch-only") {
-          adoptDiskBaseline(filePath, snapshot);
-          return;
-        }
-
-        // ⑦ 活跃性守卫（#362 评审阻塞 1）：读盘在途时用户可能已经切走。
-        // 后续动作会弹模态框并写 conflictPending，只能作用在**当前活跃** tab 上——
-        // 否则对话框标题是后台文件，用户却在编辑另一个 tab，误点「丢弃本地修改」
-        // 会作用在他没看的那份内容上。后台 tab 只做静默对齐（干净）或原样保留（dirty，
-        // 切回它会重新走一遍核验）。
-        if (get().activeTabPath !== filePath) {
-          // 只剩静默动作：干净 tab 对齐磁盘，dirty tab 原样保留
-          if (!tabAfterRead.dirty) await get().reloadFile(filePath);
-          return;
-        }
-        if (!tabAfterRead.dirty) {
-          // 本地无修改：以磁盘内容为准重新加载，不打扰用户
-          await get().reloadFile(filePath);
-          return;
-        }
-
-        // 真冲突：对话框不能拿过期内容，再 flush 一次并重取
-        flushAllMarkdownPublishers();
-        const tabForDialog = get().openTabs.find((t) => t.path === filePath);
-        if (!tabForDialog) return;
-        // flush 之后再次确认活跃性：这中间也可能发生切换
-        if (get().activeTabPath !== filePath) return;
-        set((current) => {
-          const openTabs = current.openTabs.map((t) =>
-            t.path === filePath
-              ? // 读到内容即证明文件在磁盘上存在：必须退出删除态，
-                // 否则保存链路会一直按"已被删除"暂停（"删除后同 stat 重建"正是这条）
-                { ...t, conflictPending: true, deletedOnDisk: false }
-              : t,
-          );
-          return current.activeTabPath === filePath
-            ? { openTabs, conflictPending: true }
-            : { openTabs };
-        });
-        useConflict.getState().openConflict({
-          filePath,
-          localContent: tabForDialog.content,
-          diskContent: snapshot.content,
-          detectedAt: Date.now(),
-        });
-      })();
+      // 切换激活时核验磁盘状态（#362 §4.4）：实现见 `verifyTabOnDisk`，
+      // 与 watcher 共用同一份逻辑，避免两处判定漂移
+      void get().verifyTabOnDisk(filePath);
     },
 
     closeTab: (filePath) => {
@@ -811,6 +955,8 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
       const { openTabs, activeTabPath } = get();
       const idx = openTabs.findIndex((t) => t.path === filePath);
       if (idx === -1) return;
+      // #364：关闭即移除订阅键条目（否则 pathRevs 只增不减）
+      dropPathRev(filePath);
       const nextTabs = openTabs.filter((t) => t.path !== filePath);
       // 若关闭的是分屏文件，同步关闭分屏面板
       const splitClosing = get().splitFile === filePath;
@@ -853,6 +999,8 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
       const { openTabs, splitFile } = get();
       const keep = openTabs.find((t) => t.path === keepPath);
       if (!keep) return;
+      // #364：批量关闭也要清 pathRevs，否则重开同路径会从旧 rev 起步
+      for (const t of openTabs) if (t.path !== keepPath) dropPathRev(t.path);
       intents.mainFile += 1;
       if (splitFile && splitFile !== keepPath) intents.splitFile += 1;
       set((current) => ({
@@ -870,6 +1018,7 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
       if (idx === -1) return;
       intents.mainFile += 1;
       const nextTabs = openTabs.slice(0, idx + 1);
+      for (const t of openTabs.slice(idx + 1)) dropPathRev(t.path);
       const splitRemoved = !!splitFile && !nextTabs.some((tab) => tab.path === splitFile);
       if (splitRemoved) intents.splitFile += 1;
       // 若活跃 tab 被关掉了，激活 fromPath
@@ -891,6 +1040,8 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
 
     closeAll: () => {
       flushAllMarkdownPublishers();
+      // #364：批量关闭也要清 pathRevs，否则重开同路径会从旧 rev 起步
+      for (const t of get().openTabs) dropPathRev(t.path);
       intents.mainFile += 1;
       intents.splitFile += 1;
       set({
@@ -922,6 +1073,8 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
     setContent: (content) => {
       const { currentContent, activeTabPath, openTabs } = get();
       if (content === currentContent) return;
+      // #364：内容真正变化才 bump（唯一 bump 点之一）；保存成功不重置
+      if (activeTabPath) bumpPathRev(activeTabPath);
       // 更新活跃 tab 的内容与 dirty
       if (activeTabPath) {
         const nextTabs = openTabs.map((t) =>
@@ -937,6 +1090,8 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
       const { activeTabPath, openTabs } = get();
       const tab = openTabs.find((t) => t.path === path);
       if (!tab || tab.content === content) return;
+      // #364：内容真正变化才 bump（唯一 bump 点之一）
+      bumpPathRev(path);
       const nextTabs = openTabs.map((t) =>
         t.path === path ? { ...t, content, dirty: true } : t,
       );
@@ -959,13 +1114,32 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
       get().setContentFor(path, content);
     },
 
-    saveCurrent: async (options) => {
+    saveTab: async (filePath, options) => {
       const interactive = options?.interactive ?? true;
+
+      // 意图升级（#364 §7.1）：排队中或已在途的保存不能把这次调用吞掉。
+      // 非交互直接搭车；交互要先等旧的（可能失败）跑完，再以交互模式执行一次——
+      // 否则用户按 Ctrl+S 什么都没发生。
+      if (saveQueue.has(filePath) || inflightSaves.has(filePath)) {
+        const doing = inflightSaves.get(filePath) ?? saveQueue.get(filePath);
+        if (!interactive) return doing ?? Promise.resolve();
+        try {
+          await doing;
+        } catch {
+          // 旧的非交互保存失败不能连带吞掉这次交互保存
+        }
+        const after = get().openTabs.find((t) => t.path === filePath);
+        if (!after || (!after.dirty && !after.conflictPending && !after.deletedOnDisk)) return;
+      }
+
+      const run = async () => {
       flushAllMarkdownPublishers();
-      const { dirty, activeTabPath, openTabs } = get();
-      if (!activeTabPath) return;
+      const { openTabs } = get();
+      // 目标可以是**后台 tab**（#364）：下面的镜像更新都按「是不是活跃 tab」判定
+      const activeTabPath = filePath;
       const tab = openTabs.find((t) => t.path === activeTabPath);
       if (!tab) return;
+      const dirty = tab.dirty;
       // 保存互斥按 tab 判定（issue #148）：其他 tab 的保存挂在对话框期间，
       // 不应吞掉本 tab 的保存；同一 tab 的重复保存仍被拦截防重入
       // 文件已不在原处时，干净 tab 的交互保存也要放行：用户可借此重新创建
@@ -975,14 +1149,19 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
       // issue #363：文件已不在原处时自动保存暂停，等用户处理（Ctrl+S / 状态栏入口）
       // 或文件恢复后由监听器解除标记
       if (!interactive && tab.deletedOnDisk) return;
+      // 冲突待处理：非交互保存直接返回，否则调度器每 2s 会「写 → 冲突 → 弹窗」空转
+      if (!interactive && tab.conflictPending) return;
 
       // 立即置位本 tab 的 saving，防止重入（例如弹窗期间定时保存触发）
       applyTabSaving(activeTabPath, true);
-      set({ saveError: null });
+      // 只清「目标就是活跃 tab」的错误提示：后台 tab 的保存不能抹掉用户正在看的报错
+      if (get().activeTabPath === activeTabPath) set({ saveError: null });
 
       let savePath = tab.path;
       // 记录本次保存发起时快照内容
       const contentToSave = tab.content;
+      /** 用户在上面「是否覆盖外部修改」里确认过：只放宽回执的身份比对，不放宽目标存在性 */
+      let overwriteConfirmed = false;
 
       try {
         // 未命名草稿：首次保存弹另存为对话框选择保存位置
@@ -1064,6 +1243,9 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
                 applyTabSaving(activeTabPath, false);
                 return;
               }
+              // 确认覆盖：只置位 overwriteConfirmed。Rust 侧据此跳过身份比对
+              // （但保留「目标必须存在」），所以不必再读一次盘取最新身份
+              overwriteConfirmed = true;
             } catch {
               // 弹窗异常或被 reject/取消时，视为放弃覆盖并安全退出
               applyTabSaving(activeTabPath, false);
@@ -1272,69 +1454,188 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
 
         // 「已删除文件」经用户选择重新创建 / 另存为后，磁盘上多出一个文件
         let resolvedMissing = false;
+        // 基线直接取写盘回执（#362 M1）：内容与磁盘身份来自同一次提交，
+        // 不再「写完再 stat」——那中间的任意外写都会让基线指向别人的内容
+        let savedStat: FileStat | undefined;
+        /** 写后回执降级：内容可能被别人覆盖，不能当「已保存」 */
+        let receiptUntrusted = false;
         try {
-          // issue #363：保存已有文档只覆盖「仍在原处」的文件——被删除 / 改名 / 所在目录
-          // 被删 / 原路径被占用时写盘被拒，绝不悄悄写回。草稿的保存目标由用户在
-          // 另存为对话框中选定，照常写入
           if (tab.isUntitled) {
+            // 草稿另存为：目标由用户在对话框选定，允许创建
             await writeTextFile(savePath, contentToSave);
-          } else {
+            try {
+              savedStat = await fileStat(savePath);
+            } catch {
+              // 取不到身份就留空基线，下次读盘重建
+            }
+          } else if (!tab.diskStat) {
+            // 没有成对基线（旧 tab / 恢复出来的 tab）：退回「必须存在」的写盘，
+            // 仍不允许复活已删文件，但没有身份可比，也就无法改判冲突
             await writeTextFile(savePath, contentToSave, { mustExist: true });
+            try {
+              savedStat = await fileStat(savePath);
+            } catch {
+              // 留空基线
+            }
+          } else {
+            const attempt = (expected?: FileStat, overwrite = false) =>
+              saveDocument(savePath, contentToSave, { expected, overwriteExisting: overwrite });
+
+            // expected = 上次成对读到的磁盘身份：目标消失 → notFound，身份变了 → conflict。
+            // 用户已确认覆盖时只置 `overwriteExisting`：Rust 侧跳过身份比对（但保留目标必须存在）
+            let outcome = await attempt(tab.diskStat, overwriteConfirmed);
+            if (outcome.kind === "conflict") {
+              // 磁盘内容仍等于我们的基线 → 只是 mtime 变了（touch / 基线过期），
+              // adopt 新身份后重试一次（M2 三路里的 touch-only，不打扰用户）
+              const disk = await readDocument(savePath).catch(() => null);
+              if (disk && tab.diskContent !== undefined && disk.content === tab.diskContent) {
+                set((current) => ({
+                  openTabs: current.openTabs.map((t) =>
+                    t.path === activeTabPath ? { ...t, diskStat: disk.stat } : t,
+                  ),
+                }));
+                outcome = await attempt(disk.stat);
+              }
+            }
+
+            if (outcome.kind === "written") {
+              // foreignWrite = 写后回执降级（写后 stat 与写入内容对不上，可能被别人覆盖）：
+              // 不能当「已保存」——否则下一轮 watcher 会把干净 tab 静默重载，
+              // 刚写下去的内容从编辑器消失且毫无提示。保持 dirty 并给可见提示
+              if (outcome.foreignWrite) {
+                receiptUntrusted = true;
+                savedStat = undefined;
+              } else {
+                savedStat = outcome.stat;
+              }
+            } else if (outcome.kind === "conflict") {
+              if (!interactive) {
+                // 自动保存不打扰用户：只标记冲突待处理（下次切回/保存时再问）。
+                markConflictPending(activeTabPath);
+                applyTabSaving(activeTabPath, false);
+                return;
+              }
+              // 回执说磁盘变了：读最新内容开冲突对话框（引擎已完成「同内容 → written」判定）
+              const disk = await readDocument(savePath).catch(() => null);
+              if (disk) {
+                set((current) => ({
+                  openTabs: current.openTabs.map((t) =>
+                    t.path === activeTabPath ? { ...t, diskStat: disk.stat } : t,
+                  ),
+                }));
+              }
+              useConflict.getState().openConflict({
+                filePath: savePath,
+                localContent: contentToSave,
+                diskContent: disk?.content ?? "",
+                detectedAt: Date.now(),
+              });
+              if (outcome.tempPath) {
+                const { showMessage } = await import("../../lib/dialogs");
+                void showMessage(
+                  `本次写入的内容保留在临时文件：${outcome.tempPath}` +
+                    (outcome.registerFailed
+                      ? "\n登记失败：重启后可能找不到，请立即另存。"
+                      : ""),
+                  { kind: "warning", title: "保存未完成" },
+                );
+              }
+              applyTabSaving(activeTabPath, false);
+              return;
+            } else {
+              // notFound / parentMissing / parentNotDir：文件已不在原处（#363），交给三选项。
+              // 错误分类由 Rust 的 SaveOutcome 直接给出，**不做副作用写盘探测**
+              // （探测若恰好赶上目录重现，会把内容真的写回旧路径）
+              const code: WriteErrorCode =
+                outcome.kind === "notFound"
+                  ? "TARGET_MISSING"
+                  : outcome.kind === "parentNotDir"
+                    ? "PARENT_NOT_DIR"
+                    : "PARENT_MISSING";
+              markMissingOnDisk(activeTabPath);
+              if (!interactive) {
+                applyTabSaving(activeTabPath, false);
+                return;
+              }
+              const resolved = await resolveMissingFileSave(savePath, code, contentToSave);
+              if (!resolved) {
+                applyTabSaving(activeTabPath, false);
+                return;
+              }
+              savePath = resolved.path;
+              savedStat = resolved.stat;
+              resolvedMissing = true;
+            }
           }
         } catch (e) {
-          const code = tab.isUntitled ? null : writeErrorCode(e);
+          // 只处理「可归类的写盘异常」（权限 / Io / 半失败）；其余照旧上抛
+          if (tab.isUntitled) throw e;
+          const code = writeErrorCode(e);
           if (!code) throw e;
           markMissingOnDisk(activeTabPath);
           if (!interactive) {
             applyTabSaving(activeTabPath, false);
             return;
           }
-          const resolvedPath = await resolveMissingFileSave(savePath, code, contentToSave);
-          if (!resolvedPath) {
+          const resolved = await resolveMissingFileSave(savePath, code, contentToSave);
+          if (!resolved) {
             applyTabSaving(activeTabPath, false);
             return;
           }
-          savePath = resolvedPath;
+          savePath = resolved.path;
+          savedStat = resolved.stat;
           resolvedMissing = true;
+        }
+        if (receiptUntrusted) {
+          set({
+            saveError: "保存可能未完成：写入后磁盘内容与预期不一致，请检查后另存副本。",
+          });
         }
         const pathChanged = savePath !== activeTabPath;
         const now = Date.now();
-        // 写盘成功后的基线（#362 §12 ③）：内容与磁盘身份尽量同源。
-        // PR-2 会换成写盘回执（pathRev）；在此之前先补一次 fileStat，
-        // 否则 diskContent 已是新内容而 diskStat 还停在旧身份，下一轮 switchTab 必判「变了」
-        let savedStat: FileStat | undefined;
-        try {
-          savedStat = await fileStat(savePath);
-        } catch {
-          // 取不到身份（权限 / 瞬时错误）：宁可保留空基线（下次读盘重建），也不写假基线
-        }
         const savedMtime = savedStat ? mtimeMsOf(savedStat) : undefined;
         // 异步窗口结束后重新获取最新 store 状态，避免覆盖窗口期间其他 tab / 分屏并发发布的编辑内容
         const latestState = get();
+        // 保存期间 tab 被改名：原路径已不在 openTabs 里。按「saving 且内容相同」的唯一候选接手，
+        // 否则 `saving` 会永久卡在 true，该 tab 之后的所有保存都会被重入守卫拦掉
+        const renamedAway =
+          !latestState.openTabs.some((t) => t.path === activeTabPath) &&
+          latestState.openTabs.filter((t) => t.saving && t.content === contentToSave).length === 1;
+        const adoptionPath = renamedAway
+          ? latestState.openTabs.find((t) => t.saving && t.content === contentToSave)!.path
+          : activeTabPath;
         const nextTabs = latestState.openTabs.map((t) => {
-          if (t.path === activeTabPath) {
+          if (t.path === adoptionPath) {
             // 如果写盘期间内容又发生了新的修改，保持 dirty 为 true
             const isStillDirty = t.content !== contentToSave;
             return {
-              ...t,
-              path: savePath,
-              isUntitled: false,
-              dirty: isStillDirty,
-              conflictPending: false,
-              saving: false,
-              // 写盘成功即说明文件已（重新）落在 savePath 上
-              deletedOnDisk: false,
-              lastSavedAt: now,
-              diskContent: contentToSave,
-              diskStat: savedStat,
-              diskMtime: savedMtime,
+            ...t,
+            // 改名场景保持新路径（不能再改回旧名）
+            path: renamedAway ? t.path : savePath,
+            isUntitled: false,
+            // 回执不可信时保持 dirty，并保留旧基线（下一轮按冲突处理，不静默重载）
+            dirty: isStillDirty || receiptUntrusted,
+            conflictPending: false,
+            saving: false,
+            // 写成功即清掉该 tab 的失败痕迹（后台 tab 的 saveError 只落在自己身上）
+            saveError: null,
+            // 写盘成功即说明文件已（重新）落在 savePath 上
+            deletedOnDisk: false,
+            lastSavedAt: now,
+            diskContent: receiptUntrusted ? t.diskContent : contentToSave,
+            diskStat: receiptUntrusted ? t.diskStat : savedStat,
+            diskMtime: receiptUntrusted ? t.diskMtime : savedMtime,
             };
           }
           return t;
         });
         // 草稿转正与「已删除文件另存为」都会让 tab 换到新路径
         const nextRecent = pathChanged ? pushRecent(latestState.recentFiles, savePath) : latestState.recentFiles;
-        if (pathChanged) persistRecentFiles(nextRecent);
+        if (pathChanged) {
+          persistRecentFiles(nextRecent);
+          // #364：草稿转正 / 已删除文件另存为 → rev 跟着换到新路径（否则旧 key 泄漏）
+          rebasePathRevs(activeTabPath, savePath);
+        }
 
         const currentActiveTab = nextTabs.find((t) => t.path === (latestState.activeTabPath === activeTabPath ? savePath : latestState.activeTabPath));
         set({
@@ -1346,7 +1647,13 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
           saving: currentActiveTab ? !!currentActiveTab.saving : false,
           dirty: currentActiveTab ? currentActiveTab.dirty : false,
           conflictPending: currentActiveTab ? !!currentActiveTab.conflictPending : false,
-          saveError: latestState.activeTabPath === activeTabPath ? null : latestState.saveError,
+          // 回执不可信时必须留下可见错误（否则用户以为存好了）
+          saveError:
+            latestState.activeTabPath === activeTabPath
+              ? receiptUntrusted
+                ? "保存可能未完成：写入后磁盘内容与预期不一致，请检查后另存副本。"
+                : null
+              : latestState.saveError,
           lastSavedAt: latestState.activeTabPath === activeTabPath ? now : latestState.lastSavedAt,
           recentFiles: nextRecent,
         });
@@ -1359,22 +1666,56 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
           void get().refreshTree(parentDir(savePath));
         }
       } catch (e) {
+        const message = e instanceof Error ? e.message : String(e);
         set((current) => {
           const openTabs = current.openTabs.map((t) =>
-            t.path === activeTabPath ? { ...t, saving: false } : t,
+            // 失败信号必须落在 tab 自己身上：后台 tab 的失败不会写全局 saveError，
+            // 调度器若只看全局字段就会把「每次都失败」当成成功，退避永不生效
+            t.path === activeTabPath ? { ...t, saving: false, saveError: message } : t,
           );
           const activeTab = openTabs.find((t) => t.path === current.activeTabPath);
           return {
             openTabs,
             saving: activeTab?.saving ?? false,
-            saveError:
-              current.activeTabPath === activeTabPath
-                ? (e instanceof Error ? e.message : String(e))
-                : current.saveError,
+            saveError: current.activeTabPath === activeTabPath ? message : current.saveError,
           };
         });
       }
+      };
+      // 串行队列只约束**调度器驱动的保存**（非交互）。交互保存必须立刻执行：
+      // 某个 tab 卡在另存为对话框时，其它 tab 的 Ctrl+S 不能被一起挂住（issue #148）。
+      // 但交互保存**同样要登记在途**：否则 `waitForSaves()` / `isSaveInFlight()` 看不到它，
+      // 「按了 Ctrl+S 立刻关窗」会被判成「没保存」（#367 的核心场景）。
+      if (!interactive) return enqueueSave(filePath, run);
+
+      const running = run();
+      inflightSaves.set(filePath, running);
+      const done = running.finally(() => {
+        if (inflightSaves.get(filePath) === running) inflightSaves.delete(filePath);
+      });
+      saveChain = saveChain.then(() => done).catch(() => undefined);
+      return done;
     },
+
+    saveCurrent: (options) => {
+      const activePath = get().activeTabPath;
+      return activePath ? get().saveTab(activePath, options) : Promise.resolve();
+    },
+
+    waitForSaves: async (targetPath) => {
+      // 同时等「排队中尚未启动」与「已启动但在 adopt 前」——两者都挂在 saveChain 上
+      if (targetPath) {
+        await Promise.all(
+          [inflightSaves.get(targetPath), saveQueue.get(targetPath)].filter(
+            (p): p is Promise<void> => !!p,
+          ),
+        ).catch(() => undefined);
+        return;
+      }
+      await saveChain.catch(() => undefined);
+    },
+
+    isSaveInFlight: (targetPath) => inflightSaves.has(targetPath),
 
     setCurrentHeadingSlug: (slug) => {
       if (slug === get().currentHeadingSlug) return;
