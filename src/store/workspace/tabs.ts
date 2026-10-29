@@ -16,6 +16,7 @@ import {
 import type { DocumentSnapshot, FileStat } from "../../lib/fs";
 import { formatCmdError } from "../../lib/cmd-error";
 import { isSamePath } from "../../lib/path-utils";
+import { clearDraft, scheduleDraft } from "../../lib/draft-journal";
 import { evaluateBaseline, reconcileDiskContent } from "../../lib/save-guard";
 import { writeErrorCode, type WriteErrorCode } from "../../lib/writeErrors";
 import { flushAllMarkdownPublishers } from "../../components/Editor/markdown-publisher";
@@ -955,6 +956,8 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
       const { openTabs, activeTabPath } = get();
       const idx = openTabs.findIndex((t) => t.path === filePath);
       if (idx === -1) return;
+      // #365：关闭即清掉草稿（用户已明确不要这个 tab）
+      void clearDraft(filePath);
       // #364：关闭即移除订阅键条目（否则 pathRevs 只增不减）
       dropPathRev(filePath);
       const nextTabs = openTabs.filter((t) => t.path !== filePath);
@@ -1074,7 +1077,11 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
       const { currentContent, activeTabPath, openTabs } = get();
       if (content === currentContent) return;
       // #364：内容真正变化才 bump（唯一 bump 点之一）；保存成功不重置
-      if (activeTabPath) bumpPathRev(activeTabPath);
+      if (activeTabPath) {
+        bumpPathRev(activeTabPath);
+        // #365：编辑即排一次草稿落盘（1.2s 防抖）——崩溃 / 被 kill 后还能找回
+        scheduleDraft({ path: activeTabPath, isUntitled: false, content });
+      }
       // 更新活跃 tab 的内容与 dirty
       if (activeTabPath) {
         const nextTabs = openTabs.map((t) =>
@@ -1092,6 +1099,7 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
       if (!tab || tab.content === content) return;
       // #364：内容真正变化才 bump（唯一 bump 点之一）
       bumpPathRev(path);
+      scheduleDraft({ path, isUntitled: !!tab.isUntitled, content });
       const nextTabs = openTabs.map((t) =>
         t.path === path ? { ...t, content, dirty: true } : t,
       );
