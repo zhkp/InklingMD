@@ -1617,6 +1617,8 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
             dirty: isStillDirty || receiptUntrusted,
             conflictPending: false,
             saving: false,
+            // 写成功即清掉该 tab 的失败痕迹（后台 tab 的 saveError 只落在自己身上）
+            saveError: null,
             // 写盘成功即说明文件已（重新）落在 savePath 上
             deletedOnDisk: false,
             lastSavedAt: now,
@@ -1664,18 +1666,18 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
           void get().refreshTree(parentDir(savePath));
         }
       } catch (e) {
+        const message = e instanceof Error ? e.message : String(e);
         set((current) => {
           const openTabs = current.openTabs.map((t) =>
-            t.path === activeTabPath ? { ...t, saving: false } : t,
+            // 失败信号必须落在 tab 自己身上：后台 tab 的失败不会写全局 saveError，
+            // 调度器若只看全局字段就会把「每次都失败」当成成功，退避永不生效
+            t.path === activeTabPath ? { ...t, saving: false, saveError: message } : t,
           );
           const activeTab = openTabs.find((t) => t.path === current.activeTabPath);
           return {
             openTabs,
             saving: activeTab?.saving ?? false,
-            saveError:
-              current.activeTabPath === activeTabPath
-                ? (e instanceof Error ? e.message : String(e))
-                : current.saveError,
+            saveError: current.activeTabPath === activeTabPath ? message : current.saveError,
           };
         });
       }

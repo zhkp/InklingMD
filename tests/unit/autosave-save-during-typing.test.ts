@@ -70,6 +70,56 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+describe("#364 后台 tab 失败必须退避（不能 2s 空转）", () => {
+  it("后台 tab 持续失败：16s 内尝试次数有上界（不是每 2s 一次）", async () => {
+    // 活跃 tab 干净、后台 tab 一直失败：全局 saveError 不会被写，
+    // 调度器必须读 tab 自己的失败信号，否则会当成成功 → 永久 2s 重试
+    const B = "/w/bg.md";
+    useWorkspace.setState({
+      openTabs: [
+        tab({ path: DOC, dirty: false, content: "clean" }),
+        tab({ path: B, dirty: true, content: "bg" }),
+      ],
+      activeTabPath: DOC,
+      currentFile: DOC,
+      dirty: false,
+      saveError: null,
+      // 真实 store 的 saveTab **吞掉**异常、只把失败写回 tab 自身（不抛）
+      saveTab: vi.fn(async () => {
+        useWorkspace.setState((state) => ({
+          openTabs: state.openTabs.map((t) =>
+            t.path === B ? { ...t, saving: false, dirty: true, saveError: "boom" } : t,
+          ),
+        }));
+      }) as never,
+    } as never);
+
+    const { rerender } = renderHook(() => useAutoSave());
+    rerender();
+
+    // 第一次在 2s 触发；失败后必须退避到 4s —— 3s 处不应有第二次
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2_000);
+    });
+    const callsOf = () =>
+      (useWorkspace.getState().saveTab as unknown as { mock: { calls: unknown[] } }).mock.calls
+        .length;
+    expect(callsOf()).toBe(1);
+    // 失败信号必须落在 tab 自身（否则后台失败对用户完全不可见）
+    expect(useWorkspace.getState().openTabs.find((t) => t.path === B)?.saveError).toBe("boom");
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3_900); // t=5.9s：4s 退避窗口未到
+    });
+    expect(callsOf()).toBe(1);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(200); // t=6.1s：4s 退避到点
+    });
+    expect(callsOf()).toBe(2);
+  });
+});
+
 describe("#364 调度键与「保存期间继续输入」", () => {
   it("dirty 恒为 1、只有 rev 变化时，防抖必须被重置（删掉 rev 会红）", async () => {
     const saveTabMock = vi.fn(async () => undefined);

@@ -101,7 +101,7 @@ export function useAutoSave() {
           if (tab.conflictPending || tab.deletedOnDisk) return; // 交给用户处理，不空转
           // 只有**真失败**才升级退避：成功但保存期间又有输入（仍 dirty）时保持 2s 基线，
           // 否则连续打字会把该 path 的自动保存一路放大到 60s
-          if (useWorkspace.getState().saveError) {
+          if (tab.saveError) {
             failCountRef.current.set(path, Math.min((failCountRef.current.get(path) ?? 0) + 1, 6));
           }
           setRetryRevision((revision) => revision + 1);

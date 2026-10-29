@@ -91,6 +91,30 @@ describe("pathRevs（#364）", () => {
     expect(pathRevs.has(A)).toBe(false);
   });
 
+  it("批量关闭（closeAll / closeOthers / closeToRight）同样清 rev，保留的 path 不动", () => {
+    const C = "/w/c.md";
+    useWorkspace.setState({
+      openTabs: [tab(A), tab(B), tab(C)],
+      activeTabPath: A,
+    } as never);
+    useWorkspace.getState().setContentFor(A, "a1");
+    useWorkspace.getState().setContentFor(B, "b1");
+    useWorkspace.getState().setContentFor(C, "c1");
+    expect(getPathRev(A)).toBe(1);
+
+    useWorkspace.getState().closeToRight(B);
+    expect(pathRevs.has(C)).toBe(false);
+    expect(pathRevs.has(A)).toBe(true);
+    expect(pathRevs.has(B)).toBe(true);
+
+    useWorkspace.getState().closeOthers(B);
+    expect(pathRevs.has(A)).toBe(false);
+    expect(pathRevs.has(B)).toBe(true);
+
+    useWorkspace.getState().closeAll();
+    expect(pathRevs.size).toBe(0);
+  });
+
   it("关闭 tab → key 消失", () => {
     useWorkspace.getState().setContent("内容");
     expect(pathRevs.has(A)).toBe(true);

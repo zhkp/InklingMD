@@ -155,15 +155,19 @@ describe("useAutoSave hook（#364 按 path 独立防抖）", () => {
     const saveTabMock = vi.fn(async (path: string) => {
       if (path === "/docs/a.md") {
         useWorkspace.setState((state) => ({
-          openTabs: state.openTabs.map((t) => (t.path === path ? { ...t, dirty: true } : t)),
+          // 失败信号落在 tab 自己身上（后台 tab 不会写全局 saveError）
+          openTabs: state.openTabs.map((t) =>
+            t.path === path ? { ...t, dirty: true, saveError: "boom" } : t,
+          ),
           dirty: true,
-          // 失败必须有可观测信号：调度器只在 saveError 非空时升级退避
           saveError: "boom",
         }));
         return;
       }
       useWorkspace.setState((state) => ({
-        openTabs: state.openTabs.map((t) => (t.path === path ? { ...t, dirty: false } : t)),
+        openTabs: state.openTabs.map((t) =>
+          t.path === path ? { ...t, dirty: false, saveError: null } : t,
+        ),
         dirty: false,
         saveError: null,
       }));
