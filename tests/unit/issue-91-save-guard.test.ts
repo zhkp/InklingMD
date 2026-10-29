@@ -54,17 +54,18 @@ describe("Issue #91: Save re-entrancy guard and exception handling", () => {
     const savePromise1 = useWorkspace.getState().saveCurrent();
     expect(useWorkspace.getState().saving).toBe(true);
 
-    // 在保存未完成时发起第二次保存
+    // 在保存未完成时发起第二次保存：#364 的「意图升级」会等第一次落定再判断，
+    // 若期间没有新编辑则不再重复写盘（调用点不会出现未捕获 rejection）
     const savePromise2 = useWorkspace.getState().saveCurrent();
-
-    // 第二次应该被直接拦截返回，不会再次调用 writeTextFile
-    await savePromise2;
     expect(vi.mocked(fs.writeTextFile)).toHaveBeenCalledTimes(1);
 
     // 完成第一次写入
     resolveWrite();
     await savePromise1;
+    await savePromise2;
 
+    // 第二次没有再写一次盘（第一次 adopt 后 tab 已干净）
+    expect(vi.mocked(fs.writeTextFile)).toHaveBeenCalledTimes(1);
     expect(useWorkspace.getState().saving).toBe(false);
     expect(useWorkspace.getState().saveError).toBeNull();
   });

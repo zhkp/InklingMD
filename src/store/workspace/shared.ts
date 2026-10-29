@@ -196,6 +196,49 @@ export const settledPathOfRequest = new WeakMap<Promise<DocumentSnapshot>, strin
 export const pathLocks = new Map<string, Promise<void>>();
 
 /**
+ * 每 path 的「内容版本 + 最后编辑时间」（#364）。
+ *
+ * 自动保存的订阅键必须能区分「又编辑了一次」，只订阅 `dirty` 布尔做不到：
+ * 保存完成后若保存期间有新输入，tab 仍是 dirty → 派生集合不变 → effect 不重跑 →
+ * 该 path 再也不会排下一次保存；同一 path 继续编辑也不会重置 2s 防抖。
+ *
+ * 三条规则（评审已确认，改动请同步更新用例 `autosave-rev.test.ts`）：
+ * 1. **唯一 bump 点**是内容真正变化的入口（`setContent` / `setContentFor`）；
+ * 2. `closeTab` 删除、`onFileRenamed` 迁移（不是删除，否则 rename 后订阅键回退）；
+ * 3. 保存成功后**不重置**——rev 只增不减，删掉或归零都会让订阅键回退。
+ */
+export const pathRevs = new Map<string, { contentRev: number; lastEditAt: number }>();
+
+/** 内容真正变化时调用（不要用于保存成功 / 切 tab / 恢复） */
+export function bumpPathRev(path: string): void {
+  const prev = pathRevs.get(path);
+  pathRevs.set(path, {
+    contentRev: (prev?.contentRev ?? 0) + 1,
+    lastEditAt: Date.now(),
+  });
+}
+
+/** 订阅键与 `D_old` 用的读取口径：无条目按 0，不要 `!` 断言 */
+export function getPathRev(path: string): number {
+  return pathRevs.get(path)?.contentRev ?? 0;
+}
+
+/** 关闭 tab：条目消失（订阅键随之移除，effect 会重跑） */
+export function dropPathRev(path: string): void {
+  pathRevs.delete(path);
+}
+
+/** 改名 / 移动：把条目搬到新路径（保留 rev 与 lastEditAt） */
+export function rebasePathRevs(from: string, to: string): void {
+  for (const [path, rev] of [...pathRevs]) {
+    const nextPath = rebasePathPrefix(path, from, to);
+    if (nextPath === path) continue;
+    pathRevs.delete(path);
+    pathRevs.set(nextPath, rev);
+  }
+}
+
+/**
  * 在 path 锁内串行执行 `run`。
  *
  * 锁只表达「串行」，不传播错误：前一笔失败也必须放行后一笔（否则该 path 的

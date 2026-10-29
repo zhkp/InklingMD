@@ -2,19 +2,28 @@ import { act, renderHook } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { OpenTab } from "../../src/store/workspace";
 
-const { onCloseRequestedMock, destroyMock, askMock, flushMock } = vi.hoisted(() => ({
+const { onCloseRequestedMock, destroyMock, messageMock, flushMock } = vi.hoisted(() => ({
   onCloseRequestedMock: vi.fn(),
   destroyMock: vi.fn(),
-  askMock: vi.fn(),
+  messageMock: vi.fn(),
   flushMock: vi.fn(),
 }));
 vi.mock("@tauri-apps/api/core", () => ({ isTauri: () => true }));
 vi.mock("@tauri-apps/api/window", () => ({
   getCurrentWindow: () => ({ onCloseRequested: onCloseRequestedMock, destroy: destroyMock }),
 }));
-vi.mock("@tauri-apps/plugin-dialog", () => ({ ask: askMock }));
+vi.mock("@tauri-apps/plugin-dialog", () => ({ message: messageMock, ask: vi.fn() }));
 vi.mock("../../src/components/Editor/markdown-publisher", () => ({
   flushAllMarkdownPublishers: flushMock,
+}));
+// 退出/会话底座在单测里不写真实 app data 目录
+vi.mock("../../src/lib/exit-session", () => ({
+  flushAllDrafts: vi.fn(async () => undefined),
+  hasRecoverableDraft: () => false,
+  markCleanExit: vi.fn(async () => true),
+  markUncleanExit: vi.fn(async () => true),
+  journalHealth: "healthy",
+  lastDraftWriteOk: new Map(),
 }));
 
 import { useExitHandler } from "../../src/lib/useExitHandler";
@@ -22,6 +31,10 @@ import { useWorkspace } from "../../src/store/workspace";
 
 type CloseHandler = (event: { preventDefault: () => void }) => Promise<void>;
 let closeHandler: CloseHandler;
+
+const RETRY = "重试保存";
+const DISCARD = "放弃并退出";
+const CANCEL = "取消退出";
 
 function tab(path: string): OpenTab {
   return {
@@ -45,14 +58,15 @@ function installState(tabs = [tab("/one.md"), tab("/two.md")]) {
       dirty: target.dirty,
     });
   });
-  const saveCurrent = vi.fn(async () => {
-    const path = useWorkspace.getState().activeTabPath;
-    useWorkspace.setState((state) => ({
-      openTabs: state.openTabs.map((item) =>
+  /** 按 path 保存：默认成功并清 dirty（用 path 参数，不再依赖「活跃 tab」） */
+  const saveTab = vi.fn(async (path: string) => {
+    useWorkspace.setState((state) => {
+      const openTabs = state.openTabs.map((item) =>
         item.path === path ? { ...item, dirty: false } : item,
-      ),
-      dirty: false,
-    }));
+      );
+      const active = openTabs.find((item) => item.path === state.activeTabPath);
+      return { openTabs, dirty: active?.dirty ?? false };
+    });
   });
   useWorkspace.setState({
     openTabs: tabs,
@@ -61,9 +75,11 @@ function installState(tabs = [tab("/one.md"), tab("/two.md")]) {
     currentContent: tabs[0]?.content ?? "",
     dirty: tabs[0]?.dirty ?? false,
     switchTab,
-    saveCurrent,
+    saveTab,
+    waitForSaves: async () => undefined,
+    isSaveInFlight: () => false,
   });
-  return { switchTab, saveCurrent };
+  return { switchTab, saveTab };
 }
 
 describe("real window close handler", () => {
@@ -73,7 +89,7 @@ describe("real window close handler", () => {
       return vi.fn();
     });
     destroyMock.mockReset().mockResolvedValue(undefined);
-    askMock.mockReset().mockResolvedValue(false);
+    messageMock.mockReset().mockResolvedValue(CANCEL);
     flushMock.mockReset();
   });
 
@@ -83,65 +99,98 @@ describe("real window close handler", () => {
   }
 
   it("flushes and saves every dirty tab before destroying the window", async () => {
-    const { saveCurrent } = installState();
+    const { saveTab } = installState();
     await mount();
     const preventDefault = vi.fn();
     await act(() => closeHandler({ preventDefault }));
+
     expect(preventDefault).toHaveBeenCalled();
     expect(flushMock).toHaveBeenCalled();
-    expect(saveCurrent).toHaveBeenCalledTimes(2);
+    expect(saveTab).toHaveBeenCalledTimes(2);
+    expect(saveTab).toHaveBeenCalledWith("/one.md", { interactive: true });
+    expect(saveTab).toHaveBeenCalledWith("/two.md", { interactive: true });
     expect(useWorkspace.getState().openTabs.every((item) => !item.dirty)).toBe(true);
     expect(destroyMock).toHaveBeenCalledTimes(1);
   });
 
-  it("continues with later tabs when one save rejects", async () => {
-    const { saveCurrent } = installState();
-    saveCurrent.mockRejectedValueOnce(new Error("first failed"));
-    askMock.mockResolvedValue(true);
+  it("offers 重试/放弃/取消 when a save rejects, and still exits on 放弃", async () => {
+    const { saveTab } = installState();
+    saveTab.mockRejectedValueOnce(new Error("first failed"));
+    messageMock.mockResolvedValue(DISCARD);
     await mount();
     await act(() => closeHandler({ preventDefault: vi.fn() }));
-    expect(saveCurrent).toHaveBeenCalledTimes(2);
-    expect(askMock).toHaveBeenCalledTimes(1);
+
+    // 第一个 tab 失败 + 第二个成功 → 仍有未解决项 → 三选一
+    expect(messageMock).toHaveBeenCalledWith(
+      expect.stringContaining("未能保存"),
+      expect.objectContaining({ buttons: expect.objectContaining({ no: DISCARD }) }),
+    );
     expect(destroyMock).toHaveBeenCalledTimes(1);
   });
 
-  it("asks before discarding remaining changes and restores the original tab on cancel", async () => {
-    const { switchTab, saveCurrent } = installState();
-    saveCurrent.mockResolvedValue(undefined);
+  it("取消退出时恢复原活跃 tab 且不 destroy", async () => {
+    const { switchTab } = installState();
+    // saveTab 成功但 tab 仍 dirty（模拟「保存写不进磁盘」）
+    useWorkspace.setState({ saveTab: vi.fn(async () => undefined) });
+    messageMock.mockResolvedValue(CANCEL);
     await mount();
     await act(() => closeHandler({ preventDefault: vi.fn() }));
-    expect(askMock).toHaveBeenCalledWith(expect.stringContaining("未保存"), expect.any(Object));
+
+    expect(messageMock).toHaveBeenCalledWith(
+      expect.stringContaining("未能保存"),
+      expect.any(Object),
+    );
     expect(switchTab).toHaveBeenLastCalledWith("/one.md");
     expect(destroyMock).not.toHaveBeenCalled();
   });
 
-  it("fails safe when the confirmation dialog throws", async () => {
-    const { saveCurrent } = installState();
-    saveCurrent.mockResolvedValue(undefined);
-    askMock.mockRejectedValue(new Error("dialog unavailable"));
+  it("第 3 轮仍失败时不再询问，直接进「放弃」分支", async () => {
+    installState();
+    useWorkspace.setState({ saveTab: vi.fn(async () => undefined) });
+    // 前两次都选「重试」，第三次不再询问（attempt > 2）→ 直接走放弃确认
+    messageMock
+      .mockResolvedValueOnce(RETRY)
+      .mockResolvedValueOnce(RETRY)
+      .mockResolvedValue(DISCARD);
     await mount();
     await act(() => closeHandler({ preventDefault: vi.fn() }));
+
+    const asked = messageMock.mock.calls.filter((c) => String(c[0]).includes("未能保存"));
+    expect(asked).toHaveLength(2);
+    expect(destroyMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("确认对话框抛错时按取消处理，绝不 destroy", async () => {
+    installState();
+    useWorkspace.setState({ saveTab: vi.fn(async () => undefined) });
+    messageMock.mockRejectedValue(new Error("dialog unavailable"));
+    await mount();
+    await act(() => closeHandler({ preventDefault: vi.fn() }));
+
     expect(destroyMock).not.toHaveBeenCalled();
     expect(useWorkspace.getState().activeTabPath).toBe("/one.md");
   });
 
   it("ignores a second close request while the first save is pending", async () => {
-    const { saveCurrent } = installState([tab("/one.md")]);
+    const { saveTab } = installState([tab("/one.md")]);
     let release!: () => void;
-    saveCurrent.mockImplementationOnce(() => new Promise<void>((resolve) => {
-      release = () => {
-        useWorkspace.setState({
-          openTabs: [{ ...useWorkspace.getState().openTabs[0], dirty: false }],
-          dirty: false,
-        });
-        resolve();
-      };
-    }));
+    saveTab.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          release = () => {
+            useWorkspace.setState({
+              openTabs: [{ ...useWorkspace.getState().openTabs[0], dirty: false }],
+              dirty: false,
+            });
+            resolve();
+          };
+        }),
+    );
     await mount();
     const first = closeHandler({ preventDefault: vi.fn() });
-    await vi.waitFor(() => expect(saveCurrent).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(saveTab).toHaveBeenCalledTimes(1));
     await closeHandler({ preventDefault: vi.fn() });
-    expect(saveCurrent).toHaveBeenCalledTimes(1);
+    expect(saveTab).toHaveBeenCalledTimes(1);
     expect(destroyMock).not.toHaveBeenCalled();
     release();
     await first;
