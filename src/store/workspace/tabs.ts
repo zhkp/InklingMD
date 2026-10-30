@@ -690,8 +690,9 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
         // #362：一次成对读取——内容与 stat 同源，不允许多打一次 fileMtime（R2）
         const snapshot = await readDocument(filePath);
         // #365：用户明确「丢弃本地修改，重载磁盘」→ 草稿里那份内容已被丢弃，
-        // 不清掉会让恢复面板给出「可恢复」的假提示
-        void clearDraft(filePath);
+        // 不清掉会让恢复面板给出「可恢复」的假提示。这里 await：重载是低频动作，
+        // 而「重载完草稿还在」会让 5b 立刻给出过期的恢复提示
+        await clearDraft(filePath);
         set((current) => {
           const openTabs = current.openTabs.map((t) =>
             t.path === filePath
