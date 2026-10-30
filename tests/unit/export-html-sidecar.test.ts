@@ -4,7 +4,11 @@
  * 为什么单独锁这一条：浏览器 E2E 跑的是 `isTauri() === false`，只能覆盖 inline 模式；
  * 而用户实际运行的桌面端，大资源是旁挂到 `<name>_assets/` 的——目录建在哪、相对地址
  * 锚在谁身上、写失败怎么告知、取消保存会不会留下半个文件，全在这一支里。
- * 这些都是纯副作用，用注入的 fs/对话框替身断言调用参数即可（E2E 负责真实字节）。
+ *
+ * 本文件用注入的 fs/对话框替身断言**调用参数**与分支组合，不产生真实字节；
+ * 真实文件系统上的目录布局、编码地址与落盘字节由
+ * `tests/unit/export-html-real-fs.test.ts` 覆盖（Node fs 直连）。
+ * E2E 只覆盖浏览器 inline 模式，**不覆盖 sidecar**。
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { editorViewCtx } from "@milkdown/kit/core";

@@ -447,6 +447,67 @@ describe("#372 预算与降级：失败要可见，不能伪装成导出成功",
     expect(p.warnings[0].reason).toContain("/Users/alice/secret");
   });
 
+  it("解析抛错 + POSIX 绝对引用：key 为空时占位图也只写文件名", async () => {
+    // classifyResource 把没有 scheme 的 POSIX 绝对路径归为 relative，解析失败时
+    // key 为空；若直接用 ref 当 label，`/Users/alice/...` 会随产物外泄（复审阻塞 2）
+    const p = new ExportResourceProcessor({
+      mode: "inline",
+      documentPath: DOC,
+      appOrigin: APP_ORIGIN,
+      readFile: makeFs({}),
+      resolveRelative: async () => {
+        throw new Error("IPC failed");
+      },
+    });
+    const raw = "/Users/alice/private/x.png";
+    const r = await p.resolveRef(raw);
+    expect(r.ok).toBe(false);
+    const placeholder = decodeURIComponent(r.value);
+    expect(placeholder).toContain("x.png");
+    expect(placeholder, "占位图不得带用户目录结构").not.toContain("Users/alice");
+    expect(placeholder).not.toContain(raw);
+    // 完整引用与错误细节只留在本机告警
+    expect(p.warnings).toHaveLength(1);
+    expect(p.warnings[0].ref).toBe(raw);
+    expect(p.warnings[0].reason).toContain("IPC failed");
+  });
+
+  it("解析返回空串（!absPath 分支）：POSIX 绝对引用同样只写文件名", async () => {
+    const p = new ExportResourceProcessor({
+      mode: "inline",
+      documentPath: DOC,
+      appOrigin: APP_ORIGIN,
+      readFile: makeFs({}),
+      resolveRelative: async () => "",
+    });
+    const raw = "/Users/alice/private/y.png";
+    const r = await p.resolveRef(raw);
+    expect(r.ok).toBe(false);
+    const placeholder = decodeURIComponent(r.value);
+    expect(placeholder).toContain("y.png");
+    expect(placeholder).not.toContain("Users/alice");
+    expect(p.warnings).toHaveLength(1);
+    expect(p.warnings[0].ref).toBe(raw);
+    expect(p.warnings[0].reason).toBe("无法解析为本地路径");
+  });
+
+  it("百分号编码的绝对引用也不会漏：先解码再取基名", async () => {
+    const p = new ExportResourceProcessor({
+      mode: "inline",
+      documentPath: DOC,
+      appOrigin: APP_ORIGIN,
+      readFile: makeFs({}),
+      resolveRelative: async () => {
+        throw new Error("IPC failed");
+      },
+    });
+    const raw = "%2FUsers%2Falice%2Fprivate%2Fz.png";
+    const placeholder = decodeURIComponent((await p.resolveRef(raw)).value);
+    expect(placeholder).toContain("z.png");
+    expect(placeholder).not.toContain("Users/alice");
+    expect(placeholder).not.toContain("%2FUsers");
+  });
+
   it("formatResourceWarnings 汇总条数并逐条列出", () => {
     const text = formatResourceWarnings(["a：读取失败", "b：超时"]);
     expect(text).toContain("2 处内容未能完整导出");
@@ -518,6 +579,49 @@ describe("#372 CSS 通道：字体/背景 url() 与 @import", () => {
     const css = `.bg { background: url("https://cdn.example.com/x.png"); }`;
     const p = processor({});
     expect(await p.processCss(css)).toContain("https://cdn.example.com/x.png");
+  });
+
+  it("tauri 自定义协议 origin 下，协议相对 url() 不得被展开成 tauri:// 死链", async () => {
+    // macOS/Linux 打包后 appOrigin 是 tauri://localhost/index.html。
+    // `new URL("//cdn…", base)` 会按非特殊 scheme 继承 base scheme，
+    // 产出 `tauri://cdn.example.com/…`——浏览器/系统都不认识，且会被判为
+    // remote 后静默保留在产物里（复审阻塞 1）。
+    const fetchUrl = vi.fn(async () => PNG_BYTES);
+    const p = new ExportResourceProcessor({
+      mode: "inline",
+      documentPath: DOC,
+      appOrigin: "tauri://localhost/index.html",
+      readFile: makeFs({}),
+      resolveRelative: fakeResolveRelative,
+      fetchUrl,
+    });
+    const css =
+      `.bg { background: url(//cdn.example.com/x.png); }\n` +
+      `@font-face { font-family: R; src: url(//cdn.example.com/x.woff2) format("woff2"); }`;
+    const out = await p.processCss(css);
+    expect(out).toContain('url("//cdn.example.com/x.png")');
+    expect(out).toContain('url("//cdn.example.com/x.woff2")');
+    expect(out, "协议相对地址不能变成应用私有 scheme").not.toContain("tauri://");
+    expect(fetchUrl, "远程资源不得发 fetch").not.toHaveBeenCalled();
+    expect(p.warnings).toEqual([]);
+    // DOM <img> 通道本来就直接 resolve(raw)；两个通道口径必须一致
+    expect(await p.resolve("//cdn.example.com/x.png")).toBe("//cdn.example.com/x.png");
+  });
+
+  it("tauri 自定义协议 origin 下，无 scheme 的相对 url() 仍按应用 origin 展开", async () => {
+    // 本次修复只跳过协议相对/带 scheme 的地址，不能把「主题字体相对路径」一起误伤
+    const fetchUrl = vi.fn(async () => enc.encode("wOF2"));
+    const p = new ExportResourceProcessor({
+      mode: "inline",
+      documentPath: DOC,
+      appOrigin: "tauri://localhost/index.html",
+      readFile: makeFs({}),
+      resolveRelative: fakeResolveRelative,
+      fetchUrl,
+    });
+    const out = await p.processCss(`@font-face { src: url(assets/katex.woff2) format("woff2"); }`);
+    expect(out).toContain('url("data:font/woff2;base64,');
+    expect(fetchUrl).toHaveBeenCalledWith("tauri://localhost/assets/katex.woff2");
   });
 
   it('引号内的括号不被当成 url() 的右括号（url("chart (1).png") 能正常内联）', async () => {
@@ -891,5 +995,18 @@ describe("#372 findRuntimeUrls：产物兜底探针", () => {
     expect(findRuntimeUrls("<img src=asset://localhost/tail.png>")).toEqual([
       "asset://localhost/tail.png",
     ]);
+  });
+
+  it("打包后应用自身 origin 与 tauri:// 死链同样报出", () => {
+    expect(findRuntimeUrls(`<img src="tauri://localhost/assets/a.png">`)).toEqual([
+      "tauri://localhost/assets/a.png",
+    ]);
+    expect(findRuntimeUrls(`<img src="http://tauri.localhost/assets/a.png">`)).toEqual([
+      "http://tauri.localhost/assets/a.png",
+    ]);
+    // 协议相对地址被错误展开后的形态（tauri://cdn.example.com/…）也必须被兜住
+    expect(
+      findRuntimeUrls(`<style>.x{background:url(tauri://cdn.example.com/x.png)}</style>`),
+    ).toEqual(["tauri://cdn.example.com/x.png"]);
   });
 });

@@ -1922,8 +1922,9 @@ pub async fn read_binary_file(app: tauri::AppHandle, file_path: String) -> Resul
 ///
 /// 真实 `Scope` 的放行/拒绝语义需要 `AppHandle`（`tauri::test` 特性会改变测试
 /// 二进制的动态链接，本机启动即 STATUS_ENTRYPOINT_NOT_FOUND），故这里用谓词注入
-/// 验证**判定顺序**；「复用同一个 asset Scope」由生产调用点的一行代码保证，
-/// 桌面端一次真实导出即为该边界的验证（见 PR 证据边界说明）。
+/// 验证**判定顺序**；「复用同一个 asset Scope」由生产调用点的一行代码保证。
+/// 该 Scope 在真实桌面会话中的放行/拒绝**未在本机验证**（没有真机导出记录），
+/// 不要把导出链路当成这条安全边界的已验证证据。
 fn check_binary_read_target(
     file_path: &str,
     is_allowed: impl FnOnce(&str) -> bool,

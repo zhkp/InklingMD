@@ -38,8 +38,21 @@ export type ResourceRef =
 /** convertFileSrc 的两种形态（见 @tauri-apps/api/core） */
 const ASSET_URL_FORMS = [/^asset:\/\/localhost\/(.*)$/i, /^https?:\/\/asset\.localhost\/(.*)$/i];
 
-/** 运行时 asset 地址的特征串：最终产物里不允许残留（兜底清扫用） */
-export const RUNTIME_URL_MARKERS = ["asset://localhost", "http://asset.localhost", "https://asset.localhost"];
+/**
+ * 运行时地址的特征串：最终产物里不允许残留（兜底清扫用）。
+ *
+ * `tauri://` 裸前缀不只对应打包后前端自己的 origin（macOS/Linux 为
+ * `tauri://localhost`），还要兜住「协议相对地址被错误展开成 `tauri://cdn.example.com/…`」
+ * 这类产物——没有这个标记，导出的坏地址会静默通过。
+ */
+export const RUNTIME_URL_MARKERS = [
+  "asset://localhost",
+  "http://asset.localhost",
+  "https://asset.localhost",
+  "tauri://",
+  "http://tauri.localhost",
+  "https://tauri.localhost",
+];
 
 /** decodeURIComponent 遇到裸 `%` 会抛；失败时按原串使用（路径里确有未编码 % 的情况） */
 function safeDecode(s: string): string {
@@ -471,12 +484,16 @@ export class ExportResourceProcessor {
     // 占位图会被写进 HTML/PNG/剪贴板并随导出分享出去：只能出现**文件名**。
     // asset 地址解码后就是用户的完整目录结构，Rust 的读取错误串里也带着绝对路径。
     // 完整路径与原因保留在 warnings 里，仅在本机弹窗展示。
-    const label = key ? baseNameOf(key) : ref;
-    const short = key ? baseNameOf(key) : "";
+    //
+    // key 为空（路径解析抛错/返回空）时 ref 本身可能就是绝对路径（POSIX 绝对路径
+    // 没有 scheme，classifyResource 归为 relative），因此同样只取基名。
+    const short = key
+      ? baseNameOf(key)
+      : baseNameOf(safeDecode(stripQueryHash(ref)));
     const safeReason = key
       ? reason.split(key).join(short).split(key.replace(/\\/g, "/")).join(short)
-      : reason;
-    const entry = { value: missingResourcePlaceholder(label, safeReason), ok: false };
+      : reason.split(ref).join(short);
+    const entry = { value: missingResourcePlaceholder(short, safeReason), ok: false };
     // 同一资源被引用多次只告警/读取一次；key 为空时无从缓存（下次仍会重新尝试）
     if (key) this.resolved.set(key, entry);
     return entry;
@@ -529,7 +546,11 @@ export class ExportResourceProcessor {
       if (comments.some(([s, e]) => hit.start >= s && hit.start < e)) continue;
       const raw = hit.value.trim();
       if (raw.startsWith("#")) continue;
-      const absolute = this.absolutize(raw);
+      // 只展开**无 scheme 的相对引用**。协议相对（`//host/…`）与已带 scheme 的地址
+      // 必须原样交给 resolveRef：`new URL("//cdn/…", "tauri://localhost/index.html")`
+      // 会按非特殊 scheme 的规则继承 base scheme，产出 `tauri://cdn/…` 这种
+      // 任何浏览器都不认识的死链（且被判为 remote 后静默保留）。
+      const absolute = classifyResource(raw).kind === "relative" ? this.absolutize(raw) : raw;
       if (this.skipImport(css, hit.start, raw, absolute)) continue;
       const { value, ok } = await this.resolveRef(absolute);
       found.push({ start: hit.start, end: hit.end, value: `url("${value}")`, ok });
