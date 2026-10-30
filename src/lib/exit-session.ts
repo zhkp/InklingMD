@@ -11,7 +11,7 @@ import { isTauri } from "@tauri-apps/api/core";
 import { appDataDir } from "@tauri-apps/api/path";
 import { writeTextFile } from "./fs";
 import { useWorkspace } from "../store/workspace";
-import { currentWindowLabel, flushJournal, writeDraftNow } from "./draft-journal";
+import { cancelPendingDrafts, currentWindowLabel, writeDraftNow } from "./draft-journal";
 
 export type JournalHealth = "healthy" | "degraded";
 
@@ -38,7 +38,7 @@ export async function flushAllDrafts(
 ): Promise<void> {
   if (!isTauri()) return;
   // 先取消挂着的防抖定时器，避免同一次输入写两遍
-  await flushJournal();
+  cancelPendingDrafts();
   const { openTabs } = useWorkspace.getState();
   const dirty = openTabs.filter((tab) => tab.dirty);
   if (dirty.length === 0) return;
@@ -81,7 +81,10 @@ async function recoveryDir(): Promise<string> {
   return `${base.replace(/[\\/]+$/, "")}${sep}recovery${sep}${currentWindowLabel()}`;
 }
 
-async function writeSessionMarker(cleanExit: boolean): Promise<boolean> {
+async function writeSessionMarker(
+  cleanExit: boolean,
+  durability: "sync" | "none" = "none",
+): Promise<boolean> {
   if (!isTauri()) return true; // 浏览器 / E2E：没有 recovery 目录，视为成功
   let file: string;
   try {
@@ -100,7 +103,7 @@ async function writeSessionMarker(cleanExit: boolean): Promise<boolean> {
         cleanExit,
         savedAt: Date.now(),
       }),
-      { createParents: true, durability: "none" },
+      { createParents: true, durability },
     );
     return true;
   } catch {
@@ -132,5 +135,6 @@ export async function markCleanExit(): Promise<boolean> {
  * 写失败时调用方**禁止 destroy**——否则内容与标记都没落盘。
  */
 export async function markUncleanExit(): Promise<boolean> {
-  return writeSessionMarker(false);
+  // 这条标记的唯一作用就是「上次异常退出，请恢复」；丢了等价于没有恢复提示 → 必须落盘
+  return writeSessionMarker(false, "sync");
 }

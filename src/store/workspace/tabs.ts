@@ -689,6 +689,9 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
         // 直接读磁盘，绕过 tab 缓存（openFile 对已打开 tab 复用缓存，无法真正重载）。
         // #362：一次成对读取——内容与 stat 同源，不允许多打一次 fileMtime（R2）
         const snapshot = await readDocument(filePath);
+        // #365：用户明确「丢弃本地修改，重载磁盘」→ 草稿里那份内容已被丢弃，
+        // 不清掉会让恢复面板给出「可恢复」的假提示
+        void clearDraft(filePath);
         set((current) => {
           const openTabs = current.openTabs.map((t) =>
             t.path === filePath
@@ -1079,8 +1082,10 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
       // #364：内容真正变化才 bump（唯一 bump 点之一）；保存成功不重置
       if (activeTabPath) {
         bumpPathRev(activeTabPath);
-        // #365：编辑即排一次草稿落盘（1.2s 防抖）——崩溃 / 被 kill 后还能找回
-        scheduleDraft({ path: activeTabPath, isUntitled: false, content });
+        // #365：编辑即排一次草稿落盘（1.2s 防抖）——崩溃 / 被 kill 后还能找回。
+        // `isUntitled` 必须取 tab 的真实值：写死 false 会让无标题草稿被当成「有路径的文档」恢复
+        const activeTab = openTabs.find((t) => t.path === activeTabPath);
+        scheduleDraft({ path: activeTabPath, isUntitled: !!activeTab?.isUntitled, content });
       }
       // 更新活跃 tab 的内容与 dirty
       if (activeTabPath) {

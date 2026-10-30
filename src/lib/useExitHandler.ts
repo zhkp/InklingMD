@@ -48,7 +48,7 @@ export function useExitHandler(): void {
           try {
             // ①② 先把编辑器内容与 draft 落盘
             flushAllMarkdownPublishers();
-            await flushAllDrafts();
+            await flushAllDrafts({ durability: "sync" });
 
             let attempt = 0;
             // ③④ 线性循环：每轮只做一件事
@@ -93,7 +93,7 @@ export function useExitHandler(): void {
                 if (originalActivePath) useWorkspace.getState().switchTab(originalActivePath);
                 return;
               }
-              await flushAllDrafts();
+              await flushAllDrafts({ durability: "sync" });
               await useWorkspace.getState().waitForSaves();
               if (!(await markUncleanExit())) {
                 // 连「记录放弃」都写不进去：不允许 destroy，否则下次启动既看不到也恢复不了
