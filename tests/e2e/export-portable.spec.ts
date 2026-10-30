@@ -9,7 +9,8 @@
 //
 // 证据边界：本 harness 跑浏览器构建（`isTauri() === false`），因此
 // HTML 导出走 `inline` 模式；桌面端 `sidecar` 模式的落盘布局由
-// `tests/lib/export-resources.test.ts` + `tests/unit/export-html-sidecar.test.ts` 覆盖。
+// `tests/unit/export-html-real-fs.test.ts`（Node fs 真实落盘）覆盖，
+// 分支组合/调用参数由 `tests/unit/export-html-sidecar.test.ts` 覆盖。
 // 同理，浏览器下 `resolveImageSrc` 原样返回相对路径，`asset://` / `asset.localhost`
 // 的**改写本身**只有单测覆盖（`tests/lib/export-resources.test.ts` 钉了两种形式与
 // 非法百分号路径）；本文件 E2E 覆盖的是同一处理器的真实读取通道：真实 HTTP 字节 →

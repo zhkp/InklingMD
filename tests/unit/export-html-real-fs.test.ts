@@ -11,9 +11,9 @@
  *   都在真实磁盘上验证。
  *
  * 证据边界：Tauri IPC 命令本体（Rust `write_binary_file` / `read_binary_file` 的
- * asset scope 校验、兜底上限、fsync 细节，以及 path 插件的 Rust 实现）不在本测试内
- * ——那部分由 Rust 单测与真机导出负责。本测试证明的是「原生路径语义下，导出的
- * 磁盘布局与相对链接正确」。
+ * asset scope 校验、兜底上限、fsync 细节，以及 path 插件的 Rust 实现）不在本测试内。
+ * Rust 单测只覆盖 `check_binary_read_target` 的**判定顺序**，真实 Scope 与真机导出
+ * 均未验证。本测试证明的是「原生路径语义下，导出的磁盘布局与相对链接正确」。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
