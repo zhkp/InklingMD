@@ -26,6 +26,8 @@ export function useStartupRecovery(): void {
   useEffect(() => {
     if (!isTauri()) return;
     let cancelled = false;
+    /** 本次被恢复的 path：TTL 清理要放过它们 */
+    const restored: string[] = [];
 
     void (async () => {
       // 先取旧标记再写新标记：`beginSession()` 会把同一个文件覆盖成 cleanExit:false，
@@ -57,18 +59,22 @@ export function useStartupRecovery(): void {
           choice = LATER;
         }
 
-        if (!cancelled && choice === RECOVER) {
+        // 自定义按钮在不同平台可能回传按钮文字或 Yes/No（与 useExitHandler / tabs 一致）
+        if (!cancelled && (choice === RECOVER || choice === "Yes")) {
           // 恢复**不删**草稿：
           // ① `applyRecovery` 会跳过已打开的 path，删了就把那些内容彻底丢了；
           // ② 恢复出来的 tab 在下一次编辑前不会产生新草稿，此时崩溃等于没有副本。
-          // 草稿由「保存成功」或 TTL 清理负责收尾。
-          await applyRecovery(drafts);
-        } else if (!cancelled && choice === DISCARD) {
+          const { restoredPaths } = await applyRecovery(drafts);
+          restored.push(...restoredPaths);
+        } else if (!cancelled && (choice === DISCARD || choice === "No")) {
           await discardDrafts(drafts);
         }
       }
 
-      if (!cancelled) await cleanupExpiredDrafts();
+      // TTL 清理必须排除「刚被恢复」的草稿：它们可能已经很旧，但内容此刻只在编辑器里
+      if (!cancelled) await cleanupExpiredDrafts(Date.now(), undefined, {
+        exclude: new Set(restored),
+      });
     })();
 
     return () => {

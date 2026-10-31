@@ -159,7 +159,8 @@ describe("#365 恢复与丢弃", () => {
     const drafts = await listDrafts();
     const restored = await applyRecovery(drafts);
 
-    expect(restored).toBe(2);
+    expect(restored.restored).toBe(2);
+    expect(restored.restoredPaths).toEqual(["/w/a.md", "untitled-1"]);
     const state = useWorkspace.getState();
     expect(state.openTabs.map((t) => t.path)).toEqual(["/w/a.md", "untitled-1"]);
     expect(state.openTabs[0].content).toBe("崩溃前的内容");
@@ -184,7 +185,7 @@ describe("#365 恢复与丢弃", () => {
 
     const restored = await applyRecovery(await listDrafts());
 
-    expect(restored).toBe(0);
+    expect(restored.restored).toBe(0);
     expect(useWorkspace.getState().openTabs[0].content).toBe("当前编辑中");
   });
 
@@ -227,6 +228,36 @@ describe("#365 启动入口（useStartupRecovery）", () => {
     expect(useWorkspace.getState().openTabs[0].content).toBe("崩溃前");
     // 恢复出来的 tab 在下一次编辑前不会产生新草稿；此时崩溃就等于没有副本，
     // 所以草稿必须留到「保存成功」或 TTL 清理
+    expect(files.has(draftFile)).toBe(true);
+  });
+
+  it("恢复一份超过 TTL 的草稿后，收尾的 TTL 清理不能删它", async () => {
+    files.set(SESSION, JSON.stringify({ version: 1, cleanExit: false }));
+    // 8 天前写的草稿：正常会被 TTL 清掉，但用户刚恢复它，内容此刻只在编辑器里
+    const old = seedDraft("/w/old.md", {
+      content: "八天前的内容",
+      updatedAt: Date.now() - DRAFT_TTL_MS - 1_000,
+    });
+    messageMock.mockReset().mockResolvedValue("恢复");
+
+    const { renderHook, waitFor } = await import("@testing-library/react");
+    const { useStartupRecovery } = await import("../../src/lib/useStartupRecovery");
+    renderHook(() => useStartupRecovery());
+
+    await waitFor(() => expect(useWorkspace.getState().openTabs.length).toBe(1));
+    expect(files.has(old)).toBe(true);
+  });
+
+  it("平台回传 Yes / No 也要能走恢复 / 丢弃（自定义按钮的既有约定）", async () => {
+    files.set(SESSION, JSON.stringify({ version: 1, cleanExit: false }));
+    const draftFile = seedDraft("/w/a.md", { updatedAt: Date.now() });
+    messageMock.mockReset().mockResolvedValue("Yes");
+
+    const { renderHook, waitFor } = await import("@testing-library/react");
+    const { useStartupRecovery } = await import("../../src/lib/useStartupRecovery");
+    renderHook(() => useStartupRecovery());
+
+    await waitFor(() => expect(useWorkspace.getState().openTabs.length).toBe(1));
     expect(files.has(draftFile)).toBe(true);
   });
 

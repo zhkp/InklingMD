@@ -204,12 +204,14 @@ export async function discardDrafts(drafts: RecoverableDraft[]): Promise<number>
  * 崩溃前那份磁盘内容已经不可信，保存时会走「必须存在」的写盘并要求用户确认，
  * 不会静默覆盖用户在这期间对文件的修改。
  */
-export async function applyRecovery(drafts: RecoverableDraft[]): Promise<number> {
-  if (drafts.length === 0) return 0;
+export async function applyRecovery(
+  drafts: RecoverableDraft[],
+): Promise<{ restored: number; restoredPaths: string[] }> {
+  if (drafts.length === 0) return { restored: 0, restoredPaths: [] };
   const state = useWorkspace.getState();
   const existing = new Set(state.openTabs.map((t) => t.path));
   const candidates = drafts.filter((d) => !existing.has(d.tabPath));
-  if (candidates.length === 0) return 0;
+  if (candidates.length === 0) return { restored: 0, restoredPaths: [] };
 
   const { readDocument } = await import("./fs");
   const restored = [];
@@ -252,16 +254,31 @@ export async function applyRecovery(drafts: RecoverableDraft[]): Promise<number>
     currentContent: first.content,
     dirty: true,
   } as never);
-  return restored.length;
+  return {
+    restored: restored.length,
+    restoredPaths: restored.map((tab) => tab.path),
+  };
 }
 
-/** 只清「超过 TTL 且非 pinned」的草稿；返回删除条数 */
+/**
+ * 只清「超过 TTL 且非 pinned」的草稿；返回删除条数。
+ *
+ * `exclude` 里的 path 一律不删：刚被用户「恢复」的草稿可能已经很旧，但那份内容
+ * 现在只在编辑器里（下次编辑前不会写新草稿），删了等于一次崩溃就全丢。
+ */
 export async function cleanupExpiredDrafts(
   now = Date.now(),
   ttlMs = DRAFT_TTL_MS,
+  options: { exclude?: Set<string> } = {},
 ): Promise<number> {
   const drafts = await listDrafts();
-  const expired = drafts.filter((d) => !d.pinned && d.updatedAt > 0 && now - d.updatedAt > ttlMs);
+  const expired = drafts.filter(
+    (d) =>
+      !d.pinned &&
+      d.updatedAt > 0 &&
+      now - d.updatedAt > ttlMs &&
+      !options.exclude?.has(d.tabPath),
+  );
   if (expired.length === 0) return 0;
   return discardDrafts(expired);
 }
