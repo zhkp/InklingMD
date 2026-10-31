@@ -422,6 +422,213 @@ export function createSessionProbe() {
 export const INPUT_LANDING_RETRIES = 2;
 
 /**
+ * 源码模式连续输入采集（issue #379）。
+ *
+ * 与 runInputBurst 同范式（页面内 rAF + execCommand，避免 CDP 往返），
+ * 但落点换成 CodeMirror：`.cm-content` 会视口化，不能按整篇 textContent 判落地，
+ * 因此用**活动行**长度增长做假阴性守卫。
+ */
+export function runSourceInputBurst(opts: {
+  count: number;
+  text: string;
+}): Promise<{ sync: number[]; paint: number[]; inserted: number; allApplied: boolean }> {
+  const root = document.querySelector(
+    '[data-testid="source-mode-editor"]',
+  ) as HTMLElement | null;
+  const content = root?.querySelector(".cm-content") as HTMLElement | null;
+  if (!root || !content) throw new Error("perf: 未找到源码模式编辑器");
+  const activeLine = (): HTMLElement | null =>
+    root.querySelector(".cm-activeLine");
+  const before = (activeLine()?.textContent ?? "").length;
+  const sync: number[] = [];
+  const paint: number[] = [];
+  let allApplied = true;
+
+  const nextFrame = (): Promise<void> =>
+    new Promise<void>((r) => requestAnimationFrame(() => r()));
+
+  return (async () => {
+    for (let i = 0; i < opts.count; i += 1) {
+      await nextFrame();
+      const t0 = performance.now();
+      const applied = document.execCommand("insertText", false, opts.text);
+      const t1 = performance.now();
+      await nextFrame();
+      const t2 = performance.now();
+      if (!applied) allApplied = false;
+      sync.push(t1 - t0);
+      paint.push(t2 - t0);
+    }
+    const after = (activeLine()?.textContent ?? "").length;
+    return { sync, paint, inserted: after - before, allApplied };
+  })();
+}
+
+/**
+ * 安装归因探针（issue #379）。探针本身由生产代码里的 `perf-probe` 读取：
+ * 未安装时生产侧只有一次属性读取，不记录任何东西。
+ */
+export function installPerfProbe(): void {
+  (window as unknown as { __inklingPerfProbe?: unknown }).__inklingPerfProbe = {
+    enabled: true,
+    buckets: {},
+  };
+}
+
+export interface PerfProbeBuckets {
+  [name: string]: { count: number; totalMs: number; maxMs: number };
+}
+
+/** 读出归因桶；未安装时返回空对象（不伪造 0） */
+export function readPerfProbe(): PerfProbeBuckets {
+  const state = (window as unknown as {
+    __inklingPerfProbe?: { buckets?: PerfProbeBuckets };
+  }).__inklingPerfProbe;
+  return state?.buckets ?? {};
+}
+
+/**
+ * 等指定归因桶出现（Node 侧轮询）。
+ *
+ * 固定 waitForTimeout 不可靠：WYSIWYG 的发布防抖要等全文序列化（L 档可达秒级），
+ * 之后还有 300ms 统计防抖；同样的 700ms 在 M 档够、L 档不够。轮询到桶出现为止，
+ * 超时则按「未采集」返回（不伪造 0），调用方不用为采集延迟调整判定口径。
+ */
+export async function waitForProbeBuckets(
+  page: { evaluate: (fn: () => PerfProbeBuckets) => Promise<PerfProbeBuckets> },
+  names: readonly string[],
+  opts: { timeoutMs?: number; intervalMs?: number } = {},
+): Promise<PerfProbeBuckets> {
+  const timeoutMs = opts.timeoutMs ?? 4000;
+  const intervalMs = opts.intervalMs ?? 100;
+  const deadline = Date.now() + timeoutMs;
+  let buckets = await page.evaluate(readPerfProbe);
+  while (!names.every((name) => buckets[name]) && Date.now() < deadline) {
+    await new Promise<void>((resolve) => setTimeout(resolve, intervalMs));
+    buckets = await page.evaluate(readPerfProbe);
+  }
+  // 超时不能静默：缺桶会让归因表少一行，读者却以为「这项成本为 0/未发生」。
+  // 仍不算测量失败（场景主指标有效），按未采集处理并在输出里点名。
+  const missing = names.filter((name) => !buckets[name]);
+  if (missing.length > 0) {
+    console.warn(
+      `[perf] 归因桶等待 ${timeoutMs}ms 仍未出现：${missing.join(", ")}` +
+        "（按未采集处理，不伪造 0）",
+    );
+  }
+  return buckets;
+}
+
+/**
+ * 等待公式真正渲染完成（issue #379 / #376）。
+ *
+ * 返回节点数、已出现 KaTeX 输出的数量、空公式数量与完成时刻。
+ * 空公式（如 `$ $`）渲染的是占位提示而不是 `.katex`，把它们算进「未渲染」会让
+ * 全等断言在含空公式的 fixture 上永远失败；完成条件因此是 rendered + empty >= nodeViews。
+ * TTI 的既有定义不因它改变：调用方在读完 TTI 观测值之后再调用，用于单独归因
+ * 「KaTeX 模块加载 + 逐公式渲染」的 JS 尾部耗时（不覆盖 DOM 布局/绘制）。
+ */
+export function waitFormulaSettled(opts: { maxFrames: number }): Promise<{
+  at: number;
+  nodeViews: number;
+  rendered: number;
+  empty: number;
+  frames: number;
+}> {
+  const nodeViews = document.querySelectorAll(
+    "[data-math-inline], [data-math-display]",
+  ).length;
+  const empty = document.querySelectorAll(
+    '[data-math-inline][data-value=""], [data-math-display][data-value=""]',
+  ).length;
+  let frames = 0;
+  return new Promise<{
+    at: number;
+    nodeViews: number;
+    rendered: number;
+    empty: number;
+    frames: number;
+  }>((resolve) => {
+    const settle = (): void => {
+      const rendered = document.querySelectorAll(
+        "[data-math-inline] .katex, [data-math-display] .katex",
+      ).length;
+      if (rendered + empty >= nodeViews || frames >= opts.maxFrames) {
+        resolve({ at: performance.now(), nodeViews, rendered, empty, frames });
+        return;
+      }
+      frames += 1;
+      requestAnimationFrame(settle);
+    };
+    requestAnimationFrame(settle);
+  });
+}
+
+/**
+ * 归因桶的轮次聚合（Node 侧，issue #379）。
+ *
+ * 每个桶输出 `<name>Ms`（每轮总耗时均值）、`<name>MaxMs`（单次最大耗时均值）、
+ * `<name>Count`（每轮调用次数均值）。缺失的桶不输出——纯文本档没有公式，
+ * 伪造 0 会让「未测量」看起来像「零成本」。
+ */
+export const ATTRIBUTION_BUCKETS = [
+  "stats",
+  "statsSettle",
+  "outlineExtract",
+  "outlineSettle",
+  "headingLocate",
+  "outlinePublish",
+  "katexLoad",
+  "katexRender",
+  "formulaNodeView",
+] as const;
+
+/**
+ * 只计次数的桶（`perfProbeCount`）——totalMs/maxMs 恒为 0，不是「耗时为零」。
+ * 对它们只派生 `<name>Count`，否则归因表会显示一列 0ms，把「未计时」读成「无成本」。
+ */
+export const COUNT_ONLY_BUCKETS: ReadonlySet<string> = new Set([
+  "outlinePublish",
+]);
+
+export function createAttributionAggregator() {
+  const rounds: PerfProbeBuckets[] = [];
+  const round2 = (n: number): number => Math.round(n * 100) / 100;
+
+  return {
+    add(buckets: PerfProbeBuckets): void {
+      rounds.push(buckets ?? {});
+    },
+    scalars(): Record<string, number> {
+      const out: Record<string, number> = {};
+      if (rounds.length === 0) return out;
+      for (const name of ATTRIBUTION_BUCKETS) {
+        const entries = rounds
+          .map((r) => r[name])
+          .filter((b): b is { count: number; totalMs: number; maxMs: number } =>
+            Boolean(b),
+          );
+        if (entries.length === 0) continue;
+        // 只计次的桶：探针在测量窗口开始前已安装，某轮没有桶 = 该轮 0 次事件，
+        // 必须按总轮数平均；否则「3 轮里只发生 1 次」会被算成「每轮 1 次」。
+        // 计时桶缺失仍视为未测量，只对有桶的轮取均值（不伪造 0ms）。
+        const divisor = COUNT_ONLY_BUCKETS.has(name)
+          ? rounds.length
+          : entries.length;
+        const avg = (pick: (b: (typeof entries)[number]) => number): number =>
+          entries.reduce((sum, b) => sum + pick(b), 0) / divisor;
+        if (!COUNT_ONLY_BUCKETS.has(name)) {
+          out[`${name}Ms`] = round2(avg((b) => b.totalMs));
+          out[`${name}MaxMs`] = round2(avg((b) => b.maxMs));
+        }
+        out[`${name}Count`] = round2(avg((b) => b.count));
+      }
+      return out;
+    },
+  };
+}
+
+/**
  * 连续输入采集：每个字符一次 execCommand('insertText')（走真实 beforeinput 路径，
  * 全程在页面内，不受 CDP 往返噪声污染）。
  * 返回两类延迟 + 实际插入长度，供上层做「是否真的插进去了」的假阴性校验。
