@@ -1679,6 +1679,9 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
         if (pathChanged || resolvedMissing) {
           void get().refreshTree(parentDir(savePath));
         }
+        // #365：内容已经落盘 → 那份崩溃副本没有价值了。放在成功收尾而不是写盘前：
+        // 写失败时草稿必须还在，否则用户既没存盘也没副本
+        await clearDraft(activeTabPath);
       } catch (e) {
         const message = e instanceof Error ? e.message : String(e);
         set((current) => {
