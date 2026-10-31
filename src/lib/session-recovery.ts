@@ -101,9 +101,15 @@ export async function readSessionMarker(): Promise<SessionMarker | null> {
   }
 }
 
-/** 本次启动先落 `cleanExit:false`：进程若被杀，下次就知道要提示恢复 */
-export async function beginSession(now = Date.now()): Promise<boolean> {
-  if (!isTauri()) return false;
+/**
+ * 本次启动先落 `cleanExit:false`，并**返回上一次的标记**。
+ *
+ * 顺序很重要：标记文件只有一份，若先写后读，读到的永远是自己刚写的 `false`，
+ * 「上次正常退出不提示」就变成死代码。调用方必须用返回的旧标记去判断要不要恢复。
+ */
+export async function beginSession(now = Date.now()): Promise<SessionMarker | null> {
+  if (!isTauri()) return null;
+  const previous = await readSessionMarker();
   try {
     const { session } = await sessionPaths();
     await io.writeTextFile(
@@ -116,9 +122,9 @@ export async function beginSession(now = Date.now()): Promise<boolean> {
       }),
       { createParents: true, durability: "sync" },
     );
-    return true;
+    return previous;
   } catch {
-    return false;
+    return previous;
   }
 }
 
@@ -166,8 +172,11 @@ export async function listDrafts(): Promise<RecoverableDraft[]> {
  * 上次正常退出（`cleanExit === true`）→ 返回空：正常退出时草稿已被 markCleanExit 清掉，
  * 残留的只可能是删除失败的，不应该拿它打扰用户。
  */
-export async function findRecoverableDrafts(): Promise<RecoverableDraft[]> {
-  const marker = await readSessionMarker();
+export async function findRecoverableDrafts(
+  previousMarker?: SessionMarker | null,
+): Promise<RecoverableDraft[]> {
+  // 传进来就用它（启动流程里 `beginSession()` 已经把标记覆盖成 false 了）
+  const marker = previousMarker ?? (await readSessionMarker());
   if (marker?.cleanExit !== false) return [];
   return listDrafts();
 }
@@ -195,28 +204,51 @@ export async function discardDrafts(drafts: RecoverableDraft[]): Promise<number>
  * 崩溃前那份磁盘内容已经不可信，保存时会走「必须存在」的写盘并要求用户确认，
  * 不会静默覆盖用户在这期间对文件的修改。
  */
-export function applyRecovery(drafts: RecoverableDraft[]): number {
+export async function applyRecovery(drafts: RecoverableDraft[]): Promise<number> {
   if (drafts.length === 0) return 0;
   const state = useWorkspace.getState();
   const existing = new Set(state.openTabs.map((t) => t.path));
-  const restored = drafts
-    .filter((d) => !existing.has(d.tabPath))
-    .map((d) => ({
-      path: d.tabPath,
-      content: d.content,
+  const candidates = drafts.filter((d) => !existing.has(d.tabPath));
+  if (candidates.length === 0) return 0;
+
+  const { readDocument } = await import("./fs");
+  const restored = [];
+  for (const draft of candidates) {
+    // 有路径的草稿必须先取一次「当前磁盘基线」：否则 `saveTab` 的一致性预检
+    // 因为基线为空而永远判「没冲突」，用户点恢复再保存就会静默覆盖外部改动
+    let diskContent: string | undefined;
+    let diskStat: { mtimeUs: number; size: number } | undefined;
+    let diskMtime: number | undefined;
+    if (!draft.isUntitled) {
+      try {
+        const snapshot = await readDocument(draft.tabPath);
+        diskContent = snapshot.content;
+        diskStat = snapshot.stat;
+        diskMtime = snapshot.stat.mtimeUs / 1000;
+      } catch {
+        // 文件已不在：留空基线，保存时会走「必须存在」的写盘并被拒
+      }
+    }
+    restored.push({
+      path: draft.tabPath,
+      content: draft.content,
       dirty: true,
-      isUntitled: d.isUntitled,
+      isUntitled: draft.isUntitled,
       lastSavedAt: null,
       cursorPos: null,
       scrollTop: null,
-    }));
-  if (restored.length === 0) return 0;
-  const openTabs = [...state.openTabs, ...restored];
+      diskContent,
+      diskStat,
+      diskMtime,
+    });
+  }
+
   const first = restored[0];
   useWorkspace.setState({
-    openTabs,
+    openTabs: [...state.openTabs, ...restored],
     activeTabPath: first.path,
-    currentFile: first.isUntitled ? null : first.path,
+    // 与 mainTabPatch 的约定一致：无标题草稿也有虚拟路径（untitled-N）
+    currentFile: first.path,
     currentContent: first.content,
     dirty: true,
   } as never);

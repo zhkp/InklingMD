@@ -1679,9 +1679,12 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
         if (pathChanged || resolvedMissing) {
           void get().refreshTree(parentDir(savePath));
         }
-        // #365：内容已经落盘 → 那份崩溃副本没有价值了。放在成功收尾而不是写盘前：
-        // 写失败时草稿必须还在，否则用户既没存盘也没副本
-        await clearDraft(activeTabPath);
+        // #365：只有「写下去的就是当前内容」才清草稿。保存期间又改了（isStillDirty）
+        // 或回执不可信时不删：那份草稿是这段新输入唯一的崩溃副本
+        const savedTabNow = get().openTabs.find((t) => t.path === savePath);
+        if (!savedTabNow?.dirty && !receiptUntrusted) {
+          await clearDraft(activeTabPath);
+        }
       } catch (e) {
         const message = e instanceof Error ? e.message : String(e);
         set((current) => {

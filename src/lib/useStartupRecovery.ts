@@ -28,8 +28,10 @@ export function useStartupRecovery(): void {
     let cancelled = false;
 
     void (async () => {
-      await beginSession();
-      const drafts = await findRecoverableDrafts();
+      // 先取旧标记再写新标记：`beginSession()` 会把同一个文件覆盖成 cleanExit:false，
+      // 之后再读就永远读到 false（「上次正常退出不提示」会变成死代码）
+      const previous = await beginSession();
+      const drafts = await findRecoverableDrafts(previous);
       if (cancelled) return;
 
       if (drafts.length > 0) {
@@ -56,8 +58,11 @@ export function useStartupRecovery(): void {
         }
 
         if (!cancelled && choice === RECOVER) {
-          applyRecovery(drafts);
-          await discardDrafts(drafts);
+          // 恢复**不删**草稿：
+          // ① `applyRecovery` 会跳过已打开的 path，删了就把那些内容彻底丢了；
+          // ② 恢复出来的 tab 在下一次编辑前不会产生新草稿，此时崩溃等于没有副本。
+          // 草稿由「保存成功」或 TTL 清理负责收尾。
+          await applyRecovery(drafts);
         } else if (!cancelled && choice === DISCARD) {
           await discardDrafts(drafts);
         }

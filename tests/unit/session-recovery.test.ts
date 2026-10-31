@@ -14,6 +14,12 @@ vi.mock("../../src/components/Editor/markdown-publisher", () => ({
   flushAllMarkdownPublishers: vi.fn(),
 }));
 
+// `applyRecovery` 对「有路径的草稿」会读一次当前磁盘基线，避免保存时静默覆盖
+const { readDocumentMock } = vi.hoisted(() => ({ readDocumentMock: vi.fn() }));
+vi.mock("../../src/lib/fs", () => ({ readDocument: readDocumentMock }));
+const { messageMock } = vi.hoisted(() => ({ messageMock: vi.fn() }));
+vi.mock("@tauri-apps/plugin-dialog", () => ({ message: messageMock, ask: vi.fn(), save: vi.fn() }));
+
 import {
   __setRecoveryIo,
   DRAFT_TTL_MS,
@@ -65,6 +71,9 @@ function seedDraft(
 
 beforeEach(() => {
   files.clear();
+  readDocumentMock
+    .mockReset()
+    .mockResolvedValue({ content: "磁盘内容", stat: { mtimeUs: 5_000, size: 4 } });
   __setRecoveryIo({
     appDataDir: async () => "/appdata",
     readTextFile: async (path) => {
@@ -119,6 +128,18 @@ describe("#365 崩溃检测", () => {
     expect(await readSessionMarker()).toBeNull();
   });
 
+  it("真实启动顺序：上次正常退出 + 残留草稿 → 不提示（beginSession 不得覆盖判断依据）", async () => {
+    files.set(SESSION, JSON.stringify({ version: 1, cleanExit: true }));
+    seedDraft("/w/leftover.md", { updatedAt: 1_000 });
+
+    // 真实顺序：beginSession() 会把标记改写成 false，所以调用方必须用它返回的旧标记
+    const previous = await beginSession();
+    expect(previous?.cleanExit).toBe(true);
+    expect(await findRecoverableDrafts(previous)).toEqual([]);
+    // 反证：若不传旧标记（读到的已是 false），就会误报
+    expect((await findRecoverableDrafts()).length).toBe(1);
+  });
+
   it("beginSession 先落 cleanExit:false（进程被杀下次才有提示）", async () => {
     await beginSession(1_234);
 
@@ -129,21 +150,27 @@ describe("#365 崩溃检测", () => {
 });
 
 describe("#365 恢复与丢弃", () => {
-  it("applyRecovery 恢复成 dirty tab，且不登记磁盘基线（避免静默覆盖）", async () => {
+  it("applyRecovery 恢复成 dirty tab，并带上当前磁盘基线（否则保存会静默覆盖）", async () => {
     files.set(SESSION, JSON.stringify({ version: 1, cleanExit: false }));
-    seedDraft("/w/a.md", { content: "崩溃前的内容" });
-    seedDraft("untitled-1", { content: "草稿正文", isUntitled: true });
+    // 显式 updatedAt：缺省用 Date.now() 时两条可能同毫秒，跨毫秒会让顺序翻转（曾偶发红）
+    seedDraft("/w/a.md", { content: "崩溃前的内容", updatedAt: 2_000 });
+    seedDraft("untitled-1", { content: "草稿正文", isUntitled: true, updatedAt: 1_000 });
 
     const drafts = await listDrafts();
-    const restored = applyRecovery(drafts);
+    const restored = await applyRecovery(drafts);
 
     expect(restored).toBe(2);
     const state = useWorkspace.getState();
     expect(state.openTabs.map((t) => t.path)).toEqual(["/w/a.md", "untitled-1"]);
     expect(state.openTabs[0].content).toBe("崩溃前的内容");
     expect(state.openTabs[0].dirty).toBe(true);
-    expect(state.openTabs[0].diskStat).toBeUndefined();
+    // 有路径的 tab 必须带当前磁盘基线：空白线会让 saveTab 的一致性预检永远判「没冲突」
+    expect(state.openTabs[0].diskContent).toBe("磁盘内容");
+    expect(state.openTabs[0].diskStat).toEqual({ mtimeUs: 5_000, size: 4 });
+    expect(state.openTabs[0].diskMtime).toBe(5);
+    // 无标题草稿没有磁盘基线
     expect(state.openTabs[1].isUntitled).toBe(true);
+    expect(state.openTabs[1].diskStat).toBeUndefined();
     expect(state.activeTabPath).toBe("/w/a.md");
   });
 
@@ -155,10 +182,23 @@ describe("#365 恢复与丢弃", () => {
       activeTabPath: "/w/a.md",
     } as never);
 
-    const restored = applyRecovery(await listDrafts());
+    const restored = await applyRecovery(await listDrafts());
 
     expect(restored).toBe(0);
     expect(useWorkspace.getState().openTabs[0].content).toBe("当前编辑中");
+  });
+
+  it("文件已被删除的草稿：恢复后没有磁盘基线（保存会被 mustExist 拒，不会复活）", async () => {
+    files.set(SESSION, JSON.stringify({ version: 1, cleanExit: false }));
+    seedDraft("/w/gone.md", { updatedAt: 1_000 });
+    readDocumentMock.mockRejectedValueOnce(new Error("not found"));
+
+    await applyRecovery(await listDrafts());
+
+    const restored = useWorkspace.getState().openTabs[0];
+    expect(restored.path).toBe("/w/gone.md");
+    expect(restored.diskStat).toBeUndefined();
+    expect(restored.diskContent).toBeUndefined();
   });
 
   it("discardDrafts 真删文件", async () => {
@@ -169,6 +209,38 @@ describe("#365 恢复与丢弃", () => {
 
     expect(deleted).toBe(1);
     expect(files.has(file)).toBe(false);
+  });
+});
+
+describe("#365 启动入口（useStartupRecovery）", () => {
+  it("选择「恢复」：tab 恢复出来，但草稿**不删**（恢复本身不消费副本）", async () => {
+    files.set(SESSION, JSON.stringify({ version: 1, cleanExit: false }));
+    // 用当前时间：否则收尾的 TTL 清理会把它当过期草稿删掉，测不到「恢复不删」
+    const draftFile = seedDraft("/w/a.md", { content: "崩溃前", updatedAt: Date.now() });
+    messageMock.mockReset().mockResolvedValue("恢复");
+
+    const { renderHook, waitFor } = await import("@testing-library/react");
+    const { useStartupRecovery } = await import("../../src/lib/useStartupRecovery");
+    renderHook(() => useStartupRecovery());
+
+    await waitFor(() => expect(useWorkspace.getState().openTabs.length).toBe(1));
+    expect(useWorkspace.getState().openTabs[0].content).toBe("崩溃前");
+    // 恢复出来的 tab 在下一次编辑前不会产生新草稿；此时崩溃就等于没有副本，
+    // 所以草稿必须留到「保存成功」或 TTL 清理
+    expect(files.has(draftFile)).toBe(true);
+  });
+
+  it("选择「丢弃」：草稿真被删掉", async () => {
+    files.set(SESSION, JSON.stringify({ version: 1, cleanExit: false }));
+    const draftFile = seedDraft("/w/a.md", { updatedAt: 5_000 });
+    messageMock.mockReset().mockResolvedValue("丢弃");
+
+    const { renderHook, waitFor } = await import("@testing-library/react");
+    const { useStartupRecovery } = await import("../../src/lib/useStartupRecovery");
+    renderHook(() => useStartupRecovery());
+
+    await waitFor(() => expect(files.has(draftFile)).toBe(false));
+    expect(useWorkspace.getState().openTabs).toHaveLength(0);
   });
 });
 
