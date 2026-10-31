@@ -16,6 +16,7 @@ import {
 import type { DocumentSnapshot, FileStat } from "../../lib/fs";
 import { formatCmdError } from "../../lib/cmd-error";
 import { isSamePath } from "../../lib/path-utils";
+import { clearDraft, scheduleDraft } from "../../lib/draft-journal";
 import { evaluateBaseline, reconcileDiskContent } from "../../lib/save-guard";
 import { writeErrorCode, type WriteErrorCode } from "../../lib/writeErrors";
 import { flushAllMarkdownPublishers } from "../../components/Editor/markdown-publisher";
@@ -688,6 +689,10 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
         // 直接读磁盘，绕过 tab 缓存（openFile 对已打开 tab 复用缓存，无法真正重载）。
         // #362：一次成对读取——内容与 stat 同源，不允许多打一次 fileMtime（R2）
         const snapshot = await readDocument(filePath);
+        // #365：用户明确「丢弃本地修改，重载磁盘」→ 草稿里那份内容已被丢弃，
+        // 不清掉会让恢复面板给出「可恢复」的假提示。这里 await：重载是低频动作，
+        // 而「重载完草稿还在」会让 5b 立刻给出过期的恢复提示
+        await clearDraft(filePath);
         set((current) => {
           const openTabs = current.openTabs.map((t) =>
             t.path === filePath
@@ -955,6 +960,8 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
       const { openTabs, activeTabPath } = get();
       const idx = openTabs.findIndex((t) => t.path === filePath);
       if (idx === -1) return;
+      // #365：关闭即清掉草稿（用户已明确不要这个 tab）
+      void clearDraft(filePath);
       // #364：关闭即移除订阅键条目（否则 pathRevs 只增不减）
       dropPathRev(filePath);
       const nextTabs = openTabs.filter((t) => t.path !== filePath);
@@ -1074,7 +1081,13 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
       const { currentContent, activeTabPath, openTabs } = get();
       if (content === currentContent) return;
       // #364：内容真正变化才 bump（唯一 bump 点之一）；保存成功不重置
-      if (activeTabPath) bumpPathRev(activeTabPath);
+      if (activeTabPath) {
+        bumpPathRev(activeTabPath);
+        // #365：编辑即排一次草稿落盘（1.2s 防抖）——崩溃 / 被 kill 后还能找回。
+        // `isUntitled` 必须取 tab 的真实值：写死 false 会让无标题草稿被当成「有路径的文档」恢复
+        const activeTab = openTabs.find((t) => t.path === activeTabPath);
+        scheduleDraft({ path: activeTabPath, isUntitled: !!activeTab?.isUntitled, content });
+      }
       // 更新活跃 tab 的内容与 dirty
       if (activeTabPath) {
         const nextTabs = openTabs.map((t) =>
@@ -1092,6 +1105,7 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
       if (!tab || tab.content === content) return;
       // #364：内容真正变化才 bump（唯一 bump 点之一）
       bumpPathRev(path);
+      scheduleDraft({ path, isUntitled: !!tab.isUntitled, content });
       const nextTabs = openTabs.map((t) =>
         t.path === path ? { ...t, content, dirty: true } : t,
       );

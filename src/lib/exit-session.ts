@@ -1,71 +1,148 @@
-// 退出 / 会话的最小底座（#367，随 PR-4 落地）
+// 退出 / 会话底座（#365 / #367）
 //
-// 本 PR 还没有 draft 正文（PR-5 才写），所以：
-// - `flushAllDrafts()` 是「无内容可 flush 的立即 resolve」——不是桩，此时确实没有 draft；
-// - `markCleanExit()` / `markUncleanExit()` 写 `recovery/session.json` 的 `cleanExit`，
-//   PR-5 的恢复面板据此判断上次是否正常退出；
-// - `journalHealth` / `lastDraftWriteOk` 先给默认值，等 PR-5 接上 journal 才有写入方。
+// 本模块负责「退出时把 draft 真正落下」与「会话标记」，是恢复流程（PR-5b 的启动面板）
+// 的数据来源：
+// - `flushAllDrafts({ durability })`：把每个 dirty tab 的正文写进
+//   `recovery/<windowLabel>/drafts/<key>.json`；退出时用 `sync`，平时由 draft-journal 防抖写。
+// - `markCleanExit()`：先删掉本次会话的草稿（内容都已落盘），再写 `cleanExit: true`。
+// - `markUncleanExit()`：保留草稿，只把 `cleanExit` 写成 false —— 下次启动据此弹恢复。
 
 import { isTauri } from "@tauri-apps/api/core";
-import { appDataDir, join } from "@tauri-apps/api/path";
+import { appDataDir } from "@tauri-apps/api/path";
 import { writeTextFile } from "./fs";
+import { useWorkspace } from "../store/workspace";
+import {
+  cancelPendingDrafts,
+  currentWindowLabel,
+  ensureWindowLabel,
+  writeDraftNow,
+} from "./draft-journal";
 
 export type JournalHealth = "healthy" | "degraded";
 
 /** journal 健康度：写失败会置 degraded，退出时据此判断「恢复副本是否可信」 */
 export let journalHealth: JournalHealth = "healthy";
 
-/** draftId → 最近一次写盘是否成功（PR-5 写入；现在为空表 = 没有 draft） */
+/** draftId(tabPath) → 最近一次写盘是否成功 */
 export const lastDraftWriteOk = new Map<string, boolean>();
 
-export function setJournalHealth(health: JournalHealth): void {
-  journalHealth = health;
-}
-
-/** 是否存在可信的恢复副本（PR-5 之前恒为 false：确实没有 draft） */
-export function hasRecoverableDraft(): boolean {
-  return journalHealth === "healthy" && lastDraftWriteOk.size > 0;
+/** 仅供测试：重置健康度与写盘结果表 */
+export function __resetJournalHealth(): void {
+  journalHealth = "healthy";
+  lastDraftWriteOk.clear();
 }
 
 /**
- * 落盘所有 draft（当前无正文 → 立即 resolve）。
+ * 落盘所有 dirty tab 的草稿。
  *
- * 接口先立：PR-5 接上正文后由这里真正写盘（届时会加 { durability } 入参）。
+ * `durability: "sync"` 只在退出链路用：那时进程马上就没，掉电保证必须自己给；
+ * 平时的防抖写用 `none`（重做成本低，别为每次输入付 fsync）。
  */
-export async function flushAllDrafts(): Promise<void> {
-  return;
+export async function flushAllDrafts(
+  options: { durability?: "sync" | "none" } = {},
+): Promise<void> {
+  if (!isTauri()) return;
+  // 先取消挂着的防抖定时器，避免同一次输入写两遍
+  cancelPendingDrafts();
+  const { openTabs } = useWorkspace.getState();
+  const dirty = openTabs.filter((tab) => tab.dirty);
+  if (dirty.length === 0) return;
+
+  let failed = 0;
+  await Promise.all(
+    dirty.map(async (tab) => {
+      const ok = await writeDraftNow(
+        {
+          path: tab.path,
+          isUntitled: !!tab.isUntitled,
+          title: tab.path.split(/[\\/]/).pop(),
+          content: tab.content,
+        },
+        { durability: options.durability ?? "none" },
+      );
+      lastDraftWriteOk.set(tab.path, ok);
+      if (!ok) failed += 1;
+    }),
+  );
+  // 任意一条写失败都视为不可信：退出时的文案不能承诺「有恢复副本」
+  journalHealth = failed === 0 ? "healthy" : "degraded";
 }
 
-async function writeSessionMarker(cleanExit: boolean): Promise<boolean> {
+/** 是否存在可信的恢复副本（草稿写成功过，且健康度正常） */
+export function hasRecoverableDraft(): boolean {
+  if (journalHealth !== "healthy") return false;
+  for (const ok of lastDraftWriteOk.values()) if (ok) return true;
+  return false;
+}
+
+function sessionFilePath(dir: string): string {
+  const sep = dir.includes("\\") ? "\\" : "/";
+  return `${dir.replace(/[\\/]+$/, "")}${sep}session.json`;
+}
+
+async function recoveryDir(): Promise<string> {
+  // 必须先等 label 就绪：干净退出路径不会写任何草稿，ensureWindowLabel 没人调过，
+  // 直接用 currentWindowLabel() 会写进 recovery/main/ 并覆盖主窗口的标记
+  await ensureWindowLabel();
+  const base = await appDataDir();
+  const sep = base.includes("\\") ? "\\" : "/";
+  return `${base.replace(/[\\/]+$/, "")}${sep}recovery${sep}${currentWindowLabel()}`;
+}
+
+async function writeSessionMarker(
+  cleanExit: boolean,
+  durability: "sync" | "none" = "none",
+): Promise<boolean> {
   if (!isTauri()) return true; // 浏览器 / E2E：没有 recovery 目录，视为成功
   let file: string;
   try {
-    file = await join(await appDataDir(), "recovery", "session.json");
+    file = sessionFilePath(await recoveryDir());
   } catch {
     // 取不到应用数据目录（headless / 测试环境）：不因为环境缺失就阻止用户退出
     return true;
   }
   try {
     // 标记本身丢了能重写，不需要掉电保证
-    await writeTextFile(file, JSON.stringify({ cleanExit, savedAt: Date.now() }), {
-      createParents: true,
-      durability: "none",
-    });
+    await writeTextFile(
+      file,
+      JSON.stringify({
+        version: 1,
+        windowLabel: currentWindowLabel(),
+        cleanExit,
+        savedAt: Date.now(),
+      }),
+      { createParents: true, durability },
+    );
     return true;
   } catch {
     return false;
   }
 }
 
-/** 正常退出：清会话（PR-5 会先删未 pinned 的 draft，成功后才写 cleanExit=true） */
+/**
+ * 正常退出：所有 tab 都已保存 → 草稿没有价值，先清掉再写 `cleanExit: true`。
+ *
+ * 顺序不能反：先写 cleanExit 再清草稿，中途崩溃会留下「标记正常但草稿缺失」的会话，
+ * 用户既没恢复提示也没有副本。
+ */
 export async function markCleanExit(): Promise<boolean> {
+  if (!isTauri()) return true;
+  const { openTabs } = useWorkspace.getState();
+  for (const tab of openTabs) {
+    // 只清「已经保存」的：仍 dirty 的 tab 草稿必须留到下一次 flush
+    if (!tab.dirty) {
+      const { clearDraft } = await import("./draft-journal");
+      await clearDraft(tab.path);
+    }
+  }
   return writeSessionMarker(true);
 }
 
 /**
- * 放弃并退出：保留 draft（PR-5 才有），只把 cleanExit 写成 false。
+ * 放弃并退出：保留草稿，只把 `cleanExit` 写成 false。
  * 写失败时调用方**禁止 destroy**——否则内容与标记都没落盘。
  */
 export async function markUncleanExit(): Promise<boolean> {
-  return writeSessionMarker(false);
+  // 这条标记的唯一作用就是「上次异常退出，请恢复」；丢了等价于没有恢复提示 → 必须落盘
+  return writeSessionMarker(false, "sync");
 }

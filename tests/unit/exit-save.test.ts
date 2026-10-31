@@ -2,12 +2,15 @@ import { act, renderHook } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { OpenTab } from "../../src/store/workspace";
 
-const { onCloseRequestedMock, destroyMock, messageMock, flushMock } = vi.hoisted(() => ({
-  onCloseRequestedMock: vi.fn(),
-  destroyMock: vi.fn(),
-  messageMock: vi.fn(),
-  flushMock: vi.fn(),
-}));
+const { onCloseRequestedMock, destroyMock, messageMock, flushMock, flushDraftsMock } = vi.hoisted(
+  () => ({
+    onCloseRequestedMock: vi.fn(),
+    destroyMock: vi.fn(),
+    messageMock: vi.fn(),
+    flushMock: vi.fn(),
+    flushDraftsMock: vi.fn(async () => undefined),
+  }),
+);
 vi.mock("@tauri-apps/api/core", () => ({ isTauri: () => true }));
 vi.mock("@tauri-apps/api/window", () => ({
   getCurrentWindow: () => ({ onCloseRequested: onCloseRequestedMock, destroy: destroyMock }),
@@ -18,7 +21,7 @@ vi.mock("../../src/components/Editor/markdown-publisher", () => ({
 }));
 // 退出/会话底座在单测里不写真实 app data 目录
 vi.mock("../../src/lib/exit-session", () => ({
-  flushAllDrafts: vi.fn(async () => undefined),
+  flushAllDrafts: flushDraftsMock,
   hasRecoverableDraft: () => false,
   markCleanExit: vi.fn(async () => true),
   markUncleanExit: vi.fn(async () => true),
@@ -106,6 +109,8 @@ describe("real window close handler", () => {
 
     expect(preventDefault).toHaveBeenCalled();
     expect(flushMock).toHaveBeenCalled();
+    // #396 复审 2：退出链路必须用 Sync 落草稿（默认 none 只够平时防抖）
+    expect(flushDraftsMock).toHaveBeenCalledWith({ durability: "sync" });
     expect(saveTab).toHaveBeenCalledTimes(2);
     expect(saveTab).toHaveBeenCalledWith("/one.md", { interactive: true });
     expect(saveTab).toHaveBeenCalledWith("/two.md", { interactive: true });
