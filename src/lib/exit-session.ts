@@ -11,7 +11,12 @@ import { isTauri } from "@tauri-apps/api/core";
 import { appDataDir } from "@tauri-apps/api/path";
 import { writeTextFile } from "./fs";
 import { useWorkspace } from "../store/workspace";
-import { cancelPendingDrafts, currentWindowLabel, writeDraftNow } from "./draft-journal";
+import {
+  cancelPendingDrafts,
+  currentWindowLabel,
+  ensureWindowLabel,
+  writeDraftNow,
+} from "./draft-journal";
 
 export type JournalHealth = "healthy" | "degraded";
 
@@ -76,6 +81,9 @@ function sessionFilePath(dir: string): string {
 }
 
 async function recoveryDir(): Promise<string> {
+  // 必须先等 label 就绪：干净退出路径不会写任何草稿，ensureWindowLabel 没人调过，
+  // 直接用 currentWindowLabel() 会写进 recovery/main/ 并覆盖主窗口的标记
+  await ensureWindowLabel();
   const base = await appDataDir();
   const sep = base.includes("\\") ? "\\" : "/";
   return `${base.replace(/[\\/]+$/, "")}${sep}recovery${sep}${currentWindowLabel()}`;

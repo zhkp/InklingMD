@@ -36,8 +36,14 @@ import {
   ensureWindowLabel,
   writeDraftNow,
 } from "../../src/lib/draft-journal";
-import { flushAllDrafts, __resetJournalHealth } from "../../src/lib/exit-session";
+import {
+  __resetJournalHealth,
+  flushAllDrafts,
+  markCleanExit,
+  markUncleanExit,
+} from "../../src/lib/exit-session";
 import { useWorkspace } from "../../src/store/workspace";
+import { writeTextFile } from "../../src/lib/fs";
 
 function tab(path: string, extra: Partial<OpenTab> = {}): OpenTab {
   return {
@@ -56,6 +62,8 @@ function tab(path: string, extra: Partial<OpenTab> = {}): OpenTab {
 
 beforeEach(() => {
   invokeMock.mockReset().mockResolvedValue(undefined);
+  // session.json 走 `fs.writeTextFile`（不是 journal IO），断言要看这个 mock
+  vi.mocked(writeTextFile).mockClear();
   __resetJournalHealth();
   __setJournalIo(null); // 用默认 IO：这才是生产走的那条
   __resetSession();
@@ -102,7 +110,42 @@ describe("#365 多窗口隔离", () => {
     expect(String(writeCall?.[1]?.filePath)).toContain("/recovery/inkling-test/drafts/");
   });
 
-  it("两个不同 label 写各自的 session 目录，互不覆盖", async () => {
+  it("两个不同 label 各写自己的 session.json（草稿隔离不等于标记隔离）", async () => {
+    const files = new Map<string, string>();
+    const memIo = {
+      writeTextFile: async (path: string, content: string) => {
+        files.set(path, content);
+      },
+      readTextFile: async (path: string) => files.get(path) ?? "",
+      appDataDir: async () => "/appdata",
+      removeFile: async (path: string) => {
+        files.delete(path);
+      },
+    };
+    __setJournalIo(memIo);
+
+    __resetSession("inkling-a");
+    useWorkspace.setState({ openTabs: [tab("/w/a.md")] } as never);
+    await flushAllDrafts({ durability: "sync" });
+    await markUncleanExit();
+
+    __resetSession("inkling-b");
+    __setJournalIo(memIo);
+    useWorkspace.setState({ openTabs: [tab("/w/b.md")] } as never);
+    await flushAllDrafts({ durability: "sync" });
+    await markUncleanExit();
+
+    const sessionCalls = vi
+      .mocked(writeTextFile)
+      .mock.calls.filter((c) => String(c[0]).endsWith("/session.json"));
+    const byPath = new Map(sessionCalls.map((c) => [String(c[0]), JSON.parse(String(c[1]))]));
+    // 两个 window 的标记各写各的文件，不互相覆盖
+    expect(byPath.get("/appdata/recovery/inkling-a/session.json")?.windowLabel).toBe("inkling-a");
+    expect(byPath.get("/appdata/recovery/inkling-b/session.json")?.windowLabel).toBe("inkling-b");
+  });
+
+  it("干净退出（没有任何 dirty tab）也要落在自己的 label 目录，不能写回 main", async () => {
+    // 这条锁的是真实回归：干净路径不写草稿 → 没人初始化 label → 标记落到 recovery/main
     const files = new Map<string, string>();
     __setJournalIo({
       writeTextFile: async (path, content) => {
@@ -114,18 +157,17 @@ describe("#365 多窗口隔离", () => {
         files.delete(path);
       },
     });
+    __resetSession(); // 不注入 label：必须由 getCurrentWindow().label 提供（mock = inkling-test）
+    useWorkspace.setState({ openTabs: [tab("/w/a.md", { dirty: false })] } as never);
 
-    __resetSession("inkling-a");
-    useWorkspace.setState({ openTabs: [tab("/w/a.md")] } as never);
-    await flushAllDrafts({ durability: "sync" });
+    await markCleanExit();
 
-    __resetSession("inkling-b");
-    useWorkspace.setState({ openTabs: [tab("/w/b.md")] } as never);
-    await flushAllDrafts({ durability: "sync" });
-
-    const paths = [...files.keys()];
-    expect(paths.some((p) => p.includes("/recovery/inkling-a/drafts/"))).toBe(true);
-    expect(paths.some((p) => p.includes("/recovery/inkling-b/drafts/"))).toBe(true);
+    const paths = vi
+      .mocked(writeTextFile)
+      .mock.calls.filter((c) => String(c[0]).endsWith("/session.json"))
+      .map((c) => String(c[0]));
+    expect(paths).toContain("/appdata/recovery/inkling-test/session.json");
+    expect(paths).not.toContain("/appdata/recovery/main/session.json");
   });
 });
 
