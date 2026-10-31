@@ -5,7 +5,7 @@ mod navigation_guard;
 use commands::{
     allow_asset_dir, copy_path, create_dir, create_file, delete_path, download_remote_image,
     extract_zip, file_mtime, file_stat, find_asset_by_hash, list_dir, list_workspace_files,
-    pandoc_check, pandoc_export_docx, read_document, read_text_file, rename_path,
+    pandoc_check, pandoc_export_docx, read_binary_file, read_document, read_text_file, rename_path,
     resource_themes_dir, save_document, scan_theme_dir, search_in_workspace, write_binary_file,
     write_text_file,
 };
@@ -122,6 +122,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             list_dir,
             read_text_file,
+            read_binary_file,
             write_text_file,
             write_binary_file,
             file_mtime,
