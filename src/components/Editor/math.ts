@@ -8,6 +8,7 @@ import type { NodeView, NodeViewConstructor } from "@milkdown/kit/prose/view";
 import type { EditorView as PMView } from "@milkdown/kit/prose/view";
 import type { Node } from "@milkdown/kit/prose/model";
 import remarkMath from "remark-math";
+import { perfProbeEnd, perfProbeStart } from "../../lib/perf-probe";
 
 // issue #168：KaTeX 懒加载——首次遇到公式节点才动态导入（JS + 样式 + mhchem），
 // 复用 code-block-view 语言的既有范式；~822KB vendor_katex 不再进入启动加载图。
@@ -16,6 +17,7 @@ type KatexModule = typeof import("katex").default;
 let katexPromise: Promise<KatexModule> | null = null;
 function loadKatex(): Promise<KatexModule> {
   if (!katexPromise) {
+    const probeStart = perfProbeStart();
     katexPromise = (async () => {
       const [katexMod] = await Promise.all([
         import("katex"),
@@ -25,6 +27,7 @@ function loadKatex(): Promise<KatexModule> {
         // @ts-ignore - contrib 模块无类型声明
         import("katex/dist/contrib/mhchem.js"),
       ]);
+      perfProbeEnd("katexLoad", probeStart);
       return katexMod.default;
     })();
   }
@@ -131,6 +134,7 @@ export const remarkMathPlugin = $remark("remarkMath", () => remarkMath);
  * 导出供单测直接构造（issue #168 懒加载行为验证） */
 export function createMathView(displayMode: boolean): NodeViewConstructor {
   return (node: Node, view: PMView, getPos: () => number | undefined): NodeView => {
+    const viewStart = perfProbeStart();
     const dom = document.createElement(displayMode ? "div" : "span");
     dom.className = displayMode ? "math-display" : "math-inline";
     dom.setAttribute(displayMode ? "data-math-display" : "data-math-inline", "");
@@ -162,6 +166,9 @@ export function createMathView(displayMode: boolean): NodeViewConstructor {
         if (displayMode && number != null && !/\\tag\b/.test(value)) {
           expr = `${value} \\tag{${number}}`;
         }
+        // 归因口径：只计 renderToString + DOM 写入的 JS 时间。KaTeX 节点的
+        // 样式/布局/绘制发生在后续帧，不在此桶内（#376 的结论据此限定范围）
+        const renderStart = perfProbeStart();
         try {
           dom.innerHTML = katex.renderToString(expr, {
             displayMode,
@@ -171,6 +178,7 @@ export function createMathView(displayMode: boolean): NodeViewConstructor {
         } catch {
           dom.textContent = value;
         }
+        perfProbeEnd("katexRender", renderStart);
       });
     };
     render(current.attrs.value as string, displayMode ? (current.attrs.number as number | null) : null);
@@ -225,6 +233,7 @@ export function createMathView(displayMode: boolean): NodeViewConstructor {
       true,
     );
 
+    perfProbeEnd("formulaNodeView", viewStart);
     return {
       dom,
       update: (next: Node) => {

@@ -3,6 +3,7 @@
 // Markdown 源文本解析用于导出；编辑器面板使用 ProseMirror 渲染节点。
 
 import type { Node as ProseMirrorNode } from "@milkdown/kit/prose/model";
+import { perfProbeEnd, perfProbeStart } from "./perf-probe";
 import { slugify } from "./slug";
 
 export { slugify };
@@ -203,6 +204,32 @@ export function findActiveMarkdownHeadingIndexByLine(
 
 
 /**
+ * 判断两份源码大纲的可见结构是否一致（忽略 pos/id 等派生字段）。
+ *
+ * 源码模式防抖重算后用它决定是否向 store 发布：结构没变时复用旧数组，
+ * OutlinePanel 的 OutlineItem memo 才不会因每键新建标题对象而整表重渲染。
+ */
+export function isSameMarkdownOutline(
+  a: readonly EditorOutlineHeading[],
+  b: readonly EditorOutlineHeading[],
+): boolean {
+  if (a === b) return true;
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i += 1) {
+    const left = a[i];
+    const right = b[i];
+    if (
+      left.level !== right.level ||
+      left.text !== right.text ||
+      (left.line ?? 1) !== (right.line ?? 1)
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
  * 在 Markdown 源文本中寻找对应大纲标题的字符 offset。
  * 支持按 index、level、text 精确匹配，自动排除代码块与 frontmatter。
  */
@@ -261,6 +288,7 @@ export const MAX_FRONTMATTER_SCAN_LINES = 100;
 export function extractMarkdownOutline(
   markdown: string,
 ): EditorOutlineHeading[] {
+  const probeStart = perfProbeStart();
   const headings: EditorOutlineHeading[] = [];
   const lines = markdown.split("\n");
   let offset = 0;
@@ -327,6 +355,7 @@ export function extractMarkdownOutline(
     offset += line.length + 1;
   }
 
+  perfProbeEnd("outlineExtract", probeStart);
   return headings;
 }
 

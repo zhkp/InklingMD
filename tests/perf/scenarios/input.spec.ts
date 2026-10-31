@@ -17,11 +17,14 @@ import { expect, test } from "@playwright/test";
 import { PERF_DOC_PATH } from "../inject";
 import { bootWithFiles, focusEditorEnd, openFileInTree } from "../helpers";
 import {
+  createAttributionAggregator,
   createSessionProbe,
   INPUT_LANDING_RETRIES,
   installObservers,
+  installPerfProbe,
   readObservers,
   runInputBurst,
+  waitForProbeBuckets,
   waitRenderStable,
 } from "../metrics";
 import {
@@ -48,6 +51,7 @@ for (const tier of ctx.tiers) {
 
       const fixture = fixtureFor(tier, kind);
       const probe = createSessionProbe();
+      const attribution = createAttributionAggregator();
       const paintSamples: number[] = [];
       const syncSamples: number[] = [];
       const longTaskCount: number[] = [];
@@ -70,15 +74,21 @@ for (const tier of ctx.tiers) {
             await focusEditorEnd(page);
 
             await page.evaluate(installObservers);
+            await page.evaluate(installPerfProbe);
             const burst = await page.evaluate(runInputBurst, {
               count: CHARS,
               text: "x",
             });
             const observers = await page.evaluate(readObservers);
+            // WYSIWYG 的逐键延迟由 publisher 150ms 防抖主导，#374 的统计防抖只会在
+            // 停笔后跑一次，二者不在同一窗口：这里的归因只用于记录「停笔后统计一次
+            // 要多久」，不能反过来解释上面的 inputPaintMs/inputSyncMs。
+            // 等待用轮询：L 档发布前要序列化全文，固定 700ms 采不到（首轮实测缺失）。
+            const buckets = await waitForProbeBuckets(page, ["statsSettle"]);
 
             // 假阴性守卫：输入必须真的落到文档里
             if (burst.allApplied && burst.inserted >= CHARS) {
-              return { burst, observers };
+              return { burst, observers, buckets };
             }
             if (attempt >= INPUT_LANDING_RETRIES) {
               expect(
@@ -86,7 +96,7 @@ for (const tier of ctx.tiers) {
                 `${id}：execCommand 未能插入文本（含 ${INPUT_LANDING_RETRIES} 次重试）`,
               ).toBe(true);
               expect(burst.inserted).toBeGreaterThanOrEqual(CHARS);
-              return { burst, observers };
+              return { burst, observers, buckets };
             }
             console.warn(
               `[perf] ${id} 第 ${round + 1} 轮输入未全部落地（allApplied=${burst.allApplied}, ` +
@@ -94,11 +104,12 @@ for (const tier of ctx.tiers) {
             );
           }
         })();
-        const { burst, observers } = measured;
+        const { burst, observers, buckets } = measured;
 
         if (round >= ctx.warmups) {
           // 标定负载：#236 与编辑器代码无关的固定工作量，用于把「机器慢」与「代码回归」分开
           await probe.measure(page);
+          attribution.add(buckets);
           paintSamples.push(...burst.paint);
           syncSamples.push(...burst.sync);
           longTaskCount.push(observers.longTaskCount);
@@ -132,6 +143,7 @@ for (const tier of ctx.tiers) {
         samples: { inputPaintMs: paintSamples, inputSyncMs: syncSamples },
         scalars: {
           ...probe.scalars(),
+          ...attribution.scalars(),
           longTaskCount: avg(longTaskCount),
           longTaskMs: avg(longTaskMs),
           cls: avg(clsValues),

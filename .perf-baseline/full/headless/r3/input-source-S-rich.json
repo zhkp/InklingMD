@@ -1,0 +1,263 @@
+{
+  "schemaVersion": 2,
+  "env": "ci-ubuntu",
+  "profile": "full",
+  "mode": "headless",
+  "scenario": "input-source",
+  "tier": "S",
+  "kind": "rich",
+  "rounds": 3,
+  "fixture": {
+    "version": 2,
+    "hash": "02bd30f6342c",
+    "lines": 1000,
+    "source": "generated:rich"
+  },
+  "metrics": {
+    "inputPaintMs": {
+      "median": 16.8,
+      "p95": 25.3,
+      "max": 35.5,
+      "n": 180,
+      "history": [
+        16.8
+      ],
+      "historyP95": [
+        25.3
+      ]
+    },
+    "inputSyncMs": {
+      "median": 0.4,
+      "p95": 0.5,
+      "max": 0.6,
+      "n": 180,
+      "history": [
+        0.4
+      ],
+      "historyP95": [
+        0.5
+      ]
+    },
+    "longTaskCount": {
+      "median": 0,
+      "p95": null,
+      "max": null,
+      "n": null,
+      "scalar": true,
+      "history": [
+        0
+      ]
+    },
+    "longTaskMs": {
+      "median": 0,
+      "p95": null,
+      "max": null,
+      "n": null,
+      "scalar": true,
+      "history": [
+        0
+      ]
+    },
+    "cls": {
+      "median": 0,
+      "p95": null,
+      "max": null,
+      "n": null,
+      "scalar": true,
+      "history": [
+        0
+      ]
+    },
+    "heapDeltaMB": {
+      "median": 0,
+      "p95": null,
+      "max": null,
+      "n": null,
+      "scalar": true,
+      "history": [
+        0
+      ]
+    },
+    "probeMs": {
+      "median": 45.4,
+      "p95": null,
+      "max": null,
+      "n": null,
+      "scalar": true,
+      "history": [
+        45.4
+      ]
+    },
+    "probeLayoutMs": {
+      "median": 13.1,
+      "p95": null,
+      "max": null,
+      "n": null,
+      "scalar": true,
+      "history": [
+        13.1
+      ]
+    },
+    "probeCpuMs": {
+      "median": 32.3,
+      "p95": null,
+      "max": null,
+      "n": null,
+      "scalar": true,
+      "history": [
+        32.3
+      ]
+    },
+    "statsMs": {
+      "median": 0.7,
+      "p95": null,
+      "max": null,
+      "n": null,
+      "scalar": true,
+      "history": [
+        0.7
+      ]
+    },
+    "statsMaxMs": {
+      "median": 0.7,
+      "p95": null,
+      "max": null,
+      "n": null,
+      "scalar": true,
+      "history": [
+        0.7
+      ]
+    },
+    "statsCount": {
+      "median": 1,
+      "p95": null,
+      "max": null,
+      "n": null,
+      "scalar": true,
+      "history": [
+        1
+      ]
+    },
+    "statsSettleMs": {
+      "median": 300.87,
+      "p95": null,
+      "max": null,
+      "n": null,
+      "scalar": true,
+      "history": [
+        300.87
+      ]
+    },
+    "statsSettleMaxMs": {
+      "median": 300.87,
+      "p95": null,
+      "max": null,
+      "n": null,
+      "scalar": true,
+      "history": [
+        300.87
+      ]
+    },
+    "statsSettleCount": {
+      "median": 1,
+      "p95": null,
+      "max": null,
+      "n": null,
+      "scalar": true,
+      "history": [
+        1
+      ]
+    },
+    "outlineExtractMs": {
+      "median": 0.73,
+      "p95": null,
+      "max": null,
+      "n": null,
+      "scalar": true,
+      "history": [
+        0.73
+      ]
+    },
+    "outlineExtractMaxMs": {
+      "median": 0.73,
+      "p95": null,
+      "max": null,
+      "n": null,
+      "scalar": true,
+      "history": [
+        0.73
+      ]
+    },
+    "outlineExtractCount": {
+      "median": 1,
+      "p95": null,
+      "max": null,
+      "n": null,
+      "scalar": true,
+      "history": [
+        1
+      ]
+    },
+    "outlineSettleMs": {
+      "median": 201.1,
+      "p95": null,
+      "max": null,
+      "n": null,
+      "scalar": true,
+      "history": [
+        201.1
+      ]
+    },
+    "outlineSettleMaxMs": {
+      "median": 201.1,
+      "p95": null,
+      "max": null,
+      "n": null,
+      "scalar": true,
+      "history": [
+        201.1
+      ]
+    },
+    "outlineSettleCount": {
+      "median": 1,
+      "p95": null,
+      "max": null,
+      "n": null,
+      "scalar": true,
+      "history": [
+        1
+      ]
+    },
+    "headingLocateMs": {
+      "median": 0.17,
+      "p95": null,
+      "max": null,
+      "n": null,
+      "scalar": true,
+      "history": [
+        0.17
+      ]
+    },
+    "headingLocateMaxMs": {
+      "median": 0.17,
+      "p95": null,
+      "max": null,
+      "n": null,
+      "scalar": true,
+      "history": [
+        0.17
+      ]
+    },
+    "headingLocateCount": {
+      "median": 1,
+      "p95": null,
+      "max": null,
+      "n": null,
+      "scalar": true,
+      "history": [
+        1
+      ]
+    }
+  },
+  "updatedAt": "2026-10-31T14:43:37.835Z"
+}
