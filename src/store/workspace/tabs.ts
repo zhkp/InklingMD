@@ -1679,6 +1679,12 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
         if (pathChanged || resolvedMissing) {
           void get().refreshTree(parentDir(savePath));
         }
+        // #365：只有「写下去的就是当前内容」才清草稿。保存期间又改了（isStillDirty）
+        // 或回执不可信时不删：那份草稿是这段新输入唯一的崩溃副本
+        const savedTabNow = get().openTabs.find((t) => t.path === savePath);
+        if (!savedTabNow?.dirty && !receiptUntrusted) {
+          await clearDraft(activeTabPath);
+        }
       } catch (e) {
         const message = e instanceof Error ? e.message : String(e);
         set((current) => {

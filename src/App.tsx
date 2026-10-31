@@ -24,6 +24,7 @@ import { useGlobalShortcuts } from "./lib/useGlobalShortcuts";
 import { resolveModalAction, type ModalId } from "./lib/modals";
 import { useStartupFile } from "./lib/useStartupFile";
 import { useExitHandler } from "./lib/useExitHandler";
+import { useStartupRecovery } from "./lib/useStartupRecovery";
 import { type EditorOutlineSnapshot } from "./lib/outline";
 import { useOutline } from "./store/outline";
 import { IconPanelLeft } from "./components/icons";
@@ -142,6 +143,8 @@ function App() {
   useFileWatcher();
   // 启动时打开目标文件（派生窗口 / 文件关联 / 单实例转发）
   useStartupFile();
+  // 上次未正常退出时提示恢复草稿（#365 / #378）
+  useStartupRecovery();
   useExitHandler();
 
   // 稳定引用：避免 OutlinePanel 列表项 memo 因 getEditor 身份变化失效

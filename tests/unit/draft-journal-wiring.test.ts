@@ -26,6 +26,11 @@ vi.mock("../../src/lib/fs", () => ({
   fileStat: vi.fn(async () => ({ mtimeUs: 5_000, size: 4 })),
   fileMtime: vi.fn(async () => 5),
   deletePath: vi.fn(),
+  saveDocument: vi.fn(async (_path: string, content: string) => ({
+    kind: "written",
+    stat: { mtimeUs: 9_000, size: content.length },
+    foreignWrite: false,
+  })),
 }));
 
 import {
@@ -199,6 +204,82 @@ describe("#365 草稿元信息与清理时机", () => {
     const draft = JSON.parse(files.get(`/appdata/recovery/main/drafts/${key}.json`)!);
     expect(draft.isUntitled).toBe(true);
     expect(draft.content).toBe("草稿正文 2");
+  });
+
+  it("保存期间又有输入：草稿必须保留，且内容是新的那份", async () => {
+    const files = new Map<string, string>();
+    __setJournalIo({
+      writeTextFile: async (path, content) => {
+        files.set(path, content);
+      },
+      readTextFile: async (path) => files.get(path) ?? "",
+      appDataDir: async () => "/appdata",
+      removeFile: async (path) => {
+        files.delete(path);
+      },
+    });
+    __resetSession("main");
+
+    const DOC = "/w/a.md";
+    useWorkspace.setState({
+      openTabs: [tab(DOC, { diskContent: "基线", diskMtime: 5 })],
+      activeTabPath: DOC,
+      currentFile: DOC,
+      currentContent: "# 正文",
+      dirty: true,
+    } as never);
+    await flushAllDrafts({ durability: "sync" });
+    const draftFile = `/appdata/recovery/main/drafts/${draftFileKey(DOC)}.json`;
+
+    let release!: (v: unknown) => void;
+    const gate = new Promise((resolve) => {
+      release = resolve;
+    });
+    const { saveDocument } = await import("../../src/lib/fs");
+    vi.mocked(saveDocument).mockReturnValueOnce(gate as never);
+
+    const saving = useWorkspace.getState().saveTab(DOC, { interactive: true });
+    // 保存挂起期间又敲了字
+    useWorkspace.getState().setContent("# 保存期间的新输入");
+    release({ kind: "written", stat: { mtimeUs: 9_000, size: 12 }, foreignWrite: false });
+    await saving;
+
+    // 那次保存写下去的是旧内容 → 不能删草稿，否则这段新输入没有任何崩溃副本
+    await flushAllDrafts({ durability: "sync" });
+    expect(files.has(draftFile)).toBe(true);
+    expect(JSON.parse(files.get(draftFile)!).content).toBe("# 保存期间的新输入");
+  });
+
+  it("保存成功后清掉草稿（内容已落盘，副本没有价值）", async () => {
+    const files = new Map<string, string>();
+    __setJournalIo({
+      writeTextFile: async (path, content) => {
+        files.set(path, content);
+      },
+      readTextFile: async (path) => files.get(path) ?? "",
+      appDataDir: async () => "/appdata",
+      removeFile: async (path) => {
+        files.delete(path);
+      },
+    });
+    __resetSession("main");
+
+    const DOC = "/w/a.md";
+    useWorkspace.setState({
+      openTabs: [tab(DOC, { diskContent: "基线", diskMtime: 5 })],
+      activeTabPath: DOC,
+      currentFile: DOC,
+      currentContent: "# 正文",
+      dirty: true,
+    } as never);
+    await flushAllDrafts({ durability: "sync" });
+    const draftFile = `/appdata/recovery/main/drafts/${draftFileKey(DOC)}.json`;
+    expect(files.has(draftFile)).toBe(true);
+
+    await useWorkspace.getState().saveTab(DOC, { interactive: true });
+
+    expect(files.has(draftFile)).toBe(false);
+    expect(useWorkspace.getState().openTabs[0].dirty).toBe(false);
   });
 
   it("reloadFile（用户选择丢弃本地修改）后草稿被删除，不会给出「可恢复」的假提示", async () => {
