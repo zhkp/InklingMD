@@ -51,7 +51,11 @@ for (const tier of ctx.tiers) {
 
       const fixture = fixtureFor(tier, kind);
       const probe = createSessionProbe();
-      const attribution = createAttributionAggregator();
+      // outlinePublish 是只计次探针：本场景每轮都在测量窗口前安装它，
+      // 因此「整轮没有桶」必须记成 0 次发布，而不是从归因里消失（#379）
+      const attribution = createAttributionAggregator({
+        countOnly: ["outlinePublish"],
+      });
       const paintSamples: number[] = [];
       const syncSamples: number[] = [];
       const longTaskCount: number[] = [];

@@ -1,7 +1,55 @@
 // E2E：源代码模式（issue #19）
 
-import { test, expect } from "@playwright/test";
+import { test, expect, type Page } from "@playwright/test";
 import { openMockWorkspace, openFile, moveCaretToDocEnd, MOD } from "./helpers";
+
+/**
+ * 把源码模式大纲防抖（200ms）拉长到 1200ms（#375 竞态用例专用）。
+ *
+ * 不打这个补丁，「退出时定时器是否还挂在队列上」取决于打字速度，竞态是概率事件；
+ * 拉长后它变成确定性事件。只包 delay 恰为 200ms 的定时器，且只在打字期间生效：
+ * 退出前恢复，避免 WYSIWYG tracker 自己的定时器混入计数。
+ */
+async function stretchSourceOutlineDebounce(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    const w = window as unknown as {
+      __outlineTimerFires?: number;
+      __outlineTimerArmed?: boolean;
+      __origSetTimeout?: typeof window.setTimeout;
+    };
+    w.__outlineTimerFires = 0;
+    w.__outlineTimerArmed = false;
+    w.__origSetTimeout = window.setTimeout.bind(window);
+    const orig = w.__origSetTimeout;
+    window.setTimeout = ((
+      handler: TimerHandler,
+      timeout?: number,
+      ...args: unknown[]
+    ) => {
+      if (timeout === 200 && typeof handler === "function") {
+        return orig(() => {
+          if (w.__outlineTimerArmed) {
+            w.__outlineTimerFires = (w.__outlineTimerFires ?? 0) + 1;
+          }
+          handler(...args);
+        }, 1200);
+      }
+      return orig(handler, timeout, ...args);
+    }) as typeof window.setTimeout;
+  });
+}
+
+/** 恢复被拉长的 setTimeout 并布防：此后的迟到触发才计入 __outlineTimerFires */
+async function restoreSetTimeoutAndArm(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    const w = window as unknown as {
+      __outlineTimerArmed?: boolean;
+      __origSetTimeout?: typeof window.setTimeout;
+    };
+    window.setTimeout = w.__origSetTimeout!;
+    w.__outlineTimerArmed = true;
+  });
+}
 
 test.describe("源代码模式", () => {
   test.beforeEach(async ({ page }) => {
@@ -95,6 +143,35 @@ test.describe("源代码模式", () => {
     await expect(source).toBeVisible({ timeout: 5_000 });
     await expect(panel.locator(".outline-item")).toHaveCount(3);
 
+    // 页面内计时（#375 验收）：以最后一次输入为起点，到面板出现第 4 项为止。
+    // 用页面内 performance.now() 记录，CDP 往返不计入；keydown/beforeinput/input
+    // 三种路径都监听——CJK 字符走 insertText，未必有 keydown。
+    await page.evaluate(() => {
+      const w = window as unknown as {
+        __lastInputAt?: number;
+        __outlineSeenAt?: number;
+      };
+      w.__lastInputAt = undefined;
+      w.__outlineSeenAt = undefined;
+      const mark = () => {
+        w.__lastInputAt = performance.now();
+      };
+      for (const type of ["keydown", "beforeinput", "input"]) {
+        document.addEventListener(type, mark, true);
+      }
+      const target = document.querySelector(".outline-panel");
+      if (!target) return;
+      const observer = new MutationObserver(() => {
+        if (w.__outlineSeenAt !== undefined) return;
+        if (document.querySelectorAll(".outline-panel .outline-item").length < 4) {
+          return;
+        }
+        w.__outlineSeenAt = performance.now();
+        observer.disconnect();
+      });
+      observer.observe(target, { childList: true, subtree: true });
+    });
+
     await source.locator(".cm-content").click();
     await moveCaretToDocEnd(page);
     await page.keyboard.press("Enter");
@@ -107,6 +184,25 @@ test.describe("源代码模式", () => {
     // 旧标题仍在且顺序不变（未因重解析整体错位）
     await expect(items.nth(0)).toContainText("一级标题");
     await expect(items.nth(2)).toContainText("三级标题");
+
+    // #375 的真实验收：停笔 250ms 内更新。5 秒轮询只能证明「最终会更新」，
+    // 退化成秒级也照样绿，因此必须断言时延上界（防抖常量与回调内同步
+    // 发布的确定性锁在 tests/unit/restartable-debounce.test.ts）。
+    const elapsed = await page.evaluate(() => {
+      const w = window as unknown as {
+        __lastInputAt?: number;
+        __outlineSeenAt?: number;
+      };
+      return typeof w.__lastInputAt === "number" &&
+        typeof w.__outlineSeenAt === "number"
+        ? w.__outlineSeenAt - w.__lastInputAt
+        : null;
+    });
+    expect(elapsed, "未采集到停笔 → 大纲更新的时延").not.toBeNull();
+    expect(
+      elapsed as number,
+      `停笔到大纲更新耗时 ${elapsed}ms，超过 #375 的 250ms 验收上限`,
+    ).toBeLessThanOrEqual(250);
   });
 
   test("SM8 源码模式新增标题后立即退出，大纲不回退旧快照（#375 竞态）", async ({ page }) => {
@@ -122,34 +218,7 @@ test.describe("源代码模式", () => {
 
     // 把源码模式大纲防抖（200ms）拉长到 1200ms：打字速度不再决定
     // 「切回 WYSIWYG 时定时器是否还挂在队列上」，竞态成为确定性事件。
-    // 只包 200ms 定时器，且只在打字期间生效；切回前恢复，避免 WYSIWYG tracker
-    // 自己的 200ms 滚动停歇刷新混入计数。
-    await page.evaluate(() => {
-      const w = window as unknown as {
-        __outlineTimerFires?: number;
-        __outlineTimerArmed?: boolean;
-        __origSetTimeout?: typeof window.setTimeout;
-      };
-      w.__outlineTimerFires = 0;
-      w.__outlineTimerArmed = false;
-      w.__origSetTimeout = window.setTimeout.bind(window);
-      const orig = w.__origSetTimeout;
-      window.setTimeout = ((
-        handler: TimerHandler,
-        timeout?: number,
-        ...args: unknown[]
-      ) => {
-        if (timeout === 200 && typeof handler === "function") {
-          return orig(() => {
-            if (w.__outlineTimerArmed) {
-              w.__outlineTimerFires = (w.__outlineTimerFires ?? 0) + 1;
-            }
-            handler(...args);
-          }, 1200);
-        }
-        return orig(handler, timeout, ...args);
-      }) as typeof window.setTimeout;
-    });
+    await stretchSourceOutlineDebounce(page);
 
     await source.locator(".cm-content").click();
     await moveCaretToDocEnd(page);
@@ -158,15 +227,7 @@ test.describe("源代码模式", () => {
 
     // 打字结束：恢复 setTimeout 并布防（此后的迟到触发才计入），再切回 WYSIWYG。
     // 卸载若没清掉待执行定时器，它会在 1200ms 后触发并留下计数。
-    await page.evaluate(() => {
-      const w = window as unknown as {
-        __outlineTimerFires?: number;
-        __outlineTimerArmed?: boolean;
-        __origSetTimeout?: typeof window.setTimeout;
-      };
-      window.setTimeout = w.__origSetTimeout!;
-      w.__outlineTimerArmed = true;
-    });
+    await restoreSetTimeoutAndArm(page);
     await page.keyboard.press(`${MOD}+Alt+KeyS`);
     await expect(page.locator(".ProseMirror")).toBeVisible({ timeout: 5_000 });
 
@@ -185,6 +246,91 @@ test.describe("源代码模式", () => {
       ),
     ).toBe(0);
     await expect(items).toHaveCount(4);
+  });
+
+  test("SM10 退出源码模式的首个可见帧就已是新大纲（#375 首帧）", async ({ page }) => {
+    await openFile(page, "outline-demo.md");
+    const panel = page.locator(".outline-panel");
+    if (!(await panel.isVisible().catch(() => false))) {
+      await page.keyboard.press(`${MOD}+'`);
+      await expect(panel).toBeVisible({ timeout: 5_000 });
+    }
+    await page.keyboard.press(`${MOD}+Alt+KeyS`);
+    const source = page.getByTestId("source-mode-editor");
+    await expect(source).toBeVisible({ timeout: 5_000 });
+    await expect(panel.locator(".outline-item")).toHaveCount(3);
+
+    // 与 SM8 同一手法：把防抖拉长到 1200ms，退出时定时器必然还挂着。
+    // 这样「首帧是不是旧快照」不再取决于打字速度。
+    await stretchSourceOutlineDebounce(page);
+
+    await source.locator(".cm-content").click();
+    await moveCaretToDocEnd(page);
+    await page.keyboard.press("Enter");
+    await page.keyboard.type("# 首帧标题");
+
+    // 首帧采样：ProseMirror 重新可见后的第一个绘制帧里，大纲面板有哪几项。
+    // rAF 回调在绘制前执行，读到的就是这一帧真正会画出来的 DOM。
+    await page.evaluate(() => {
+      const w = window as unknown as { __firstFrameOutline?: string[] | null };
+      w.__firstFrameOutline = null;
+      const tick = () => {
+        const holder = document.querySelector(".md-editor-wysiwyg");
+        const pm = document.querySelector(".ProseMirror");
+        const visible =
+          holder instanceof HTMLElement &&
+          pm instanceof HTMLElement &&
+          getComputedStyle(holder).display !== "none" &&
+          pm.getBoundingClientRect().height > 0;
+        if (visible) {
+          w.__firstFrameOutline = Array.from(
+            document.querySelectorAll(".outline-panel .outline-item"),
+          ).map((el) => el.textContent ?? "");
+          return;
+        }
+        requestAnimationFrame(tick);
+      };
+      requestAnimationFrame(tick);
+    });
+
+    await restoreSetTimeoutAndArm(page);
+    await page.keyboard.press(`${MOD}+Alt+KeyS`);
+    await expect(page.locator(".ProseMirror")).toBeVisible({ timeout: 5_000 });
+
+    await expect
+      .poll(
+        async () =>
+          page.evaluate(
+            () =>
+              (window as unknown as { __firstFrameOutline?: string[] | null })
+                .__firstFrameOutline ?? null,
+          ),
+        { timeout: 5_000 },
+      )
+      .not.toBeNull();
+
+    const firstFrame = await page.evaluate(
+      () =>
+        (window as unknown as { __firstFrameOutline?: string[] })
+          .__firstFrameOutline ?? [],
+    );
+    // 退出过渡必须同帧刷新大纲：首个可见帧就要有 4 项且含新标题，
+    // 不能先画旧快照、等 150ms 防抖再补
+    expect(firstFrame.length, `首帧大纲项：${JSON.stringify(firstFrame)}`).toBe(4);
+    expect(firstFrame[3]).toContain("首帧标题");
+
+    // 越过被拉长的旧定时器：已卸载的源码防抖不得把退出前的快照写回来
+    await page.waitForTimeout(1_400);
+    const items = panel.locator(".outline-item");
+    await expect(items).toHaveCount(4);
+    await expect(items.nth(3)).toContainText("首帧标题");
+    expect(
+      await page.evaluate(
+        () =>
+          (window as unknown as { __outlineTimerFires?: number })
+            .__outlineTimerFires,
+      ),
+    ).toBe(0);
   });
 
   test("SM9 源码模式滚动时活动标题按行号定位（含重复标题）", async ({ page }) => {

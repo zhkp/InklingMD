@@ -11,6 +11,7 @@ import type { EditorView } from "@milkdown/kit/prose/view";
 import {
   flushAllMarkdownPublishers,
 } from "./markdown-publisher";
+import { markOutlineImmediateRefresh } from "./outline-tracker";
 import { useSettings } from "../../store/settings";
 import { useWorkspace } from "../../store/workspace";
 import {
@@ -290,10 +291,15 @@ export function useSourceModeTransition({
             const view = ctx.get(editorViewCtx);
             const parser = ctx.get(parserCtx);
             const newDoc = parser(value);
-            let tr = view.state.tr.replaceWith(
-              0,
-              view.state.doc.content.size,
-              newDoc.content,
+            // 整文档替换挂「同帧刷新大纲」标记（#375）：否则面板在退出后的
+            // 首个可见帧仍是源码模式退出前的快照，新增标题要等 tracker 的
+            // 150ms 防抖才出现。
+            let tr = markOutlineImmediateRefresh(
+              view.state.tr.replaceWith(
+                0,
+                view.state.doc.content.size,
+                newDoc.content,
+              ),
             );
             // 重置撤销历史（issue #27）：整文档替换后旧 PM undo 步骤指向
             // 切换前的快照，Ctrl+Z 会退回与当前 markdown 不一致的旧文档。

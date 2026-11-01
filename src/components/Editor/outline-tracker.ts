@@ -14,7 +14,7 @@
 // 到文档头。改为重算完成后按当前 scrollTop 采样定位；防抖窗口内
 // （stale）跳过采样与选区推导，避免旧文档标题集产出错误高亮。
 
-import { Plugin, PluginKey } from "@milkdown/kit/prose/state";
+import { Plugin, PluginKey, type Transaction } from "@milkdown/kit/prose/state";
 import {
   extractEditorOutline,
   findActiveHeadingIndex,
@@ -27,17 +27,38 @@ const VIEWPORT_HEADING_OFFSET = 12;
 /** 滚动采样节流间隔：目录高亮延迟 120ms 人眼不可辨 */
 const SAMPLE_MIN_INTERVAL_MS = 120;
 
+/**
+ * 请求「整文档替换后同帧刷新大纲」（#375）。
+ *
+ * 退出源码模式时 `useSourceModeTransition` 用一次全量 `replaceWith` 把源码灌回
+ * ProseMirror：若该事务只走 150ms 防抖，面板会带着退出前的旧快照进入首个可见帧
+ * （用户在源码里新增的标题要等防抖落地才出现）。带上此标记的替换在本帧内
+ * 重算并发布，不额外开一个异步窗口。
+ *
+ * 只由「整文档替换」这类昂贵且用户可见的过渡使用——按键路径仍是防抖，
+ * 否则每敲一个字都要遍历全文（#375 的性能前提）。
+ */
+export const markOutlineImmediateRefresh = (tr: Transaction): Transaction =>
+  tr.setMeta(key, "immediate");
+
 export const outlineTrackerPlugin = (
   onChange: (snapshot: EditorOutlineSnapshot) => void,
 ) =>
   new Plugin({
     key,
+    // 同步刷新请求计数：meta 只在事务上存在，需要落进 plugin state 才能被 view.update 读到
+    state: {
+      init: () => 0,
+      apply: (tr, seq) => (tr.getMeta(key) ? seq + 1 : seq),
+    },
     view: (view) => {
       let headings = extractEditorOutline(view.state.doc);
       let activeIndex = findActiveHeadingIndex(
         headings,
         view.state.selection.head,
       );
+      /** 已处理到的同步刷新序号（初值取当前状态，避免把历史请求当成新请求） */
+      let refreshSeq = key.getState(view.state) ?? 0;
       let scrollFrame: number | null = null;
       let sampleTimer: ReturnType<typeof setTimeout> | null = null;
       let lastSampleAt = 0;
@@ -175,8 +196,39 @@ export const outlineTrackerPlugin = (
           const selectionChanged = !nextView.state.selection.eq(
             previousState.selection,
           );
+          // 同步刷新请求（#375）：只由整文档替换携带，见 markOutlineImmediateRefresh
+          const nextSeq = key.getState(nextView.state) ?? refreshSeq;
+          const immediateRefresh = nextSeq !== refreshSeq;
+          refreshSeq = nextSeq;
 
           if (docChanged) {
+            // 整文档替换（退出源码模式）：本帧同步重算并发布，首个可见帧
+            // 不得是替换前的旧快照（#375）。防抖窗口若还挂着旧文档的重算，
+            // 直接丢弃——它算的是替换前的标题集。
+            if (immediateRefresh) {
+              if (extractTimer) {
+                clearTimeout(extractTimer);
+                extractTimer = null;
+              }
+              const previousActive = activeIndex;
+              headings = extractEditorOutline(nextView.state.doc);
+              // 此刻 WYSIWYG 的选区与滚动还没恢复（退出过渡在 2 帧后才做锚点
+              // 恢复），按选区推导会把高亮闪回首标题。标题集通常只在末尾新增，
+              // 优先保留原索引；越界时才退回选区推导。
+              activeIndex =
+                typeof previousActive === "number" &&
+                previousActive >= 0 &&
+                previousActive < headings.length
+                  ? previousActive
+                  : findActiveHeadingIndex(
+                      headings,
+                      nextView.state.selection.head,
+                    );
+              rebuildHeadingTops();
+              stale = false;
+              onChange({ headings, activeIndex });
+              return;
+            }
             // 标题集合防抖重算；窗口内采样跳过（stale），重算完成后
             // 重建位置缓存并按当前 scrollTop 定位当前章节
             stale = true;

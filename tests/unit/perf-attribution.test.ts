@@ -127,6 +127,41 @@ describe("归因标量聚合（#379）", () => {
     });
   });
 
+  it("只计次的桶在所有轮都没有桶时输出 0（探针已装 = 每轮 0 次事件）", () => {
+    // 背景（#379 评审 P1）：input-source 每轮都在测量窗口前安装 outlinePublish 探针。
+    // 60 个字符的输入不改大纲结构，发布次数为 0 → 桶根本不出现。此前的实现
+    // `entries.length === 0` 直接 continue，导致「发布次数」在 baseline 里整列消失，
+    // 读者会以为没测，而不是「一次都没发布」。
+    const agg = createAttributionAggregator({ countOnly: ["outlinePublish"] });
+    agg.add({});
+    agg.add({});
+    agg.add({});
+    expect(agg.scalars()).toEqual({ outlinePublishCount: 0 });
+  });
+
+  it("未声明 countOnly 的场景不伪造 0（没装探针 = 未测量）", () => {
+    // open / scroll / input 场景不装大纲探针：全空必须继续按「未测量」处理，
+    // 否则 0 会被读成「发布成本为零」，比缺一项更误导。
+    const agg = createAttributionAggregator();
+    agg.add({});
+    agg.add({});
+    expect(agg.scalars()).toEqual({});
+  });
+
+  it("声明 countOnly 不改变计时桶的缺失语义（计时仍不伪造 0ms）", () => {
+    const agg = createAttributionAggregator({ countOnly: ["outlinePublish"] });
+    agg.add({});
+    expect(agg.scalars()).toEqual({ outlinePublishCount: 0 });
+  });
+
+  it("声明 countOnly 后仍按总轮数平均（部分轮有桶时不被全空逻辑干扰）", () => {
+    const agg = createAttributionAggregator({ countOnly: ["outlinePublish"] });
+    agg.add({ outlinePublish: { count: 4, totalMs: 0, maxMs: 0 } });
+    agg.add({});
+    agg.add({});
+    expect(agg.scalars()).toEqual({ outlinePublishCount: 1.33 });
+  });
+
   it("桶派生名与 judgment 白名单一致（防止进了基线却永不显示）", () => {
     const derived = ATTRIBUTION_BUCKETS.flatMap((name) =>
       COUNT_ONLY_BUCKETS.has(name)

@@ -534,6 +534,8 @@ export function waitFormulaSettled(opts: { maxFrames: number }): Promise<{
   rendered: number;
   empty: number;
   frames: number;
+  /** 是否真的等到了完成条件；false = 帧预算耗尽（超时） */
+  complete: boolean;
 }> {
   const nodeViews = document.querySelectorAll(
     "[data-math-inline], [data-math-display]",
@@ -548,13 +550,25 @@ export function waitFormulaSettled(opts: { maxFrames: number }): Promise<{
     rendered: number;
     empty: number;
     frames: number;
+    complete: boolean;
   }>((resolve) => {
     const settle = (): void => {
       const rendered = document.querySelectorAll(
         "[data-math-inline] .katex, [data-math-display] .katex",
       ).length;
-      if (rendered + empty >= nodeViews || frames >= opts.maxFrames) {
-        resolve({ at: performance.now(), nodeViews, rendered, empty, frames });
+      const complete = rendered + empty >= nodeViews;
+      // 超时与完成必须区分（#379 评审 P1）：帧预算耗尽时 `at` 只是超时时刻，
+      // 拿它当 formulaReadyMs 会把「还没渲染完」记成「渲染耗时」。调用方据此
+      // 判定测量失败，不写不完整样本。
+      if (complete || frames >= opts.maxFrames) {
+        resolve({
+          at: performance.now(),
+          nodeViews,
+          rendered,
+          empty,
+          frames,
+          complete,
+        });
         return;
       }
       frames += 1;
@@ -570,6 +584,9 @@ export function waitFormulaSettled(opts: { maxFrames: number }): Promise<{
  * 每个桶输出 `<name>Ms`（每轮总耗时均值）、`<name>MaxMs`（单次最大耗时均值）、
  * `<name>Count`（每轮调用次数均值）。缺失的桶不输出——纯文本档没有公式，
  * 伪造 0 会让「未测量」看起来像「零成本」。
+ *
+ * 例外是**只计次桶**：调用方通过 `countOnly` 声明「本次场景已按契约安装该探针」，
+ * 此时「每轮都没有桶」本身就是测量结果（0 次事件），必须输出 0（见 scalars）。
  */
 export const ATTRIBUTION_BUCKETS = [
   "stats",
@@ -591,9 +608,19 @@ export const COUNT_ONLY_BUCKETS: ReadonlySet<string> = new Set([
   "outlinePublish",
 ]);
 
-export function createAttributionAggregator() {
+export function createAttributionAggregator(
+  opts: {
+    /**
+     * 已按场景契约安装的只计次探针（如 input-source 的 `outlinePublish`）。
+     * 安装后「所有轮次都没有桶」= 每轮 0 次事件，必须输出 0；
+     * 未声明的场景（没装探针）仍按「未测量」跳过，不能伪造成 0。
+     */
+    countOnly?: readonly string[];
+  } = {},
+) {
   const rounds: PerfProbeBuckets[] = [];
   const round2 = (n: number): number => Math.round(n * 100) / 100;
+  const declaredCountOnly = new Set(opts.countOnly ?? []);
 
   return {
     add(buckets: PerfProbeBuckets): void {
@@ -608,7 +635,15 @@ export function createAttributionAggregator() {
           .filter((b): b is { count: number; totalMs: number; maxMs: number } =>
             Boolean(b),
           );
-        if (entries.length === 0) continue;
+        if (entries.length === 0) {
+          // 只计次桶 + 探针已安装：全部轮次都没有桶 = 每轮 0 次事件。
+          // 不输出会让「发布次数」在 baseline 里整列消失（读者以为没测）；
+          // 计时桶缺桶无法区分「0ms」与「没测」，仍按未测量跳过。
+          if (declaredCountOnly.has(name) && COUNT_ONLY_BUCKETS.has(name)) {
+            out[`${name}Count`] = 0;
+          }
+          continue;
+        }
         // 只计次的桶：探针在测量窗口开始前已安装，某轮没有桶 = 该轮 0 次事件，
         // 必须按总轮数平均；否则「3 轮里只发生 1 次」会被算成「每轮 1 次」。
         // 计时桶缺失仍视为未测量，只对有桶的轮取均值（不伪造 0ms）。

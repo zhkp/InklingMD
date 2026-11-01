@@ -263,8 +263,13 @@ function absoluteRows(raw) {
 /**
  * 归因行（issue #379）：只披露、不判定。
  * base 缺失时保留 `—`（新指标尚未播种进基线），不能伪造成 0。
+ *
+ * 可比性门禁与主判定**同一份**（#379 评审 P1）：baseline 只在
+ * `baselineComparability().ok` 时传入。归因行同样要显示变化率，若拿不同
+ * fixture / 不同环境的旧参考值来算，「钱花在哪」会变成伪对照——连"没有变化"
+ * 都是假的。不可比时传 incomparableReason，报告里替代参考值并显式标注原因。
  */
-function attributionRows(raw, baseline) {
+function attributionRows(raw, baseline, incomparableReason) {
   const rows = [];
   for (const metric of ATTRIBUTION_METRICS) {
     const cur = raw.scalars?.[metric];
@@ -274,6 +279,7 @@ function attributionRows(raw, baseline) {
       metric,
       base: typeof base === "number" ? base : null,
       cur,
+      incomparable: incomparableReason ?? null,
     });
   }
   return rows;
@@ -833,8 +839,14 @@ function main() {
       baselineState: state.reason,
       metrics: verdicts,
       overMetrics,
-      // 归因指标（#379）：不参与判定，只披露统计 / 大纲 / 公式各花在哪
-      attribution: attributionRows(raw, baseline),
+      // 归因指标（#379）：不参与判定，只披露统计 / 大纲 / 公式各花在哪。
+      // baseline 与主判定同一门禁：不可比时不传，避免把旧 fixture / 旧环境的
+      // 参考值算成变化率（归因行也显示百分比，同样会误导）。
+      attribution: attributionRows(
+        raw,
+        state.ok ? baseline : null,
+        state.ok ? null : state.reason,
+      ),
       // 会话标定（#236）：不参与判定，只供「环境归因」披露使用（首轮 / 复测 / 确认轮三轮对账）
       sessionProbe: probe,
       // 该场景是否进入了确认轮（#294）：由 retest2.json 决定，不是「碰巧有第三轮数据」。
@@ -1282,12 +1294,18 @@ function main() {
     lines.push("| 场景 | 指标 | 基线参考 | 本次 | 变化 |");
     lines.push("|---|---|---|---|---|");
     for (const row of attributionRowsAll) {
+      // 不可比：不展示旧参考值，也不展示变化率（那会是伪对照），只标原因
+      const baseCell = row.incomparable
+        ? `不可比：${row.incomparable}`
+        : (row.base ?? "—");
       const delta =
-        typeof row.base !== "number" || row.base === 0
+        row.incomparable ||
+        typeof row.base !== "number" ||
+        row.base === 0
           ? "—"
           : `${(((row.cur - row.base) / row.base) * 100).toFixed(1)}%`;
       lines.push(
-        `| ${row.id} | ${row.metric} | ${row.base ?? "—"} | ${round(row.cur)} | ${delta} |`,
+        `| ${row.id} | ${row.metric} | ${baseCell} | ${round(row.cur)} | ${delta} |`,
       );
     }
   }

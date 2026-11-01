@@ -81,6 +81,19 @@ for (const tier of ctx.tiers) {
         const observersAfterFormula = await page.evaluate(readObservers);
         const buckets = await page.evaluate(readPerfProbe);
 
+        // 含公式的档位一律先校验「等到了完成条件」（#379 评审 P1）：帧预算耗尽时
+        // formula.at 只是超时时刻，拿它当 formulaReadyMs 等于把「还没渲染完」
+        // 记成「渲染耗时」，正好破坏 #376「先测量再决定」的证据边界。
+        // 测量失败就判红，不写不完整样本（宁缺勿假）。
+        if (formula.nodeViews > 0) {
+          expect(
+            formula.complete,
+            `${id}：KaTeX 未在 ${formula.frames} 帧内渲染完全` +
+              `（${formula.rendered}+${formula.empty} 空/${formula.nodeViews}），` +
+              `公式归因按测量失败处理`,
+          ).toBe(true);
+        }
+
         // 公式密集档必须真的有 200+ 公式节点（#376 的测量前提），否则数据不能用于决策
         if (
           kind === "rich" &&
@@ -110,7 +123,8 @@ for (const tier of ctx.tiers) {
               : 0,
           );
           attribution.add(buckets);
-          if (formula.nodeViews > 0) {
+          // 只记录等到完成条件的样本；超时轮次的公式桶不完整（#379 评审 P1）
+          if (formula.nodeViews > 0 && formula.complete) {
             formulaReadyMs.push(formula.at - startAt);
             formulaNodeViews.push(formula.nodeViews);
             formulaRendered.push(formula.rendered);

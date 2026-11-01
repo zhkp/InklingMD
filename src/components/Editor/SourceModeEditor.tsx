@@ -28,10 +28,12 @@ import {
   perfProbeEnd,
   perfProbeStart,
 } from "../../lib/perf-probe";
+import {
+  createRestartableDebounce,
+  SOURCE_OUTLINE_DEBOUNCE_MS,
+} from "../../lib/restartable-debounce";
 import { useSettings } from "../../store/settings";
 
-/** 输入停顿后重算大纲：满足「停笔 250ms 内更新」，与 WYSIWYG tracker 的 150ms 同量级 */
-const OUTLINE_DEBOUNCE_MS = 200;
 /** 视口顶部采样偏移（与 WYSIWYG outline-tracker 的 VIEWPORT_HEADING_OFFSET 一致） */
 const VIEWPORT_HEADING_OFFSET = 12;
 
@@ -127,7 +129,6 @@ export function SourceModeEditor({
     let scrollRaf: number | null = null;
     let activeHeadings = extractMarkdownOutline(value);
     let currentActiveIndex = -1;
-    let outlineTimer: number | null = null;
     /** 最近一次内容变化的时间点（探针未启用时为 null） */
     let outlineSettleStart: number | null = null;
     // 防抖窗口内旧标题的行号已失效：滚动采样与发布一律跳过，
@@ -176,6 +177,33 @@ export function SourceModeEditor({
       publishOutline(activeHeadings, locateActiveHeading(view, activeHeadings));
     };
 
+    // 停笔后重算并发布（#375）：用回调时刻的最新文档（防抖窗口内可能还有
+    // 别的更新路径），重算 + 发布在定时器回调内同步完成，不再等下一帧。
+    const outlineDebounce = createRestartableDebounce({
+      delayMs: SOURCE_OUTLINE_DEBOUNCE_MS,
+      run: () => {
+        const v = viewRef.current;
+        if (!v) return;
+        const nextHeadings = extractMarkdownOutline(v.state.doc.toString());
+        const nextActive = locateActiveHeading(v, nextHeadings);
+        const structureChanged = !isSameMarkdownOutline(
+          activeHeadings,
+          nextHeadings,
+        );
+        // 行号/文本都没变时也换成本次结果：标题偏移可能因上方行变长而移动，
+        // scrollToHeading 的兜底 pos 需要最新值；不发布则不会触发面板重渲染。
+        activeHeadings = nextHeadings;
+        if (structureChanged || nextActive !== currentActiveIndex) {
+          publishOutline(activeHeadings, nextActive);
+        }
+        outlineStale = false;
+        // 计时结束放在重算/发布之后：outlineSettle 表示「停笔 → 大纲更新完成」
+        // 的完整时延，而不是只含防抖等待的定时器延迟（#379 归因口径）
+        perfProbeEnd("outlineSettle", outlineSettleStart);
+        outlineSettleStart = null;
+      },
+    });
+
     const state = EditorState.create({
       doc: value,
       selection: { anchor: safeCursor, head: safeCursor },
@@ -191,31 +219,8 @@ export function SourceModeEditor({
           // 不在按键路径上重解析全文/逐标题定位：只重置防抖，停笔后统一重算。
           // 结构未变时不发布，避免 OutlinePanel 整表重渲染。
           outlineStale = true;
-          if (outlineTimer !== null) window.clearTimeout(outlineTimer);
           outlineSettleStart = perfProbeStart();
-          outlineTimer = window.setTimeout(() => {
-            outlineTimer = null;
-            // 用回调时刻的最新文档：防抖窗口内可能还有别的更新路径
-            const nextHeadings = extractMarkdownOutline(
-              update.view.state.doc.toString(),
-            );
-            const nextActive = locateActiveHeading(update.view, nextHeadings);
-            const structureChanged = !isSameMarkdownOutline(
-              activeHeadings,
-              nextHeadings,
-            );
-            // 行号/文本都没变时也换成本次结果：标题偏移可能因上方行变长而移动，
-            // scrollToHeading 的兜底 pos 需要最新值；不发布则不会触发面板重渲染。
-            activeHeadings = nextHeadings;
-            if (structureChanged || nextActive !== currentActiveIndex) {
-              publishOutline(activeHeadings, nextActive);
-            }
-            outlineStale = false;
-            // 计时结束放在重算/发布之后：outlineSettle 表示「停笔 → 大纲更新完成」
-            // 的完整时延，而不是只含防抖等待的定时器延迟（#379 归因口径）
-            perfProbeEnd("outlineSettle", outlineSettleStart);
-            outlineSettleStart = null;
-          }, OUTLINE_DEBOUNCE_MS);
+          outlineDebounce.schedule();
         }),
       ],
     });
@@ -348,10 +353,7 @@ export function SourceModeEditor({
     return () => {
       if (restoreRaf !== null) cancelAnimationFrame(restoreRaf);
       if (scrollRaf !== null) cancelAnimationFrame(scrollRaf);
-      if (outlineTimer !== null) {
-        window.clearTimeout(outlineTimer);
-        outlineTimer = null;
-      }
+      outlineDebounce.cancel();
       outlineSettleStart = null;
       resizeObs?.disconnect();
       unregisterSourceModeScroll(filePath);
