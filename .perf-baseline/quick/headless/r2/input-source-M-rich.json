@@ -15,15 +15,17 @@
   },
   "metrics": {
     "inputPaintMs": {
-      "median": 16.7,
-      "p95": 29.9,
-      "max": 39.2,
+      "median": 16.6,
+      "p95": 26.3,
+      "max": 31,
       "n": 120,
       "history": [
-        16.7
+        16.7,
+        16.6
       ],
       "historyP95": [
-        29.9
+        29.9,
+        26.3
       ]
     },
     "inputSyncMs": {
@@ -32,9 +34,11 @@
       "max": 0.7,
       "n": 120,
       "history": [
+        0.4,
         0.4
       ],
       "historyP95": [
+        0.6,
         0.6
       ]
     },
@@ -45,6 +49,7 @@
       "n": null,
       "scalar": true,
       "history": [
+        0,
         0
       ]
     },
@@ -55,6 +60,7 @@
       "n": null,
       "scalar": true,
       "history": [
+        0,
         0
       ]
     },
@@ -65,6 +71,7 @@
       "n": null,
       "scalar": true,
       "history": [
+        0,
         0
       ]
     },
@@ -75,57 +82,63 @@
       "n": null,
       "scalar": true,
       "history": [
+        0,
         0
       ]
     },
     "probeMs": {
-      "median": 45.55,
+      "median": 38.7,
       "p95": null,
       "max": null,
       "n": null,
       "scalar": true,
       "history": [
-        45.55
+        45.55,
+        38.7
       ]
     },
     "probeLayoutMs": {
-      "median": 13.2,
+      "median": 9.4,
       "p95": null,
       "max": null,
       "n": null,
       "scalar": true,
       "history": [
-        13.2
+        13.2,
+        9.4
       ]
     },
     "probeCpuMs": {
-      "median": 32.35,
+      "median": 29.3,
       "p95": null,
       "max": null,
       "n": null,
       "scalar": true,
       "history": [
-        32.35
+        32.35,
+        29.3
       ]
     },
     "statsMs": {
-      "median": 2.65,
+      "median": 1.75,
       "p95": null,
       "max": null,
       "n": null,
       "scalar": true,
       "history": [
-        2.65
+        2.65,
+        1.75
       ]
     },
     "statsMaxMs": {
-      "median": 2.65,
+      "median": 1.75,
       "p95": null,
       "max": null,
       "n": null,
       "scalar": true,
       "history": [
-        2.65
+        2.65,
+        1.75
       ]
     },
     "statsCount": {
@@ -135,27 +148,30 @@
       "n": null,
       "scalar": true,
       "history": [
+        1,
         1
       ]
     },
     "statsSettleMs": {
-      "median": 302.7,
+      "median": 301.95,
       "p95": null,
       "max": null,
       "n": null,
       "scalar": true,
       "history": [
-        302.7
+        302.7,
+        301.95
       ]
     },
     "statsSettleMaxMs": {
-      "median": 302.7,
+      "median": 301.95,
       "p95": null,
       "max": null,
       "n": null,
       "scalar": true,
       "history": [
-        302.7
+        302.7,
+        301.95
       ]
     },
     "statsSettleCount": {
@@ -165,27 +181,30 @@
       "n": null,
       "scalar": true,
       "history": [
+        1,
         1
       ]
     },
     "outlineExtractMs": {
-      "median": 2,
+      "median": 1.4,
       "p95": null,
       "max": null,
       "n": null,
       "scalar": true,
       "history": [
-        2
+        2,
+        1.4
       ]
     },
     "outlineExtractMaxMs": {
-      "median": 2,
+      "median": 1.4,
       "p95": null,
       "max": null,
       "n": null,
       "scalar": true,
       "history": [
-        2
+        2,
+        1.4
       ]
     },
     "outlineExtractCount": {
@@ -195,27 +214,30 @@
       "n": null,
       "scalar": true,
       "history": [
+        1,
         1
       ]
     },
     "outlineSettleMs": {
-      "median": 202.4,
+      "median": 201.9,
       "p95": null,
       "max": null,
       "n": null,
       "scalar": true,
       "history": [
-        202.4
+        202.4,
+        201.9
       ]
     },
     "outlineSettleMaxMs": {
-      "median": 202.4,
+      "median": 201.9,
       "p95": null,
       "max": null,
       "n": null,
       "scalar": true,
       "history": [
-        202.4
+        202.4,
+        201.9
       ]
     },
     "outlineSettleCount": {
@@ -225,6 +247,7 @@
       "n": null,
       "scalar": true,
       "history": [
+        1,
         1
       ]
     },
@@ -235,6 +258,7 @@
       "n": null,
       "scalar": true,
       "history": [
+        0.15,
         0.15
       ]
     },
@@ -245,6 +269,7 @@
       "n": null,
       "scalar": true,
       "history": [
+        0.15,
         0.15
       ]
     },
@@ -255,9 +280,20 @@
       "n": null,
       "scalar": true,
       "history": [
+        1,
         1
+      ]
+    },
+    "outlinePublishCount": {
+      "median": 0,
+      "p95": null,
+      "max": null,
+      "n": null,
+      "scalar": true,
+      "history": [
+        0
       ]
     }
   },
-  "updatedAt": "2026-10-31T14:48:16.181Z"
+  "updatedAt": "2026-11-01T09:23:58.567Z"
 }
