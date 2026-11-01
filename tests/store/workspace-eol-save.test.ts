@@ -1,23 +1,41 @@
 // 换行保真保存链路单测（issue #368）
 //
-// 锁定 saveCurrent / ensureTab / reloadFile / setTabDiskContent 的换行元数据流转：
-// - 读取时检测 EOL 存入 tab（detectEol），保存写盘前按原风格还原（applyEol）；
+// 锁定 #368 的换行元数据在 main 新写盘架构（#362 成对读取 + 写盘回执）下的流转：
+// - 读取时检测 EOL 存入 tab（detectEol，走 readDocument 的成对快照）；
+// - 保存写盘前按原风格还原（applyEol），覆盖全部写盘点：
+//   · 有 diskStat → saveDocument(expected = 磁盘身份)
+//   · 无 diskStat（旧 tab / 恢复 tab）→ writeTextFile({ mustExist })
+//   · 草稿另存为 → writeTextFile
+//   · 合并保存（草稿另存到已打开文件）→ writeTextFile（沿用目标 eol）
 // - diskContent 基线记录写盘字节（含换行还原），后续冲突比对不失配；
-// - 混合换行按主导风格归一并 console.warn 告警；
-// - 合并保存（草稿另存到已打开文件）沿用目标文件的换行风格；
-// - reloadFile / 冲突基线同步时换行元数据随磁盘内容重检。
+// - 混合换行按主导风格归一并 console.warn；写盘后清 eolMixed 防重复告警；
+// - reloadFile / setTabDiskContent 换行元数据随磁盘内容重检。
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { FileStat } from "../../src/lib/fs";
 import type { OpenTab } from "../../src/store/workspace";
 
-const { readTextFileMock, writeTextFileMock, fileMtimeMock, isTauriMock, saveDialogMock } =
-  vi.hoisted(() => ({
-    readTextFileMock: vi.fn(),
-    writeTextFileMock: vi.fn(),
-    fileMtimeMock: vi.fn(),
-    isTauriMock: vi.fn(() => true),
-    saveDialogMock: vi.fn(),
-  }));
+const {
+  readDocumentMock,
+  saveDocumentMock,
+  writeTextFileMock,
+  fileStatMock,
+  fileMtimeMock,
+  readTextFileMock,
+  listDirMock,
+  isTauriMock,
+  saveDialogMock,
+} = vi.hoisted(() => ({
+  readDocumentMock: vi.fn(),
+  saveDocumentMock: vi.fn(),
+  writeTextFileMock: vi.fn(),
+  fileStatMock: vi.fn(),
+  fileMtimeMock: vi.fn(),
+  readTextFileMock: vi.fn(),
+  listDirMock: vi.fn(),
+  isTauriMock: vi.fn(() => true),
+  saveDialogMock: vi.fn(),
+}));
 
 vi.mock("@tauri-apps/api/core", () => ({
   isTauri: isTauriMock,
@@ -26,16 +44,25 @@ vi.mock("@tauri-apps/api/core", () => ({
 vi.mock("@tauri-apps/plugin-dialog", () => ({
   ask: vi.fn(),
   save: saveDialogMock,
+  message: vi.fn(),
 }));
 
 vi.mock("../../src/lib/fs", () => ({
-  readTextFile: readTextFileMock,
+  readDocument: readDocumentMock,
+  saveDocument: saveDocumentMock,
   writeTextFile: writeTextFileMock,
+  fileStat: fileStatMock,
   fileMtime: fileMtimeMock,
+  readTextFile: readTextFileMock,
+  listDir: listDirMock,
 }));
 
 import { useWorkspace } from "../../src/store/workspace";
 
+/** 磁盘身份：mtimeUs 与 size（成对读取 / 写盘回执共用） */
+const STAT: FileStat = { mtimeUs: 1_000_000, size: 100 };
+
+/** 带成对基线的磁盘 tab（走 saveDocument 主路径） */
 function diskTab(path: string, internal: string, eol: OpenTab["eol"]): OpenTab {
   return {
     path,
@@ -45,7 +72,8 @@ function diskTab(path: string, internal: string, eol: OpenTab["eol"]): OpenTab {
     dirty: true,
     isUntitled: false,
     diskContent: undefined,
-    diskMtime: 1_000,
+    diskStat: STAT,
+    diskMtime: 1000,
     lastSavedAt: null,
     ...(eol !== undefined ? { eol } : {}),
   };
@@ -55,11 +83,26 @@ function setState(next: Partial<ReturnType<typeof useWorkspace.getState>>) {
   useWorkspace.setState(next as any);
 }
 
+/** 主路径（saveDocument）收到的正文（第 2 个参数） */
+function lastSaveDocumentContent(): string | undefined {
+  const calls = saveDocumentMock.mock.calls;
+  return calls.length > 0 ? (calls[calls.length - 1][1] as string) : undefined;
+}
+
 describe("saveCurrent 换行保真（#368）", () => {
   beforeEach(() => {
-    readTextFileMock.mockReset().mockResolvedValue("磁盘基线");
+    readDocumentMock.mockReset();
+    saveDocumentMock.mockReset().mockResolvedValue({ kind: "written", stat: STAT, foreignWrite: false });
     writeTextFileMock.mockReset().mockResolvedValue(undefined);
+    fileStatMock.mockReset().mockResolvedValue(STAT);
     fileMtimeMock.mockReset().mockResolvedValue(1_000);
+    readTextFileMock.mockReset().mockResolvedValue("磁盘基线");
+    listDirMock.mockReset().mockResolvedValue({
+      name: "docs",
+      path: "/docs",
+      is_dir: true,
+      children: [],
+    });
     isTauriMock.mockReset();
     isTauriMock.mockReturnValue(true);
   });
@@ -68,7 +111,7 @@ describe("saveCurrent 换行保真（#368）", () => {
     vi.clearAllMocks();
   });
 
-  it("CRLF 文件：内部 LF 内容保存写盘时还原为 CRLF，基线记录写盘字节", async () => {
+  it("CRLF 文件：内部 LF 内容写盘时还原为 CRLF，基线记录写盘字节", async () => {
     const internal = "# 标题\n\n正文段落。\n";
     setState({
       openTabs: [diskTab("/docs/a.md", internal, "crlf")],
@@ -83,7 +126,12 @@ describe("saveCurrent 换行保真（#368）", () => {
     await useWorkspace.getState().saveCurrent();
 
     const expected = "# 标题\r\n\r\n正文段落。\r\n";
-    expect(writeTextFileMock).toHaveBeenCalledWith("/docs/a.md", expected);
+    expect(lastSaveDocumentContent()).toBe(expected);
+    // 走的是带 expected 身份的写盘回执（不是裸 writeTextFile）
+    expect(saveDocumentMock).toHaveBeenCalledTimes(1);
+    const opts = saveDocumentMock.mock.calls[0][2] as { expected?: FileStat };
+    expect(opts.expected).toEqual(STAT);
+
     const tab = useWorkspace.getState().openTabs.find((t) => t.path === "/docs/a.md");
     // 基线 = 实际写盘字节（CRLF），下一次保存的外部比对才不会误判冲突
     expect(tab?.diskContent).toBe(expected);
@@ -106,7 +154,7 @@ describe("saveCurrent 换行保真（#368）", () => {
 
     await useWorkspace.getState().saveCurrent();
 
-    expect(writeTextFileMock).toHaveBeenCalledWith("/docs/a.md", internal);
+    expect(lastSaveDocumentContent()).toBe(internal);
   });
 
   it("无换行元数据（原文件无换行 / 新建转正）：原样写出，不凭空转换", async () => {
@@ -123,7 +171,34 @@ describe("saveCurrent 换行保真（#368）", () => {
 
     await useWorkspace.getState().saveCurrent();
 
-    expect(writeTextFileMock).toHaveBeenCalledWith("/docs/a.md", "hello\nworld\n");
+    expect(lastSaveDocumentContent()).toBe("hello\nworld\n");
+  });
+
+  it("无 diskStat 的旧 tab：走 writeTextFile({ mustExist })，同样按原风格还原", async () => {
+    const internal = "# 标题\n\n正文段落。\n";
+    setState({
+      openTabs: [{ ...diskTab("/docs/a.md", internal, "crlf"), diskStat: undefined }],
+      activeTabPath: "/docs/a.md",
+      currentFile: "/docs/a.md",
+      currentContent: internal,
+      dirty: true,
+      saving: false,
+      saveError: null,
+    });
+
+    await useWorkspace.getState().saveCurrent();
+
+    expect(writeTextFileMock).toHaveBeenCalledTimes(1);
+    const [path, content, opts] = writeTextFileMock.mock.calls[0] as [
+      string,
+      string,
+      { mustExist?: boolean },
+    ];
+    expect(path).toBe("/docs/a.md");
+    expect(content).toBe("# 标题\r\n\r\n正文段落。\r\n");
+    expect(opts.mustExist).toBe(true);
+    // saveDocument 未被使用（没有成对基线可比）
+    expect(saveDocumentMock).not.toHaveBeenCalled();
   });
 
   it("混合换行：按主导风格归一写盘并 console.warn 告警", async () => {
@@ -142,10 +217,7 @@ describe("saveCurrent 换行保真（#368）", () => {
 
     await useWorkspace.getState().saveCurrent();
 
-    expect(writeTextFileMock).toHaveBeenCalledWith(
-      "/docs/a.md",
-      "# 标题\r\n\r\n正文段落。\r\n",
-    );
+    expect(lastSaveDocumentContent()).toBe("# 标题\r\n\r\n正文段落。\r\n");
     expect(warnSpy).toHaveBeenCalledTimes(1);
     expect(warnSpy.mock.calls[0][0]).toContain("混合换行");
     expect(warnSpy.mock.calls[0][0]).toContain("/docs/a.md");
@@ -167,7 +239,7 @@ describe("saveCurrent 换行保真（#368）", () => {
 
     await useWorkspace.getState().saveCurrent();
 
-    expect(writeTextFileMock).toHaveBeenCalledWith("/docs/a.md", internal);
+    expect(lastSaveDocumentContent()).toBe(internal);
     expect(warnSpy).toHaveBeenCalledTimes(1);
   });
 
@@ -194,21 +266,16 @@ describe("saveCurrent 换行保真（#368）", () => {
 
     // 第二次保存（继续编辑后再存）：磁盘已统一 CRLF，不得再刷告警
     const edited = "# 标题\n\n正文段落（改）。\n";
+    const savedTab = useWorkspace.getState().openTabs.find((t) => t.path === "/docs/a.md")!;
     setState({
-      openTabs: [
-        {
-          ...useWorkspace.getState().openTabs.find((t) => t.path === "/docs/a.md")!,
-          content: edited,
-          dirty: true,
-        },
-      ],
+      openTabs: [{ ...savedTab, content: edited, dirty: true }],
       currentContent: edited,
       dirty: true,
     });
     await useWorkspace.getState().saveCurrent();
 
     expect(warnSpy).toHaveBeenCalledTimes(1);
-    expect(writeTextFileMock).toHaveBeenLastCalledWith("/docs/a.md", "# 标题\r\n\r\n正文段落（改）。\r\n");
+    expect(lastSaveDocumentContent()).toBe("# 标题\r\n\r\n正文段落（改）。\r\n");
   });
 
   it("合并保存（草稿另存到已打开的 CRLF 文件）：写盘沿用目标文件换行风格", async () => {
@@ -251,11 +318,10 @@ describe("saveCurrent 换行保真（#368）", () => {
 
     await useWorkspace.getState().saveCurrent();
 
-    expect(writeTextFileMock).toHaveBeenCalledWith(
-      "/docs/target.md",
-      "# 草稿内容\r\n\r\n新段落。\r\n",
-    );
-    // 混合换行告警指向被归一化的目标文件，而不是草稿路径（评审 P1）
+    // 合并路径沿用目标 eol（草稿本身没有磁盘历史），走 writeTextFile
+    expect(writeTextFileMock).toHaveBeenCalledTimes(1);
+    expect(writeTextFileMock.mock.calls[0][1]).toBe("# 草稿内容\r\n\r\n新段落。\r\n");
+    // 混合换行告警指向被归一化的目标文件，而不是草稿路径
     expect(warnSpy).toHaveBeenCalledTimes(1);
     expect(warnSpy.mock.calls[0][0]).toContain("/docs/target.md");
     expect(warnSpy.mock.calls[0][0]).not.toContain("untitled-1");
@@ -383,8 +449,8 @@ describe("saveCurrent 换行保真（#368）", () => {
     expect(carried?.diskContent).toBe("# 草稿内容\r\n");
   });
 
-  it("打开文件时按磁盘内容检测换行风格并存入 tab", async () => {
-    readTextFileMock.mockResolvedValue("# 磁盘内容\r\n\r\nCRLF 正文。\r\n");
+  it("打开文件时按成对快照内容检测换行风格并存入 tab", async () => {
+    readDocumentMock.mockResolvedValue({ content: "# 磁盘内容\r\n\r\nCRLF 正文。\r\n", stat: STAT });
     setState({
       openTabs: [],
       activeTabPath: null,
@@ -400,10 +466,12 @@ describe("saveCurrent 换行保真（#368）", () => {
     expect(tab?.eolMixed).toBeUndefined();
     // 内容保持磁盘原样（含 CRLF），编辑器往返后才归一为 LF
     expect(tab?.content).toBe("# 磁盘内容\r\n\r\nCRLF 正文。\r\n");
+    // 基线来自同一份快照（内容与身份同源）
+    expect(tab?.diskStat).toEqual(STAT);
   });
 
   it("打开混合换行文件：记录主导风格与 mixed 标记", async () => {
-    readTextFileMock.mockResolvedValue("a\r\nb\nc\r\n");
+    readDocumentMock.mockResolvedValue({ content: "a\r\nb\nc\r\n", stat: STAT });
     setState({ openTabs: [], activeTabPath: null, currentFile: null, currentContent: "", dirty: false });
 
     await useWorkspace.getState().openFile("/docs/mixed.md");
@@ -425,13 +493,14 @@ describe("saveCurrent 换行保真（#368）", () => {
       currentContent: "# 旧内容\n",
       dirty: false,
     });
-    readTextFileMock.mockResolvedValue("# 新内容\n\n外部改成 LF 了。\n");
+    readDocumentMock.mockResolvedValue({ content: "# 新内容\n\n外部改成 LF 了。\n", stat: STAT });
 
     await useWorkspace.getState().reloadFile("/docs/a.md");
 
     const tab = useWorkspace.getState().openTabs.find((t) => t.path === "/docs/a.md");
     expect(tab?.eol).toBe("lf");
     expect(tab?.eolMixed).toBeUndefined();
+    expect(tab?.diskStat).toEqual(STAT);
   });
 
   it("冲突「继续编辑」同步基线（setTabDiskContent）时换行风格重检", async () => {
