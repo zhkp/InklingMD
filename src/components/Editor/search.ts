@@ -47,12 +47,49 @@ function buildRegex(opts: SearchOpts): RegExp | null {
   }
 }
 
-/** 遍历文档文本节点，收集所有匹配区间 */
+/** 遍历文档文本块，收集所有匹配区间 */
 function computeMatches(doc: Node, regex: RegExp): { from: number; to: number }[] {
   return computeMatchesInRange(doc, regex, 0, doc.content.size);
 }
 
-/** 遍历与 [from, to] 相交的文本节点收集匹配（节点级扫描，匹配不跨文本节点） */
+/**
+ * issue #371：把一个文本块内**相邻的文本节点**拼成一个 run 交给 visit。
+ *
+ * ProseMirror 按 mark 边界切分文本节点，`**Hello** world` 在文档里是两个节点，
+ * 逐节点跑正则就搜不到视觉上连续的 `Hello world`。拼接后整段连续文字一次匹配。
+ *
+ * run 边界 = 非文本的行内子节点（图片、行内公式、硬换行等原子节点）：
+ * 它们在视觉上把文字打断，不应被拼成一个可匹配的整体。当前 schema 里
+ * 行内非文本节点都是原子；若将来出现可含文本的非原子行内节点，需改为下钻。
+ * 同理，正则的 `^` / `$` 以 run 为单位：原子节点后的文字是新 run 的开头。
+ *
+ * 位置映射无需查表：文本节点的 nodeSize 恒等于字符数，run 内文档位置连续，
+ * 故 docPos = runPos + flatIndex（runPos 为 run 首字符的文档位置）。
+ */
+function forEachTextRun(
+  block: Node,
+  blockPos: number,
+  visit: (text: string, runPos: number) => void,
+): void {
+  let text = "";
+  let runPos = -1;
+  const flush = () => {
+    if (runPos >= 0) visit(text, runPos);
+    text = "";
+    runPos = -1;
+  };
+  block.forEach((child, offset) => {
+    if (child.isText) {
+      if (runPos < 0) runPos = blockPos + 1 + offset;
+      text += child.text;
+    } else {
+      flush();
+    }
+  });
+  flush();
+}
+
+/** 遍历与 [from, to] 相交的文本块收集匹配（run 内可跨 mark，块级节点为匹配边界） */
 function computeMatchesInRange(
   doc: Node,
   regex: RegExp,
@@ -61,17 +98,20 @@ function computeMatchesInRange(
 ): { from: number; to: number }[] {
   const matches: { from: number; to: number }[] = [];
   doc.nodesBetween(from, to, (node, pos) => {
-    if (!node.isText) return true;
-    const text = node.text ?? "";
-    regex.lastIndex = 0;
-    let m: RegExpExecArray | null;
-    while ((m = regex.exec(text)) !== null) {
-      if (m[0].length === 0) {
-        regex.lastIndex++;
-        continue;
+    // 非文本块（引用/列表/表格/告警块等容器）继续下钻到其内部的文本块；
+    // 文本块自身即匹配边界，不跨段落/标题/单元格产生匹配
+    if (!node.isTextblock) return true;
+    forEachTextRun(node, pos, (text, runPos) => {
+      regex.lastIndex = 0;
+      let m: RegExpExecArray | null;
+      while ((m = regex.exec(text)) !== null) {
+        if (m[0].length === 0) {
+          regex.lastIndex++;
+          continue;
+        }
+        matches.push({ from: runPos + m.index, to: runPos + m.index + m[0].length });
       }
-      matches.push({ from: pos + m.index, to: pos + m.index + m[0].length });
-    }
+    });
     return false;
   });
   return matches;
@@ -95,7 +135,7 @@ function buildDecorations(
 /**
  * issue #192：单步事务（每次按键输入的形态）的增量更新。
  * 1) 变更窗口外的旧匹配经 tr.mapping 平移到新文档位置；
- * 2) 仅对变更波及的文本节点（窗口）重新搜索，局部增删匹配；
+ * 2) 仅对变更波及的文本块（窗口）重新搜索，局部增删匹配；
  * 3) 装饰集经 DecorationSet.map 平移后，移除窗口内旧装饰并补入新装饰。
  * 大文档连续输入不再有每键全文扫描开销。
  */
@@ -117,18 +157,18 @@ function updateIncrementally(
     newEnd = 0;
   }
 
-  // 窗口扩展到完整覆盖变更触及的文本节点（±1 覆盖纯插入的边界情形）：
-  // 跨越变更边界的匹配必然位于覆盖变更点的文本节点内
+  // 窗口扩展到完整覆盖变更触及的**文本块**（±1 覆盖纯插入的边界情形）。
+  // issue #371 后匹配可跨同一文本块内的多个文本节点，窗口若只扩到文本节点，
+  // 块内另一半的旧匹配会同时落进「窗外保留」和「窗内重扫」而重复计数。
   let windowFrom = newStart;
   let windowTo = newEnd;
   const scanFrom = Math.max(0, newStart - 1);
   const scanTo = Math.min(newState.doc.content.size, newEnd + 1);
   newState.doc.nodesBetween(scanFrom, scanTo, (node, pos) => {
-    if (node.isText) {
-      if (pos < windowFrom) windowFrom = pos;
-      if (pos + node.nodeSize > windowTo) windowTo = pos + node.nodeSize;
-    }
-    return true;
+    if (!node.isTextblock) return true;
+    if (pos < windowFrom) windowFrom = pos;
+    if (pos + node.nodeSize > windowTo) windowTo = pos + node.nodeSize;
+    return false;
   });
 
   // 窗外：旧匹配区间经 mapping 平移保留；窗内：丢弃后重扫
@@ -146,12 +186,20 @@ function updateIncrementally(
   const windowMatches = computeMatchesInRange(newState.doc, regex, windowFrom, windowTo);
   const matches = [...keptBefore, ...windowMatches, ...keptAfter];
 
+  // 当前匹配的目标区间（平移后）。窗口重扫会改变匹配数量，索引必须跟着**区间**走：
+  // 若在当前匹配之前新增/消灭了一处，沿用旧下标会高亮到相邻的另一处命中。
+  const prevCurrent = value.current >= 0 ? value.matches[value.current] : null;
   let current = value.current;
+  if (prevCurrent) {
+    const targetFrom = tr.mapping.map(prevCurrent.from);
+    const targetTo = tr.mapping.map(prevCurrent.to);
+    const at = matches.findIndex((m) => m.from === targetFrom && m.to === targetTo);
+    if (at >= 0) current = at;
+  }
   if (current >= matches.length) current = matches.length > 0 ? 0 : -1;
 
   // 当前匹配的目标区间（平移后）未变时增量修补装饰，否则全量重建
   // （当前高亮类只依附 current 区间，区间不变则窗外装饰类无需迁移）
-  const prevCurrent = value.current >= 0 ? value.matches[value.current] : null;
   const newCurrent = current >= 0 ? matches[current] : null;
   let currentRangeUnchanged = false;
   if (prevCurrent && newCurrent) {
@@ -266,7 +314,15 @@ export function scrollToCurrent(view: EditorView): void {
   );
 }
 
-/** 替换当前匹配；替换串为空表示删除匹配文本 */
+/**
+ * 替换当前匹配；替换串为空表示删除匹配文本。
+ *
+ * mark 继承规则（#371）：替换串一律以**无 mark 文本**插入，`[from, to)` 之外
+ * 的 mark 与文档结构不受影响（replaceWith 只作用于该区间）。
+ * 即被替换掉的加粗/链接/斜体随原文一起消失，区间外的样式原样保留。
+ * 跨 mark 的匹配（如 `**Hello** world` 命中 `Hello world`）同样适用：
+ * 不再需要按文本节点拆分替换，一次 replaceWith 覆盖整个区间。
+ */
 export function replaceCurrent(view: EditorView, replacement: string): void {
   const s = searchKey.getState(view.state);
   if (!s || !s.opts || s.current < 0) return;
@@ -287,6 +343,7 @@ export function replaceAll(view: EditorView, replacement: string): number {
   const s = searchKey.getState(view.state);
   if (!s || !s.opts) return 0;
   const tr = view.state.tr;
+  // 倒序：低位坐标不受高位替换影响，故可复用同一批 matches（不会用到过期下标）
   const sorted = [...s.matches].sort((a, b) => b.from - a.from);
   for (const m of sorted) {
     if (replacement === "") {

@@ -85,7 +85,8 @@ InklingMD 是一个 Tauri 2 桌面应用：前端（React + TypeScript）负责�
 
 1. 用户输入产生 transaction → `markdownPublisherPlugin` 防抖 150ms 序列化整篇 doc → `onChange` 写回 store。
 2. `lib/useAutoSave` 订阅内容并在防抖 2s 后调 `write_text_file` 落盘；`Ctrl+S` 立即保存。
-3. 剪贴板/拖拽图片 → 写入文稿同目录 `assets/`，markdown 内保持相对路径。
+   保存已有文档带 `mustExist`：文件已被删除 / 移动 / 所在目录不存在时 Rust 端拒写（`TARGET_MISSING` / `PARENT_MISSING` / `NOT_A_FILE` / `PARENT_NOT_DIR`，替换前紧贴 rename 复检），tab 标记 `deletedOnDisk` 并暂停自动保存，由用户在 `Ctrl+S` 时选择重新创建或另存为（#363）。写盘默认不补建父目录。
+3. 剪贴板/拖拽图片 → 写入文稿同目录 `assets/`（只补建 `assets/` 这一层），markdown 内保持相对路径。
 
 ### 源码模式 ↔ 所见即所得
 

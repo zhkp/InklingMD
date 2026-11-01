@@ -5,8 +5,28 @@
 import { invoke, isTauri, convertFileSrc } from "@tauri-apps/api/core";
 import { resolve as resolvePath } from "@tauri-apps/api/path";
 import { dirNameOf, joinPath, normalizePath } from "./path";
+import { CmdError, formatCmdError } from "./cmd-error";
+import type { CmdErrorCode, CmdErrorShape } from "./cmd-error";
+// #362 过渡期：写盘错误仍以字符串前缀到达（#391 的 wire 形态），
+// 由 writeErrors 解析后统一包成 CmdError 子类，避免两套错误契约并存
+import { mapWriteError, WriteError } from "./writeErrors";
 
 export { joinPath, normalizePath, dirNameOf, isTauri };
+// 错误契约对外仍从 fs.ts 可取（实现放在 cmd-error.ts，store 可直接依赖纯逻辑）
+export { CmdError, formatCmdError };
+export type { CmdErrorCode, CmdErrorShape };
+
+/** 文件磁盘身份（与 Rust 端 `FileStat` 一一对应）：微秒 mtime + 字节数 */
+export interface FileStat {
+  mtimeUs: number;
+  size: number;
+}
+
+/** 成对读取结果（#362 M0）：内容与产生它的磁盘身份来自同一次读取 */
+export interface DocumentSnapshot {
+  content: string;
+  stat: FileStat;
+}
 
 /** 文件树节点（与 Rust 端 FileNode 对应） */
 export interface FileNode {
@@ -102,17 +122,154 @@ export async function readTextFile(filePath: string): Promise<string> {
   return MOCK_FILE_CONTENT[filePath];
 }
 
-/** 写入文本文件 */
+export interface WriteTextOptions {
+  /** 覆盖已有文档：目标不存在（被删除/改名）时拒绝写入，抛 TARGET_MISSING（issue #363） */
+  mustExist?: boolean;
+  /**
+   * 父目录缺失时补建整条目录链。**当前无生产调用方**：重建已统一走
+   * saveDocument({ createParentDirs })，这里仅为命令契约保留（测试夹具在用）。
+   */
+  createParents?: boolean;
+  /**
+   * 耐久：文档保存用 `"sync"`（默认，掉电不丢）；导出 / 备份等「丢了能重做」的写入传
+   * `"none"`，避免大文件多付一次数据 fsync + 一次目录 fsync。
+   */
+  durability?: "sync" | "none";
+}
+
+/**
+ * 成对读取文档（#362 M0）：一次 IPC 同时拿到内容与磁盘身份。
+ *
+ * `changedDuringRead` = 读取期间文件被外部改写（同句柄 meta1/meta2 双检失败），
+ * 该 pair 不可信 → **重试一次**；仍失败按读取失败抛出（保留 `code`），
+ * 调用方绝不允许把可疑 pair 当基线。
+ */
+export async function readDocument(filePath: string): Promise<DocumentSnapshot> {
+  if (isTauri()) {
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        return await invoke<DocumentSnapshot>("read_document", { filePath });
+      } catch (e) {
+        const shape = formatCmdError(e);
+        if (shape.code === "changedDuringRead" && attempt === 0) continue;
+        throw new CmdError(shape);
+      }
+    }
+  }
+  const { MOCK_FILE_CONTENT, MOCK_FILE_STAT } = await import("./mockFs");
+  await new Promise((r) => setTimeout(r, 50));
+  if (!Object.prototype.hasOwnProperty.call(MOCK_FILE_CONTENT, filePath) || !MOCK_FILE_STAT[filePath]) {
+    throw new CmdError({ code: "notFound", message: `文件不存在: ${filePath}` });
+  }
+  // 内容与 stat 从同一次 mock 读取取，保证成对
+  return { content: MOCK_FILE_CONTENT[filePath], stat: { ...MOCK_FILE_STAT[filePath] } };
+}
+
+/** 查询文件磁盘身份（不读内容）。缺失文件抛 `CmdError{code:"notFound"}` */
+export async function fileStat(filePath: string): Promise<FileStat> {
+  if (isTauri()) {
+    try {
+      return await invoke<FileStat>("file_stat", { filePath });
+    } catch (e) {
+      throw new CmdError(formatCmdError(e));
+    }
+  }
+  const { MOCK_FILE_STAT } = await import("./mockFs");
+  const stat = MOCK_FILE_STAT[filePath];
+  if (!stat) throw new CmdError({ code: "notFound", message: `文件不存在: ${filePath}` });
+  return { ...stat };
+}
+
+/** 保存结果（与 Rust `SaveOutcome` 一一对应）：可预期业务结果，不是异常 */
+export type SaveOutcome =
+  | { kind: "written"; stat: FileStat; foreignWrite: boolean }
+  | { kind: "conflict"; disk: FileStat; tempPath?: string; registerFailed: boolean }
+  | { kind: "notFound" }
+  | { kind: "parentMissing"; parent: string }
+  /** 父路径被同名文件占用：补建目录必然失败，不能提供「重新创建」 */
+  | { kind: "parentNotDir"; parent: string };
+
+export interface SaveDocumentOptions {
+  /**
+   * 上次成对读取的磁盘身份。给了就要求「目标仍在原处且身份未变」：
+   * 目标消失返回 `notFound`（绝不复活），身份变化返回 `conflict`。
+   */
+  expected?: FileStat;
+  /** 父目录缺失时补建：仅用于用户确认「在原位置重新创建」 */
+  createParentDirs?: boolean;
+  /** 用户已在原生保存对话框确认覆盖；false 时目标出现即 `conflict` */
+  overwriteExisting?: boolean;
+}
+
+/**
+ * 保存文档：替换语义 + 写盘回执（#362 M1）。
+ *
+ * 与 `writeTextFile` 的区别：写与「新基线」来自同一次提交，不再「写完再 stat」——
+ * 那中间的任意外写都会让基线指向别人的内容。
+ */
+export async function saveDocument(
+  filePath: string,
+  content: string,
+  options: SaveDocumentOptions = {},
+): Promise<SaveOutcome> {
+  if (isTauri()) {
+    try {
+      return await invoke<SaveOutcome>("save_document", { filePath, content, ...options });
+    } catch (e) {
+      throw new CmdError(formatCmdError(e));
+    }
+  }
+  // 浏览器 mock：按同一套语义判定，否则 E2E 里「删除后保存」「覆盖确认」全都测不到
+  const { MOCK_FILE_CONTENT, MOCK_FILE_STAT, touchMockStat } = await import("./mockFs");
+  const exists = Object.prototype.hasOwnProperty.call(MOCK_FILE_CONTENT, filePath);
+  if (!exists) {
+    if (options.expected) return { kind: "notFound" };
+    MOCK_FILE_CONTENT[filePath] = content;
+    touchMockStat(filePath, content);
+    return { kind: "written", stat: { ...MOCK_FILE_STAT[filePath] }, foreignWrite: false };
+  }
+  const current = MOCK_FILE_STAT[filePath];
+  // 与 Rust 同语义：用户已确认覆盖时跳过身份比对；未确认覆盖时
+  // 「有 expected 比身份、无 expected 要求目标不存在」
+  if (!options.overwriteExisting) {
+    if (
+      options.expected &&
+      (current.mtimeUs !== options.expected.mtimeUs || current.size !== options.expected.size)
+    ) {
+      return { kind: "conflict", disk: { ...current }, registerFailed: false };
+    }
+    if (!options.expected) {
+      return { kind: "conflict", disk: { ...current }, registerFailed: false };
+    }
+  }
+  MOCK_FILE_CONTENT[filePath] = content;
+  touchMockStat(filePath, content);
+  return { kind: "written", stat: { ...MOCK_FILE_STAT[filePath] }, foreignWrite: false };
+}
+
+/**
+ * 写入文本文件。默认不补建父目录（缺失抛 PARENT_MISSING），目标被目录等占用抛 NOT_A_FILE。
+ */
 export async function writeTextFile(
   filePath: string,
   content: string,
+  options: WriteTextOptions = {},
 ): Promise<void> {
   if (isTauri()) {
-    return invoke<void>("write_text_file", { filePath, content });
+    try {
+      return await invoke<void>("write_text_file", { filePath, content, ...options });
+    } catch (e) {
+      throw mapWriteError(e);
+    }
   }
-  // 浏览器 mock：只在内存里记录
-  const { MOCK_FILE_CONTENT } = await import("./mockFs");
+  // 浏览器 mock：内容与磁盘身份一起更新（否则 stat 基线永远是旧值）；
+  // mustExist 与 Rust 侧同语义：目标不存在时拒绝写入（issue #363）
+  const { MOCK_FILE_CONTENT, touchMockStat } = await import("./mockFs");
+  if (options.mustExist && !Object.prototype.hasOwnProperty.call(MOCK_FILE_CONTENT, filePath)) {
+    throw new WriteError("TARGET_MISSING");
+  }
   MOCK_FILE_CONTENT[filePath] = content;
+  touchMockStat(filePath, content);
 }
 
 /** 读取文件最后修改时间（Unix 毫秒时间戳）。浏览器 mock 对不存在的文件抛错（#296） */
@@ -120,11 +277,11 @@ export async function fileMtime(filePath: string): Promise<number> {
   if (isTauri()) {
     return invoke<number>("file_mtime", { filePath });
   }
-  const { MOCK_FILE_CONTENT } = await import("./mockFs");
-  if (!Object.prototype.hasOwnProperty.call(MOCK_FILE_CONTENT, filePath)) {
-    throw new Error("文件不存在");
-  }
-  return Date.now();
+  const { MOCK_FILE_STAT } = await import("./mockFs");
+  const stat = MOCK_FILE_STAT[filePath];
+  if (!stat) throw new Error("文件不存在");
+  // 与 Rust file_mtime 同口径：毫秒；mock 不再返回 Date.now()（那会让"文件没变"恒真）
+  return stat.mtimeUs / 1000;
 }
 
 /** 重命名/移动文件或目录 */
@@ -132,12 +289,14 @@ export async function renamePath(from: string, to: string): Promise<void> {
   if (isTauri()) {
     return invoke<void>("rename_path", { from, to });
   }
-  // 浏览器 mock：更新内容键
-  const { MOCK_FILE_CONTENT, MOCK_TREE, findNode, splitPath, rebasePath } = await import("./mockFs");
+  // 浏览器 mock：更新内容键 + 磁盘身份（stat 必须跟着内容走）
+  const { MOCK_FILE_CONTENT, MOCK_TREE, findNode, splitPath, rebasePath, rebaseMockStat } =
+    await import("./mockFs");
   if (MOCK_FILE_CONTENT[from] !== undefined) {
     MOCK_FILE_CONTENT[to] = MOCK_FILE_CONTENT[from];
     delete MOCK_FILE_CONTENT[from];
   }
+  rebaseMockStat(from, to);
   // 同步 mock 目录树：就地改 name/path 并重算子项 path 前缀
   const node = findNode(MOCK_TREE, from);
   if (node) {
@@ -152,10 +311,12 @@ export async function deletePath(path: string): Promise<void> {
   if (isTauri()) {
     return invoke<void>("delete_path", { path });
   }
-  const { MOCK_FILE_CONTENT, MOCK_TREE, findParent } = await import("./mockFs");
+  const { MOCK_FILE_CONTENT, MOCK_TREE, findParent, dropMockStat } = await import("./mockFs");
   for (const k of Object.keys(MOCK_FILE_CONTENT)) {
     if (k === path || k.startsWith(path + "/")) delete MOCK_FILE_CONTENT[k];
   }
+  // 删除后 fileStat 必须报 notFound，否则"删除态"在 mock 里不可达
+  dropMockStat(path);
   // 同步 mock 目录树：从父节点 children 中移除
   const found = findParent(MOCK_TREE, path);
   if (found) {
@@ -168,8 +329,10 @@ export async function createFile(filePath: string): Promise<void> {
   if (isTauri()) {
     return invoke<void>("create_file", { filePath });
   }
-  const { MOCK_FILE_CONTENT, MOCK_TREE, findNode, splitPath } = await import("./mockFs");
+  const { MOCK_FILE_CONTENT, MOCK_TREE, findNode, splitPath, touchMockStat } = await import("./mockFs");
   MOCK_FILE_CONTENT[filePath] = "";
+  // 新建文件即有磁盘身份（空内容，0 字节），否则打开后拿不到基线
+  touchMockStat(filePath, "");
   // 同步 mock 目录树：在父目录下新增文件节点
   const { dir, base } = splitPath(filePath);
   const parent = dir ? findNode(MOCK_TREE, dir) : null;
@@ -277,16 +440,24 @@ export function uint8ArrayToBase64(data: Uint8Array): string {
  * 桌面端将数据编码为 base64 后调用 Rust write_binary_file 命令（避免 JSON 数字数组导致的 IPC 膨胀）；
  * 浏览器端无真实 fs，仅返回成功（mock 无法持久化二进制）。
  * @param data 字节数组
+ * @param options.createParentDir 父目录缺失时只补建一层（如文档旁的 assets/），
+ *   且要求上一级目录仍存在；默认不建目录（issue #363）
  */
 export async function writeBinaryFile(
   filePath: string,
   data: Uint8Array,
+  options: { createParentDir?: boolean } = {},
 ): Promise<void> {
   if (isTauri()) {
-    return invoke<void>("write_binary_file", {
-      filePath,
-      data: uint8ArrayToBase64(data),
-    });
+    try {
+      return await invoke<void>("write_binary_file", {
+        filePath,
+        data: uint8ArrayToBase64(data),
+        ...options,
+      });
+    } catch (e) {
+      throw mapWriteError(e);
+    }
   }
   // 浏览器 mock：记录到内存二进制表（供 assets 去重与 E2E 断言）
   const { MOCK_BINARY_FILES } = await import("./mockFs");
@@ -379,6 +550,31 @@ export async function downloadRemoteImage(url: string): Promise<RemoteImage> {
   }
   const { mockDownloadRemoteImage } = await import("./mockFs");
   return mockDownloadRemoteImage(url);
+}
+
+/**
+ * 读取本地二进制文件字节（#372：导出时把 `asset:` / `asset.localhost` 运行时地址
+ * 换成可移植的 data URL 或旁挂文件）。
+ *
+ * 桌面端走 Rust `read_binary_file`。之所以不能在前端 `fetch(convertFileSrc(path))`：
+ * `tauri.conf.json` 的 CSP 没有 `connect-src`，回落 `default-src 'self'`，
+ * asset 协议只对 `img-src` / `font-src` 放行（见 scripts/probe-asset-bg-export.mjs）。
+ * 后端该命令**复用 asset 协议运行时白名单**：只有经 `allowAssetDir` 放行过的目录
+ * 才可读，白名单外返回 `NOT_ALLOWED` —— 导出不成为绕过文件访问范围的新通道。
+ *
+ * 浏览器端优先取 mock 二进制表（E2E 可直接登记夹具），否则 fetch（可用路由拦截）。
+ */
+export async function readBinaryFile(filePath: string): Promise<Uint8Array> {
+  if (isTauri()) {
+    const b64 = await invoke<string>("read_binary_file", { filePath });
+    return base64ToUint8Array(b64);
+  }
+  const { MOCK_BINARY_FILES } = await import("./mockFs");
+  const mocked = MOCK_BINARY_FILES.get(filePath);
+  if (mocked) return mocked.slice();
+  const res = await fetch(filePath);
+  if (!res.ok) throw new Error(`读取资源失败 ${filePath}: HTTP ${res.status}`);
+  return new Uint8Array(await res.arrayBuffer());
 }
 
 /**

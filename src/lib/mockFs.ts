@@ -113,6 +113,24 @@ export const MOCK_TREE: FileNode = {
           is_dir: false,
           children: [],
         },
+        {
+          name: "export-demo.md",
+          path: "/mock-workspace/notes/export-demo.md",
+          is_dir: false,
+          children: [],
+        },
+        {
+          name: "export-missing.md",
+          path: "/mock-workspace/notes/export-missing.md",
+          is_dir: false,
+          children: [],
+        },
+        {
+          name: "export-mermaid-bad.md",
+          path: "/mock-workspace/notes/export-mermaid-bad.md",
+          is_dir: false,
+          children: [],
+        },
       ],
     },
     {
@@ -287,6 +305,104 @@ ${LINK_ANCHOR_FILLER}
 目标段落内容。
 `;
 
+/**
+ * 导出可移植性 / 导出快照夹具（#372 + #373）。
+ *
+ * 覆盖真实文档里会让导出走偏的每一种形态：
+ * - **本地图片**（相对路径 PNG/JPG/SVG）→ 桌面端会被 `resolveImageSrc` 改写成 asset 运行时地址，
+ *   导出必须换成可移植形式（#372）；另留一张远程图作「保持原语义」的对照。
+ * - **带语言的长代码块**（200 行）→ CodeMirror 只渲染视口内的行，克隆 DOM 会静默截断，
+ *   导出必须以文档为准重建完整源码（#373）。
+ * - **首屏外的代码块与 Mermaid** → 懒挂载（IntersectionObserver）+ 空闲预渲染都还没跑，
+ *   DOM 里只有占位/空壳，导出必须主动补齐或可见降级（#373）。
+ *
+ * `EXPORT_FILLER` 把后半段推到首屏之外；不要缩减它，否则「非首屏」这个前提不成立，
+ * 相关断言会退化成恒真。
+ */
+const EXPORT_FILLER = Array.from(
+  { length: 40 },
+  (_, i) => `填充段落 ${String(i + 1).padStart(2, "0")}：用于把后续块推到首屏之外。`,
+).join("\n\n");
+
+/** 长代码块：行数必须远超 CodeMirror 视口渲染量，否则截断无从观测 */
+const EXPORT_LONG_CODE = Array.from(
+  { length: 200 },
+  (_, i) => `const line${String(i + 1).padStart(3, "0")} = ${i + 1};`,
+).join("\n");
+
+const EXPORT_DEMO = `---
+title: 导出夹具
+tags: [export, portable]
+---
+
+# 导出可移植性夹具
+
+正文带 **加粗**、*斜体*、\`行内代码\` 与 [外链](https://example.com)。
+
+## 本地图片
+
+![绿色方块](assets/green.png)
+
+![红色方块](assets/red.jpg)
+
+![矢量图形](assets/shape.svg)
+
+![远程图片](https://example.com/remote.png)
+
+## 首屏 Mermaid
+
+\`\`\`mermaid
+flowchart LR
+  A[开始] --> B[结束]
+\`\`\`
+
+## 带语言的长代码块
+
+\`\`\`typescript
+${EXPORT_LONG_CODE}
+\`\`\`
+
+${EXPORT_FILLER}
+
+## 非首屏代码块（懒挂载未触发）
+
+\`\`\`python
+print("below the fold")
+\`\`\`
+
+## 非首屏 Mermaid（视口外）
+
+\`\`\`mermaid
+sequenceDiagram
+  客户端->>服务端: 请求
+  服务端-->>客户端: 响应
+\`\`\`
+`;
+
+/**
+ * 降级夹具：一张读得到的本地图 + 一张读不到的本地图。
+ * 用来钉「不静默缺图」——导出必须给出可见告知，而不是产出一份看起来正常、
+ * 实际少一张图的文件（#372 验收项）。
+ */
+const EXPORT_MISSING = `# 缺失资源降级夹具
+
+![存在的图片](assets/green.png)
+
+![缺失的图片](assets/gone.png)
+`;
+
+/**
+ * Mermaid 失败兜底夹具：源码无法解析。
+ * 编辑器侧渲染失败、导出侧补渲染同样失败——产物必须带完整源码兜底，
+ * 而不是一块空白（#373 验收项）。
+ */
+const EXPORT_MERMAID_BAD = `# Mermaid 失败兜底
+
+\`\`\`mermaid
+this is not a mermaid diagram
+\`\`\`
+`;
+
 export const MOCK_FILE_CONTENT: Record<string, string> = {
   "/mock-workspace/notes/readme.md":
     "# Readme\n\n这是浏览器 mock 环境的示例文件。\n\n- 桌面端会调用真实文件系统\n- 浏览器端用此 mock 验证 UI\n",
@@ -316,7 +432,69 @@ export const MOCK_FILE_CONTENT: Record<string, string> = {
   "/mock-workspace/notes/link-relative.md": LINK_RELATIVE_DEMO,
   "/mock-workspace/notes/my note.md": MY_NOTE,
   "/mock-workspace/notes/toc-long.md": TOC_LONG_DEMO,
+  "/mock-workspace/notes/export-demo.md": EXPORT_DEMO,
+  "/mock-workspace/notes/export-missing.md": EXPORT_MISSING,
+  "/mock-workspace/notes/export-mermaid-bad.md": EXPORT_MERMAID_BAD,
 };
+
+/** mock 磁盘身份（与 Rust `FileStat` 同形状：微秒 mtime + 字节数） */
+export interface MockFileStat {
+  mtimeUs: number;
+  size: number;
+}
+
+/**
+ * mock 文件磁盘身份表（#362 mock 保真）。
+ *
+ * 目的：`fileStat` / `readDocument` / `fileMtime` 必须有**稳定的真实 stat**，
+ * 否则「两次读取之间文件没变」与「文件被外部改写」在浏览器里无法区分，
+ * 成对读取与基线比对会退化成恒真断言。
+ *
+ * 同步点（与 Rust 侧读写一一对应）：writeTextFile / createFile / renamePath / deletePath。
+ */
+export const MOCK_FILE_STAT: Record<string, MockFileStat> = {};
+
+/** mock 时钟起点（2024-01-01T00:00:00Z）：不依赖真实时间，用例可复现 */
+const MOCK_EPOCH_US = Date.UTC(2024, 0, 1) * 1000;
+let mockClockUs = MOCK_EPOCH_US;
+
+/** 单调递增的 mock mtime（每次写 +1ms） */
+function nextMockMtimeUs(): number {
+  mockClockUs += 1_000;
+  return mockClockUs;
+}
+
+/** 与 Rust 侧 `meta.len()` 同口径：UTF-8 字节数，不是 UTF-16 字符数 */
+export function mockUtf8Length(text: string): number {
+  return new TextEncoder().encode(text).byteLength;
+}
+
+/** 写入/覆盖后刷新 stat */
+export function touchMockStat(path: string, content: string): void {
+  MOCK_FILE_STAT[path] = { mtimeUs: nextMockMtimeUs(), size: mockUtf8Length(content) };
+}
+
+/** 重命名/移动：stat 随内容迁移（目录按前缀一并迁移） */
+export function rebaseMockStat(from: string, to: string): void {
+  for (const key of Object.keys(MOCK_FILE_STAT)) {
+    if (key === from || key.startsWith(from + "/")) {
+      MOCK_FILE_STAT[to + key.slice(from.length)] = MOCK_FILE_STAT[key];
+      delete MOCK_FILE_STAT[key];
+    }
+  }
+}
+
+/** 删除：连同子路径一起移除（目录递归删除同语义） */
+export function dropMockStat(path: string): void {
+  for (const key of Object.keys(MOCK_FILE_STAT)) {
+    if (key === path || key.startsWith(path + "/")) delete MOCK_FILE_STAT[key];
+  }
+}
+
+// 初始 fixture 的 stat：内容表建立即登记，保证「刚打开就已存在基线」
+for (const [path, content] of Object.entries(MOCK_FILE_CONTENT)) {
+  touchMockStat(path, content);
+}
 
 /** 递归查找路径对应的节点（返回引用，可就地修改） */
 export function findNode(root: FileNode, path: string): FileNode | null {

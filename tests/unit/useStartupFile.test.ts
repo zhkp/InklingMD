@@ -37,7 +37,7 @@ describe("useStartupFile hook", () => {
     vi.mocked(tauriCore.isTauri).mockReturnValue(true);
     vi.mocked(tauriCore.invoke).mockImplementation(async (cmd) => {
       if (cmd === "take_pending_file") return "/path/to/startup.md";
-      if (cmd === "read_text_file") return "# Startup Note";
+      if (cmd === "read_document") return { content: "# Startup Note", stat: { mtimeUs: 1000, size: 8 } };
       return "";
     });
 
@@ -62,7 +62,8 @@ describe("useStartupFile hook", () => {
     });
     vi.mocked(tauriCore.invoke).mockImplementation(async (cmd) => {
       if (cmd === "take_pending_file") return null;
-      if (cmd === "read_text_file") return "# From Single Instance";
+      if (cmd === "read_document")
+        return { content: "# From Single Instance", stat: { mtimeUs: 1000, size: 8 } };
       return "";
     });
 
@@ -93,7 +94,7 @@ describe("useStartupFile hook", () => {
     });
     vi.mocked(tauriCore.invoke).mockImplementation(async (cmd) => {
       if (cmd === "take_pending_file") return "/main/pending.md"; // 派生窗口不应拉取
-      if (cmd === "read_text_file") return "# Derived Target";
+      if (cmd === "read_document") return { content: "# Derived Target", stat: { mtimeUs: 1000, size: 8 } };
       return "";
     });
 

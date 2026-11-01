@@ -43,3 +43,28 @@ describe("#188 SaveIndicator 冲突入口", () => {
     expect(screen.queryByRole("button")).toBeNull();
   });
 });
+
+describe("#363 SaveIndicator 文件已删除态", () => {
+  beforeEach(() => {
+    useWorkspace.setState({
+      openTabs: [{ path: "/a.md", content: "x", dirty: true, lastSavedAt: null, deletedOnDisk: true, cursorPos: null, scrollTop: null }],
+      activeTabPath: "/a.md",
+      dirty: true,
+    });
+  });
+
+  it("活跃文件已从磁盘删除：显示自动保存已暂停的可点击入口", () => {
+    render(<SaveIndicator />);
+    const btn = screen.getByRole("button");
+    expect(btn.textContent).toContain("文件已删除");
+    expect(btn.textContent).toContain("已暂停自动保存");
+  });
+
+  it("点击入口触发交互式保存（由用户选择重新创建 / 另存为）", () => {
+    const saveCurrent = vi.fn();
+    useWorkspace.setState({ saveCurrent });
+    render(<SaveIndicator />);
+    fireEvent.click(screen.getByRole("button"));
+    expect(saveCurrent).toHaveBeenCalledWith({ interactive: true });
+  });
+});

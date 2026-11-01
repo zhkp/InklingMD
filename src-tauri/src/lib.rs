@@ -4,9 +4,10 @@ mod navigation_guard;
 
 use commands::{
     allow_asset_dir, copy_path, create_dir, create_file, delete_path, download_remote_image,
-    extract_zip, file_mtime, find_asset_by_hash, list_dir, list_workspace_files, pandoc_check,
-    pandoc_export_docx, read_text_file, rename_path, resource_themes_dir, scan_theme_dir,
-    search_in_workspace, write_binary_file, write_text_file,
+    extract_zip, file_mtime, file_stat, find_asset_by_hash, list_dir, list_workspace_files,
+    pandoc_check, pandoc_export_docx, read_binary_file, read_document, read_text_file, rename_path,
+    resource_themes_dir, save_document, scan_theme_dir, search_in_workspace, write_binary_file,
+    write_text_file,
 };
 use std::sync::Mutex;
 use tauri::{Emitter, Manager};
@@ -112,14 +113,22 @@ pub fn run() {
             let args: Vec<String> = std::env::args().collect();
             let pending = md_file_from_args(&args);
             app.manage(PendingFile(Mutex::new(pending)));
+            // #362：半失败登记表落在 app_data_dir/recovery/，多窗口共用一份
+            if let Ok(app_dir) = app.path().app_data_dir() {
+                commands::init_temp_kept_registry(app_dir);
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             list_dir,
             read_text_file,
+            read_binary_file,
             write_text_file,
             write_binary_file,
             file_mtime,
+            file_stat,
+            read_document,
+            save_document,
             pandoc_check,
             pandoc_export_docx,
             rename_path,

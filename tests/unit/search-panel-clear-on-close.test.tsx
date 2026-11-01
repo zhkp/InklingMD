@@ -33,7 +33,10 @@ const FIND_OPTS: SearchOpts = { find: "foo", caseSensitive: false, useRegex: fal
 
 function makeViewWithSearch(text: string) {
   const schema = makeSchema();
-  const doc = schema.nodes.paragraph.create(null, schema.text(text));
+  // 文档根必须是 doc 节点（ProseMirror 真实形状）：#371 起匹配以文本块为边界，
+  // 裸 paragraph 当根会让 nodesBetween 访问不到任何文本块
+  const paragraph = schema.nodes.paragraph.create(null, schema.text(text));
+  const doc = schema.nodes.doc.create(null, [paragraph]);
   const plugin = searchPlugin();
   const state = EditorState.create({
     doc,

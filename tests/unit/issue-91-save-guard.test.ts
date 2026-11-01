@@ -6,6 +6,16 @@ vi.mock("../../src/lib/fs", () => ({
   writeTextFile: vi.fn(),
   readTextFile: vi.fn(),
   resolveImageSrc: vi.fn((p: string) => p),
+  // #362：保存走 save_document（写盘回执）。本用例断言的是「保存抛错后的状态机」，
+  // 这里把回执实现成「调用 writeTextFile 并透传其拒绝」，观察面与旧实现一致
+  saveDocument: async (path: string, content: string, options: { expected?: unknown } = {}) => {
+    await vi.mocked(fs.writeTextFile)(path, content, options.expected ? { mustExist: true } : undefined);
+    return {
+      kind: "written",
+      stat: { mtimeUs: 1_700_000_000_000_000, size: 1 },
+      foreignWrite: false,
+    };
+  },
 }));
 
 describe("Issue #91: Save re-entrancy guard and exception handling", () => {
@@ -44,17 +54,18 @@ describe("Issue #91: Save re-entrancy guard and exception handling", () => {
     const savePromise1 = useWorkspace.getState().saveCurrent();
     expect(useWorkspace.getState().saving).toBe(true);
 
-    // 在保存未完成时发起第二次保存
+    // 在保存未完成时发起第二次保存：#364 的「意图升级」会等第一次落定再判断，
+    // 若期间没有新编辑则不再重复写盘（调用点不会出现未捕获 rejection）
     const savePromise2 = useWorkspace.getState().saveCurrent();
-
-    // 第二次应该被直接拦截返回，不会再次调用 writeTextFile
-    await savePromise2;
     expect(vi.mocked(fs.writeTextFile)).toHaveBeenCalledTimes(1);
 
     // 完成第一次写入
     resolveWrite();
     await savePromise1;
+    await savePromise2;
 
+    // 第二次没有再写一次盘（第一次 adopt 后 tab 已干净）
+    expect(vi.mocked(fs.writeTextFile)).toHaveBeenCalledTimes(1);
     expect(useWorkspace.getState().saving).toBe(false);
     expect(useWorkspace.getState().saveError).toBeNull();
   });

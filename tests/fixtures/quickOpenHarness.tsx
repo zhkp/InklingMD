@@ -61,10 +61,13 @@ export function stubDeferredIndexFiles(): { pending: PendingIndexCall[] } {
   return { pending };
 }
 
-/** 让「打开文件」这条链路真的能跑通（openFile → ensureTab 需要读文件与 mtime） */
+/** 让「打开文件」这条链路真的能跑通（openFile → ensureTab 走成对读取，需要内容 + stat） */
 export function stubFileRead(): void {
+  const stat = { mtimeUs: 1_000, size: 8 };
   vi.spyOn(fsApi, "readTextFile").mockResolvedValue("# opened");
   vi.spyOn(fsApi, "fileMtime").mockResolvedValue(1);
+  vi.spyOn(fsApi, "readDocument").mockResolvedValue({ content: "# opened", stat });
+  vi.spyOn(fsApi, "fileStat").mockResolvedValue(stat);
 }
 
 /** 复位工作区状态到「打开了一个文件夹工作区」 */

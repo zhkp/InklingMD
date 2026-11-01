@@ -13,6 +13,13 @@ const { listDirMock, readTextFileMock, writeTextFileMock } = vi.hoisted(() => ({
 vi.mock("../../src/lib/fs", () => ({
   listDir: listDirMock,
   readTextFile: readTextFileMock,
+  // store 的文档读取走 readDocument（#362 成对读取）：行为仍由 readTextFile mock 驱动，
+  // 内容与 stat 成对返回，避免「旧内容 + 新 stat」。本文件只验证请求去重与竞态，
+  // 故 stat 取固定值。
+  readDocument: async (path: string) => ({
+    content: await readTextFileMock(path),
+    stat: { mtimeUs: 1_700_000_000_000_000, size: 1 },
+  }),
   writeTextFile: writeTextFileMock,
 }));
 

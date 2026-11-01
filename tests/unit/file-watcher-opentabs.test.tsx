@@ -13,6 +13,9 @@ vi.mock("@tauri-apps/api/core", () => ({
 vi.mock("../../src/lib/fs", () => ({
   fileMtime: vi.fn(),
   readTextFile: vi.fn(),
+  // #362：switchTab 核验改用 fileStat + 成对读取
+  fileStat: vi.fn(),
+  readDocument: vi.fn(),
 }));
 
 describe("useFileWatcher & deletedOnDisk", () => {
@@ -26,6 +29,8 @@ describe("useFileWatcher & deletedOnDisk", () => {
           path: "/workspace/doc1.md",
           content: "# Doc 1",
           dirty: false,
+          diskContent: "# Doc 1",
+          diskStat: { mtimeUs: 1_000_000, size: 6 },
           diskMtime: 1000,
           deletedOnDisk: false,
           lastSavedAt: null,
@@ -50,12 +55,12 @@ describe("useFileWatcher & deletedOnDisk", () => {
     useConflict.setState({ conflict: null });
   });
 
-  it("marks tab as deletedOnDisk when fileMtime throws error", async () => {
-    vi.mocked(fs.fileMtime).mockImplementation(async (path: string) => {
+  it("marks tab as deletedOnDisk when fileStat reports notFound", async () => {
+    vi.mocked(fs.fileStat).mockImplementation(async (path: string) => {
       if (path === "/workspace/doc2.md") {
-        throw new Error("File not found");
+        throw { code: "notFound", message: "文件不存在" };
       }
-      return 1000;
+      return { mtimeUs: 1_000_000, size: 6 };
     });
 
     renderHook(() => useFileWatcher());
@@ -73,13 +78,16 @@ describe("useFileWatcher & deletedOnDisk", () => {
   });
 
   it("switchTab verifies file presence on disk", async () => {
-    vi.mocked(fs.fileMtime).mockRejectedValueOnce(new Error("ENOENT"));
+    // #362：删除态只由结构化 notFound 触发（其他 IO 错误只报错、不标删除）
+    vi.mocked(fs.fileStat).mockRejectedValueOnce({ code: "notFound", message: "文件不存在" });
 
     useWorkspace.getState().switchTab("/workspace/doc2.md");
 
     await vi.waitFor(() => {
       const tab2 = useWorkspace.getState().openTabs.find((t) => t.path === "/workspace/doc2.md");
       expect(tab2?.deletedOnDisk).toBe(true);
+      // 删除态必须清掉 stat 基线，否则下一轮会被当成"没变"
+      expect(tab2?.diskStat).toBeUndefined();
     });
   });
 
@@ -114,8 +122,11 @@ describe("useFileWatcher & deletedOnDisk", () => {
       dirty: false,
     });
     // 磁盘上 doc2 的 mtime 变了（外部修改），非 ENOENT
-    vi.mocked(fs.fileMtime).mockResolvedValue(3000);
-    vi.mocked(fs.readTextFile).mockResolvedValue("# Doc 2（磁盘最新）");
+    vi.mocked(fs.fileStat).mockResolvedValue({ mtimeUs: 3_000_000, size: 26 });
+    vi.mocked(fs.readDocument).mockResolvedValue({
+      content: "# Doc 2（磁盘最新）",
+      stat: { mtimeUs: 3_000_000, size: 26 },
+    });
 
     useWorkspace.getState().switchTab("/workspace/doc2.md");
 
@@ -161,9 +172,12 @@ describe("useFileWatcher & deletedOnDisk", () => {
     });
     const openConflictSpy = vi.fn();
     useConflict.setState({ conflict: null, openConflict: openConflictSpy });
-    // 磁盘 mtime 变化 + readTextFile 读取磁盘最新内容
-    vi.mocked(fs.fileMtime).mockResolvedValue(3000);
-    vi.mocked(fs.readTextFile).mockResolvedValue("# Doc 2（磁盘最新）");
+    // 磁盘 mtime 变化 + 成对读取磁盘最新内容
+    vi.mocked(fs.fileStat).mockResolvedValue({ mtimeUs: 3_000_000, size: 26 });
+    vi.mocked(fs.readDocument).mockResolvedValue({
+      content: "# Doc 2（磁盘最新）",
+      stat: { mtimeUs: 3_000_000, size: 26 },
+    });
 
     useWorkspace.getState().switchTab("/workspace/doc2.md");
 

@@ -29,6 +29,23 @@ vi.mock("../../src/lib/fs", () => ({
   readTextFile: readTextFileMock,
   writeTextFile: writeTextFileMock,
   fileMtime: fileMtimeMock,
+  // #362：reloadFile 走成对读取；switchTab 会做磁盘核验（本文件只断言 saving 镜像，
+  // stat 固定值让核验不引入额外冲突）
+  readDocument: async (path: string) => ({
+    content: await readTextFileMock(path),
+    stat: { mtimeUs: 1_700_000_000_000_000, size: 1 },
+  }),
+  fileStat: async () => ({ mtimeUs: 1_700_000_000_000_000, size: 1 }),
+  // #362：保存走 save_document（写盘回执）。委派给 writeTextFile mock，
+  // 让既有「按 mustExist 断言写入参数」的用例保持同一观察面
+  saveDocument: async (path: string, content: string) => {
+    await writeTextFileMock(path, content, { mustExist: true });
+    return {
+      kind: "written",
+      stat: { mtimeUs: 1_700_000_000_000_000, size: 1 },
+      foreignWrite: false,
+    };
+  },
 }));
 
 import { useWorkspace } from "../../src/store/workspace";
@@ -104,7 +121,7 @@ describe("saveCurrent 按 tab 互斥（issue #148）", () => {
     await useWorkspace.getState().saveCurrent();
 
     // B 的保存真实落盘，而不是被全局 saving 闸静默吞掉
-    expect(writeTextFileMock).toHaveBeenCalledWith("/docs/b.md", "B 编辑");
+    expect(writeTextFileMock).toHaveBeenCalledWith("/docs/b.md", "B 编辑", { mustExist: true });
 
     // A 的对话框此刻返回：保存完成，但不得抢占 B 的活跃状态或污染镜像
     resolveSaveDialog("E:/docs/a.md");

@@ -794,6 +794,31 @@ button.save-indicator:focus-visible {
 /* 代码块内的 CM 外观（底色 / 行号栏底色与边框色 / 滚动）由
  * src/lib/codemirror-shared.ts 的 sharedCodeMirrorBaseTheme 承载（同 S17）。 */
 
+/* #373 导出快照：代码块与 frontmatter 在产物里以纯文本 <pre><code> 呈现
+   （没有语言下拉、没有 CodeMirror 行号栏与 contenteditable）。
+   颜色走 --code-block-* 元素级 token 并回退全局值：frontmatter 宿主没有这组 token。
+   这不是 CM 宿主，故外观可以留在 App.css（S17 只约束 .cm-* 宿主）。 */
+.editor-scroll .milkdown .code-block-export {
+  margin: 0;
+  padding: 0.5rem 0.75rem;
+  overflow-x: auto;
+  font-family: var(--mono-font);
+  font-size: 0.85rem;
+  line-height: 1.5;
+  white-space: pre;
+  tab-size: 4;
+  background: var(--code-block-bg, transparent);
+  color: var(--code-block-text, var(--text));
+}
+/* 覆盖 `.milkdown code` 的行内代码胶囊样式：这里是块级代码容器内的唯一 code */
+.editor-scroll .milkdown .code-block-export code {
+  padding: 0;
+  border-radius: 0;
+  font: inherit;
+  background: transparent;
+  color: inherit;
+}
+
 /* Mermaid 图表块 */
 .editor-scroll .milkdown .mermaid-block {
   background: var(--content-mermaid-bg);
@@ -833,6 +858,18 @@ button.save-indicator:focus-visible {
   padding: 8px;
   color: var(--danger);
   font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 0.8rem;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+/* #373 导出快照：Mermaid 在限定时间内没渲染出来时，产物里给出**完整源码**而不是空块。
+   与 .mermaid-error 同排版但用正文色——它是内容降级，不是错误提示。 */
+.editor-scroll .milkdown .mermaid-export-fallback {
+  width: 100%;
+  margin: 0;
+  padding: 8px;
+  color: var(--content-mermaid-text);
+  font-family: var(--mono-font);
   font-size: 0.8rem;
   white-space: pre-wrap;
   word-break: break-all;

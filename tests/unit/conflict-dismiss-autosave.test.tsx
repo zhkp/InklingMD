@@ -48,6 +48,15 @@ vi.mock("../../src/lib/fs", async (importOriginal) => {
     writeTextFile: writeTextFileMock,
     fileMtime: fileMtimeMock,
     listDir: listDirMock,
+    // #362：保存走 save_document（写盘回执），委派给 writeTextFile mock 保持既有断言
+    saveDocument: async (path: string, content: string) => {
+      await writeTextFileMock(path, content, { mustExist: true });
+      return {
+        kind: "written",
+        stat: { mtimeUs: 1_700_000_000_000_000, size: 1 },
+        foreignWrite: false,
+      };
+    },
   };
 });
 
@@ -171,7 +180,7 @@ describe("冲突「继续编辑」保持自动保存暂停（issue #149 dismiss 
     });
 
     expect(askMock).not.toHaveBeenCalled();
-    expect(writeTextFileMock).toHaveBeenCalledWith(FILE, LOCAL);
+    expect(writeTextFileMock).toHaveBeenCalledWith(FILE, LOCAL, { mustExist: true });
     const afterSave = useWorkspace.getState();
     expect(afterSave.conflictPending).toBe(false);
     expect(afterSave.openTabs[0].conflictPending).toBe(false);
@@ -190,7 +199,7 @@ describe("冲突「继续编辑」保持自动保存暂停（issue #149 dismiss 
       vi.advanceTimersByTime(1);
     });
     expect(writeTextFileMock).toHaveBeenCalledTimes(2);
-    expect(writeTextFileMock).toHaveBeenLastCalledWith(FILE, `${LOCAL}（再编辑）`);
+    expect(writeTextFileMock).toHaveBeenLastCalledWith(FILE, `${LOCAL}（再编辑）`, { mustExist: true });
     expect(useWorkspace.getState().conflictPending).toBe(false);
   });
 
@@ -203,7 +212,7 @@ describe("冲突「继续编辑」保持自动保存暂停（issue #149 dismiss 
     });
 
     expect(askMock).toHaveBeenCalledTimes(1);
-    expect(writeTextFileMock).toHaveBeenCalledWith(FILE, LOCAL);
+    expect(writeTextFileMock).toHaveBeenCalledWith(FILE, LOCAL, { mustExist: true });
   });
 
   it("dismiss 保持的暂停态在切换标签页后不丢失", async () => {

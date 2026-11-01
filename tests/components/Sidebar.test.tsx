@@ -10,7 +10,16 @@ const { readTextFileMock } = vi.hoisted(() => ({
 
 vi.mock("../../src/lib/fs", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../src/lib/fs")>();
-  return { ...actual, readTextFile: readTextFileMock };
+  return {
+    ...actual,
+    readTextFile: readTextFileMock,
+    // #362：打开文件走成对读取；内容仍由 readTextFile mock 驱动（断言不变），
+    // stat 固定值——本文件只验证文件树 DOM / 滚动保持与错误提示。
+    readDocument: async (path: string) => ({
+      content: await readTextFileMock(path),
+      stat: { mtimeUs: 1_700_000_000_000_000, size: 1 },
+    }),
+  };
 });
 
 import { Sidebar } from "../../src/components/Sidebar/Sidebar";

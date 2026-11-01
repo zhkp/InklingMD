@@ -55,6 +55,7 @@ export async function saveImageAsset(
     console.warn("assets 查重失败，按新文件写入：", e);
   }
   const fullPath = await resolvePathFromDocument(documentPath, ASSETS_DIR, fileName);
-  await writeBinaryFile(fullPath, data);
+  // 只允许补建 assets/ 这一层：文档所在目录已被删除时写入失败，不连带重建（issue #363）
+  await writeBinaryFile(fullPath, data, { createParentDir: true });
   return `${ASSETS_DIR}/${fileName}`;
 }

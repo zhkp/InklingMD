@@ -5,7 +5,7 @@
 // 两处（树节点 + 书签条目）。用 data-tree-row 限定到窗口化文件树节点。
 
 import { test, expect, type Page } from "@playwright/test";
-import { expandMockNotes, openMockWorkspace } from "./helpers";
+import { appendToEditor, expandMockNotes, openFile, openMockWorkspace } from "./helpers";
 
 // 定位到文件树里的某个节点行（排除书签/最近打开区块），右键并等菜单出现
 async function rightClickTreeNode(page: Page, name: string) {
@@ -95,6 +95,36 @@ test.describe("文件树右键菜单", () => {
   test("FC7 .md 文件显示在新窗口打开项", async ({ page }) => {
     await rightClickTreeNode(page, "readme.md");
     await expect(page.locator(".tree-context-item").filter({ hasText: "在新窗口打开" })).toBeVisible();
+  });
+
+  test("FC9 删除含已打开文件的文件夹：一次确认说清影响，子 tab 全部关闭，未保存内容进「可恢复文件」（#366）", async ({ page }) => {
+    await openFile(page, "readme.md");
+    await openFile(page, "todo.md");
+    // 让 todo.md 带未保存修改（最后一步，紧接着发起删除）
+    await appendToEditor(page, "删除前的未保存编辑");
+    await expect(page.locator(".tab").filter({ hasText: "todo.md" }).locator(".tab-dirty")).toBeVisible();
+
+    const messages: string[] = [];
+    page.on("dialog", (d) => {
+      messages.push(d.message());
+      void d.accept();
+    });
+    await rightClickTreeNode(page, "notes");
+    await clickContextItem(page, "删除");
+
+    await expect(page.locator(".tab")).toHaveCount(0, { timeout: 5_000 });
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toContain("确定删除文件夹「notes」及其所有内容吗？");
+    expect(messages[0]).toContain("2 个文件正在编辑器中打开");
+    expect(messages[0]).toContain("1 个有未保存的修改（todo.md）");
+    expect(messages[0]).toContain("可恢复文件");
+    await expect(page.locator('[data-tree-row][data-path="/mock-workspace/notes"]')).toHaveCount(0);
+
+    // 未保存内容可从「可恢复文件」恢复为新标签页
+    const snapshots = page.locator(".deleted-snapshots-section");
+    await expect(snapshots).toContainText("todo.md");
+    await snapshots.locator(".snapshot-restore-btn").first().click();
+    await expect(page.locator(".ProseMirror")).toContainText("删除前的未保存编辑");
   });
 
   test("FC8 复制路径写入剪贴板", async ({ page }, testInfo) => {

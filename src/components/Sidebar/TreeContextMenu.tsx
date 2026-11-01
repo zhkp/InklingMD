@@ -1,15 +1,24 @@
 // 文件树右键菜单（issue #50 从 Sidebar 抽出为 TreeContextMenu）
 // 通过 TREE_ACTION_EVENT 派发重命名/新建指令给文件树，
-// 删除前对未保存 tab 做二次确认，支持书签/新窗口/复制路径。
+// 删除前一次确认说清对已打开文件的影响（#366），支持书签/新窗口/复制路径。
 
 import { useEffect } from "react";
 import { useWorkspace } from "../../store/workspace";
+import { probeSnapshotStorageHealth } from "../../store/workspace/shared";
+import { useUI } from "../../store/ui";
+import { isPathWithin } from "../../lib/path-utils";
 import { openInNewWindow } from "../../lib/newWindow";
 import { deletePath } from "../../lib/fs";
 import { askConfirmation, showMessage } from "../../lib/dialogs";
 import { useContextMenuClamping } from "../../hooks/useContextMenuClamping";
 import { useMenuA11y } from "../../hooks/useMenuA11y";
-import { isMarkdown, TREE_ACTION_EVENT, type MenuPayload, type TreeAction } from "./treeShared";
+import {
+  buildDeleteConfirmMessage,
+  isMarkdown,
+  TREE_ACTION_EVENT,
+  type MenuPayload,
+  type TreeAction,
+} from "./treeShared";
 
 export function TreeContextMenu({
   payload,
@@ -49,12 +58,21 @@ export function TreeContextMenu({
     onClose();
   };
 
-  /** 删除文件/目录，未保存的 tab 会弹确认（closeTab 内部处理） */
+  /**
+   * 删除文件/目录（#366）：一次确认说清影响——其下已打开的 tab 会关闭，
+   * 未保存修改由 onFileDeleted 先写入「可恢复文件」快照；删除后展开该区块便于找回
+   */
   const handleDelete = async () => {
     const { node } = payload;
-    const msg = node.is_dir
-      ? `确定删除文件夹「${node.name}」及其所有内容吗？`
-      : `确定删除「${node.name}」吗？`;
+    // isPathWithin：含自身、按路径段匹配（不误算 notes-old 之于 notes）、Windows 大小写折叠
+    const affected = openTabs.filter((t) => isPathWithin(t.path, node.path));
+    const dirtyPaths = affected.filter((t) => t.dirty).map((t) => t.path);
+    const msg = buildDeleteConfirmMessage(
+      node,
+      affected.map((t) => t.path),
+      dirtyPaths,
+      dirtyPaths.length === 0 || probeSnapshotStorageHealth().writable,
+    );
     const confirmed = await askConfirmation(msg, {
       title: "删除确认",
       kind: "warning",
@@ -63,36 +81,14 @@ export function TreeContextMenu({
       onClose();
       return;
     }
-    // 如果有未保存的 tab 被影响，提示
-    if (node.is_dir) {
-      const affected = openTabs.filter((t) => t.path.startsWith(node.path));
-      const dirty = affected.filter((t) => t.dirty);
-      if (dirty.length > 0) {
-        const ok = await askConfirmation(
-          `文件夹下有 ${dirty.length} 个未保存的文件，删除将丢失这些修改，确定继续吗？`,
-          { title: "未保存修改警告", kind: "warning" },
-        );
-        if (!ok) {
-          onClose();
-          return;
-        }
-      }
-    } else {
-      const tab = openTabs.find((t) => t.path === node.path);
-      if (tab?.dirty) {
-        const ok = await askConfirmation(
-          `「${node.name}」有未保存的修改，删除将丢失修改，确定继续吗？`,
-          { title: "未保存修改警告", kind: "warning" },
-        );
-        if (!ok) {
-          onClose();
-          return;
-        }
-      }
-    }
     try {
       await deletePath(node.path);
-      onFileDeleted(node.path);
+      // 确认框不阻塞 JS：停留期间自动保存可能已把提示时未保存的文件存成干净状态，
+      // 仍按确认框的承诺为它们留备份
+      onFileDeleted(node.path, { alsoBackup: dirtyPaths });
+      if (dirtyPaths.length > 0 && !useUI.getState().sectionExpanded.snapshots) {
+        useUI.getState().toggleSectionExpanded("snapshots");
+      }
     } catch (e) {
       await showMessage(`删除失败：${e instanceof Error ? e.message : String(e)}`, { kind: "error" });
     }

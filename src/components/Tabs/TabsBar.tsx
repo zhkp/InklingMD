@@ -78,10 +78,16 @@ function tabPathDescriptions(tabs: OpenTab[]): Map<string, string> {
 }
 
 export function TabsBar() {
-  // 仅订阅 tab 的展示字段（path/dirty/isUntitled），避免 content 每次按键变化时重渲染。
+  // 仅订阅 tab 的展示字段（path/dirty/isUntitled/deletedOnDisk），避免 content 每次按键变化时重渲染。
   // useWorkspace 默认用 Object.is 比较，这里返回 string 快照，内容变化时快照不变。
+  // 渲染用到的展示字段都必须进快照，否则该字段变化不触发重渲染（#363：删除标记曾因此不显示）
   const tabsSig = useWorkspace((s) =>
-    s.openTabs.map((t) => `${t.path}|${t.dirty ? "1" : "0"}|${t.isUntitled ? "1" : "0"}`).join("\n"),
+    s.openTabs
+      .map(
+        (t) =>
+          `${t.path}|${t.dirty ? "1" : "0"}|${t.isUntitled ? "1" : "0"}|${t.deletedOnDisk ? "1" : "0"}`,
+      )
+      .join("\n"),
   );
   const activeTabPath = useWorkspace((s) => s.activeTabPath);
   const switchTab = useWorkspace((s) => s.switchTab);
