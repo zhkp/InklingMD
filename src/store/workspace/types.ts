@@ -7,6 +7,7 @@ import type { FileTreeSlice } from "./fileTree";
 import type { TabsSlice } from "./tabs";
 import type { BookmarksSlice } from "./bookmarks";
 import type { RecentsSlice } from "./recents";
+import type { EolStyle } from "../../lib/eol";
 
 /** 单个打开的标签页 */
 export interface OpenTab {
@@ -50,6 +51,15 @@ export interface OpenTab {
   sourceMode?: boolean;
   /** 版本修订计数（reloadFile 强制刷新 DOM 时自增） */
   revision?: number;
+  /** 磁盘文件的换行风格（读取时检测；未命名草稿 / 无换行文件为 undefined，#368） */
+  eol?: EolStyle;
+  /** 原文件为混合换行（保存转换时据此告警，#368） */
+  eolMixed?: boolean;
+  /**
+   * 原文件是否以换行符结尾（#368 末尾换行保持）。
+   * undefined = 未记录（草稿 / 旧 tab），保存时按「有末尾换行」处理，不删除。
+   */
+  finalNewline?: boolean;
 }
 
 /** 完整工作区状态：各领域 slice 的交集组合 */

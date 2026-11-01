@@ -149,6 +149,11 @@
   color: var(--danger);
 }
 
+/* 非阻塞警告（#370 评审）：内存侧正则不受支持，未保存内容未被检索 */
+.gs-warn {
+  color: var(--warning);
+}
+
 .gs-results {
   flex: 1;
   overflow-y: auto;
@@ -191,6 +196,19 @@
   border-radius: 10px;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
+}
+
+/* 「未保存」徽标（#370）：命中来自 dirty tab / 未命名草稿的内存缓冲 */
+.gs-unsaved-badge {
+  color: var(--warning);
+  border: 1px solid var(--warning);
+  background: transparent;
+  font-size: 0.66rem;
+  line-height: 1;
+  padding: 0.12rem 0.34rem;
+  border-radius: 8px;
+  font-weight: 600;
+  white-space: nowrap;
 }
 
 .gs-hit {

@@ -14,6 +14,7 @@ import {
   writeTextFile,
 } from "../../lib/fs";
 import type { DocumentSnapshot, FileStat } from "../../lib/fs";
+import { applyEol, detectEol } from "../../lib/eol";
 import { formatCmdError } from "../../lib/cmd-error";
 import { isSamePath } from "../../lib/path-utils";
 import { clearDraft, scheduleDraft } from "../../lib/draft-journal";
@@ -361,6 +362,9 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
       throw new Error("文件在加载期间被外部删除");
     }
 
+    // #368：读取时检测原始换行风格与末尾换行状态，保存写盘前据此还原
+    // （编辑器内部统一 LF，序列化器恒补末尾 \n）
+    const { eol, mixed, finalNewline } = detectEol(snapshot.content);
     let resolvedTab: OpenTab | undefined;
     set((current) => {
       // 按最终路径复查：并发请求（旧路径与迁移后新路径）可能已先建 tab
@@ -381,6 +385,9 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
         diskMtime: mtimeMsOf(snapshot.stat),
         cursorPos: null,
         scrollTop: null,
+        ...(eol !== null ? { eol } : {}),
+        ...(mixed ? { eolMixed: true } : {}),
+        finalNewline,
       };
       return { openTabs: [...current.openTabs, resolvedTab] };
     });
@@ -493,12 +500,18 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
       const tab = current.openTabs.find((candidate) => candidate.path === filePath);
       if (!tab) return {};
 
-      nextRecent = pushRecent(current.recentFiles, filePath);
+      // #370 评审：未命名草稿是虚拟路径（untitled-N），不得进入持久化的最近
+      // 文件列表——草稿关闭后该条目会变成打不开的幽灵项（点它走
+      // readTextFile 必失败），单文件模式 Quick Open 也会把它当候选。
+      // 全局搜索点击草稿命中会走 openFile 到这里，故必须在此收口。
+      if (!tab.isUntitled) {
+        nextRecent = pushRecent(current.recentFiles, filePath);
+      }
       const fileOpenErrors = new Map(current.fileOpenErrors);
       fileOpenErrors.delete(filePath);
       return {
         ...mainTabPatch(current, tab),
-        recentFiles: nextRecent,
+        ...(nextRecent ? { recentFiles: nextRecent } : {}),
         fileOpenErrors,
       };
     });
@@ -517,6 +530,18 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
       const activeTab = openTabs.find((t) => t.path === current.activeTabPath);
       return { openTabs, saving: activeTab?.saving ?? false };
     });
+  };
+
+  /**
+   * #368：混合换行文件保存告警——内部表示已丢失逐行换行信息，按主导风格
+   * 整体归一会把少数派行改写；无法逐行保真，至少让用户可感知（console）。
+   */
+  const warnMixedEol = (targetPath: string, tab: OpenTab) => {
+    if (tab.eolMixed && tab.eol) {
+      console.warn(
+        `[workspace] 「${targetPath}」原文件为混合换行，保存时已按主导风格（${tab.eol === "crlf" ? "CRLF" : "LF"}）整体归一`,
+      );
+    }
   };
 
   /**
@@ -693,6 +718,8 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
         // 不清掉会让恢复面板给出「可恢复」的假提示。这里 await：重载是低频动作，
         // 而「重载完草稿还在」会让 5b 立刻给出过期的恢复提示
         await clearDraft(filePath);
+        // #368：重载即以磁盘内容为基准，换行风格同步重检
+        const reloadedEol = detectEol(snapshot.content);
         set((current) => {
           const openTabs = current.openTabs.map((t) =>
             t.path === filePath
@@ -704,6 +731,11 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
                   diskStat: snapshot.stat,
                   diskMtime: mtimeMsOf(snapshot.stat),
                   deletedOnDisk: false,
+                  // #368：重载即以磁盘内容为基准，换行风格与末尾换行同步重检
+                  ...(reloadedEol.eol !== null
+                    ? { eol: reloadedEol.eol, eolMixed: reloadedEol.mixed || undefined }
+                    : { eol: undefined, eolMixed: undefined }),
+                  finalNewline: reloadedEol.finalNewline,
                   saveError: null,
                   // 重载即以磁盘内容为准，冲突已解决（issue #164）：
                   // 否则状态栏持续误报"外部冲突"且指示器点击无效
@@ -1360,7 +1392,17 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
             }
           }
 
-          await writeTextFile(savePath, contentToSave);
+          // #368：合并写盘沿用目标文件已记录的换行风格（草稿本身没有磁盘历史）；
+          // 告警对象是被归一化的目标文件（activeTabPath 此时是草稿路径）。
+          // 告警必须在写盘**成功之后**——写盘失败时磁盘一个字节都没变，
+          // 提前告警等于向用户报告未发生的事实（评审 B2）。
+          const mergeContentToWrite = applyEol(
+            contentToSave,
+            mergeTarget.eol ?? null,
+            mergeTarget.finalNewline ?? true,
+          );
+          await writeTextFile(savePath, mergeContentToWrite);
+          warnMixedEol(savePath, mergeTarget);
           const mergedAt = Date.now();
           let mergedMtime: number | undefined;
           try {
@@ -1398,8 +1440,12 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
                       conflictPending: false,
                       saving: false,
                       lastSavedAt: mergedAt,
-                      diskContent: contentToSave,
+                      diskContent: mergeContentToWrite,
                       diskMtime: mergedMtime,
+                      // #368：写盘已按主导风格归一，磁盘不再混合；不清会让
+                      // 后续每次保存重复告警「原文件为混合换行」
+                      eolMixed: undefined,
+                      finalNewline: mergeContentToWrite.endsWith("\n"),
                     };
                   }
                   return {
@@ -1409,8 +1455,10 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
                     conflictPending: false,
                     saving: false,
                     lastSavedAt: mergedAt,
-                    diskContent: contentToSave,
+                    diskContent: mergeContentToWrite,
                     diskMtime: mergedMtime,
+                    eolMixed: undefined,
+                    finalNewline: mergeContentToWrite.endsWith("\n"),
                   };
                 }
                 if (!closeDraft && t.path === activeTabPath) {
@@ -1432,7 +1480,16 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
                   conflictPending: false,
                   saving: false,
                   lastSavedAt: mergedAt,
-                  diskContent: contentToSave,
+                  // #368：草稿承接已保存的路径后，换行元数据跟随目标文件。
+                  // 草稿 tab 本身不携带 eolMixed（openUntitledTabWithContent 不设
+                  // 该字段），这里显式清空是防御性对齐——禁止改成拷贝
+                  // mergeTarget.eolMixed，否则会带着「原文件混合换行」的旧事实
+                  // 让后续每次保存重复告警。
+                  ...(mergeTarget.eol !== undefined
+                    ? { eol: mergeTarget.eol, eolMixed: undefined }
+                    : {}),
+                  finalNewline: mergeContentToWrite.endsWith("\n"),
+                  diskContent: mergeContentToWrite,
                   diskMtime: mergedMtime,
                 };
               }
@@ -1466,6 +1523,17 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
           return;
         }
 
+        // #368：写盘前按读取时检测的换行风格还原序列化结果（编辑器内部统一 LF）。
+        // 未命名草稿 / 原文件无换行符时 eol 为 undefined，原样写出（LF）。
+        // 所有写盘点（含另存为 / 重新创建）都必须用 contentToWrite，否则
+        // CRLF 文件经这些旁路仍会被写成 LF。
+        const contentToWrite = applyEol(
+          contentToSave,
+          tab.eol ?? null,
+          tab.finalNewline ?? true,
+        );
+        // 混合换行告警推迟到写盘成功之后（评审 B2）：写盘失败（TARGET_MISSING /
+        // PARENT_MISSING / 权限 / IO）时磁盘未变，不得宣称「已按主导风格归一」
         // 「已删除文件」经用户选择重新创建 / 另存为后，磁盘上多出一个文件
         let resolvedMissing = false;
         // 基线直接取写盘回执（#362 M1）：内容与磁盘身份来自同一次提交，
@@ -1476,7 +1544,7 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
         try {
           if (tab.isUntitled) {
             // 草稿另存为：目标由用户在对话框选定，允许创建
-            await writeTextFile(savePath, contentToSave);
+            await writeTextFile(savePath, contentToWrite);
             try {
               savedStat = await fileStat(savePath);
             } catch {
@@ -1485,7 +1553,7 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
           } else if (!tab.diskStat) {
             // 没有成对基线（旧 tab / 恢复出来的 tab）：退回「必须存在」的写盘，
             // 仍不允许复活已删文件，但没有身份可比，也就无法改判冲突
-            await writeTextFile(savePath, contentToSave, { mustExist: true });
+            await writeTextFile(savePath, contentToWrite, { mustExist: true });
             try {
               savedStat = await fileStat(savePath);
             } catch {
@@ -1493,7 +1561,7 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
             }
           } else {
             const attempt = (expected?: FileStat, overwrite = false) =>
-              saveDocument(savePath, contentToSave, { expected, overwriteExisting: overwrite });
+              saveDocument(savePath, contentToWrite, { expected, overwriteExisting: overwrite });
 
             // expected = 上次成对读到的磁盘身份：目标消失 → notFound，身份变了 → conflict。
             // 用户已确认覆盖时只置 `overwriteExisting`：Rust 侧跳过身份比对（但保留目标必须存在）
@@ -1571,7 +1639,7 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
                 applyTabSaving(activeTabPath, false);
                 return;
               }
-              const resolved = await resolveMissingFileSave(savePath, code, contentToSave);
+              const resolved = await resolveMissingFileSave(savePath, code, contentToWrite);
               if (!resolved) {
                 applyTabSaving(activeTabPath, false);
                 return;
@@ -1591,7 +1659,7 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
             applyTabSaving(activeTabPath, false);
             return;
           }
-          const resolved = await resolveMissingFileSave(savePath, code, contentToSave);
+          const resolved = await resolveMissingFileSave(savePath, code, contentToWrite);
           if (!resolved) {
             applyTabSaving(activeTabPath, false);
             return;
@@ -1605,6 +1673,9 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
             saveError: "保存可能未完成：写入后磁盘内容与预期不一致，请检查后另存副本。",
           });
         }
+        // 写盘成功后（走到这里 = 已实际写入，含另存为 / 重新创建）才宣告混合换行
+        // 已按主导风格归一（评审 B2）；写盘失败的各分支已提前 return，不会到这里
+        warnMixedEol(activeTabPath, tab);
         const pathChanged = savePath !== activeTabPath;
         const now = Date.now();
         const savedMtime = savedStat ? mtimeMsOf(savedStat) : undefined;
@@ -1623,22 +1694,28 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
             // 如果写盘期间内容又发生了新的修改，保持 dirty 为 true
             const isStillDirty = t.content !== contentToSave;
             return {
-            ...t,
-            // 改名场景保持新路径（不能再改回旧名）
-            path: renamedAway ? t.path : savePath,
-            isUntitled: false,
-            // 回执不可信时保持 dirty，并保留旧基线（下一轮按冲突处理，不静默重载）
-            dirty: isStillDirty || receiptUntrusted,
-            conflictPending: false,
-            saving: false,
-            // 写成功即清掉该 tab 的失败痕迹（后台 tab 的 saveError 只落在自己身上）
-            saveError: null,
-            // 写盘成功即说明文件已（重新）落在 savePath 上
-            deletedOnDisk: false,
-            lastSavedAt: now,
-            diskContent: receiptUntrusted ? t.diskContent : contentToSave,
-            diskStat: receiptUntrusted ? t.diskStat : savedStat,
-            diskMtime: receiptUntrusted ? t.diskMtime : savedMtime,
+              ...t,
+              // 改名场景保持新路径（不能再改回旧名）
+              path: renamedAway ? t.path : savePath,
+              isUntitled: false,
+              // 回执不可信时保持 dirty，并保留旧基线（下一轮按冲突处理，不静默重载）
+              dirty: isStillDirty || receiptUntrusted,
+              conflictPending: false,
+              saving: false,
+              // 写成功即清掉该 tab 的失败痕迹（后台 tab 的 saveError 只落在自己身上）
+              saveError: null,
+              // 写盘成功即说明文件已（重新）落在 savePath 上
+              deletedOnDisk: false,
+              lastSavedAt: now,
+              // #368：基线必须记录写盘字节（含换行还原），后续外部修改比对才不失配
+              diskContent: receiptUntrusted ? t.diskContent : contentToWrite,
+              diskStat: receiptUntrusted ? t.diskStat : savedStat,
+              diskMtime: receiptUntrusted ? t.diskMtime : savedMtime,
+              // 写盘已按主导风格归一，磁盘不再混合；不清会让后续每次保存重复告警
+              eolMixed: undefined,
+              // #368：写盘后的磁盘末尾换行状态以实际写盘内容为准——原文件无末尾
+              // 换行时保持无末尾换行；用户额外输入的空行保留下来（多出的 \n 不被删）
+              finalNewline: contentToWrite.endsWith("\n"),
             };
           }
           return t;
@@ -1761,8 +1838,20 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
     },
 
     setTabDiskContent: (path, diskContent) => {
+      // #368：磁盘基线更新时换行风格同步重检——冲突「继续编辑」后磁盘版本
+      // 可能已被外部改写成另一种风格，后续保存覆盖应跟随当前磁盘风格
+      const baselineEol = detectEol(diskContent);
       const nextTabs = get().openTabs.map((t) =>
-        t.path === path ? { ...t, diskContent } : t,
+        t.path === path
+          ? {
+              ...t,
+              diskContent,
+              ...(baselineEol.eol !== null
+                ? { eol: baselineEol.eol, eolMixed: baselineEol.mixed || undefined }
+                : { eol: undefined, eolMixed: undefined }),
+              finalNewline: baselineEol.finalNewline,
+            }
+          : t,
       );
       set({ openTabs: nextTabs });
     },

@@ -10,16 +10,21 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useConflict } from "../../store/conflict";
 import { useWorkspace } from "../../store/workspace";
 import { writeTextFile, listDir } from "../../lib/fs";
+import { applyEol, type EolStyle } from "../../lib/eol";
 import { diffLines, nextBackupPath } from "../../lib/diff";
 import { IconAlertTriangle, IconX } from "../icons";
 import { baseName } from "../../lib/path-utils";
 import { showMessage } from "../../lib/dialogs";
 import "./ConflictDialog.css";
 
-/** 把本地内容另存为同目录副本文件，返回副本路径 */
+/** 把本地内容另存为同目录副本文件，返回副本路径。
+ *  #368：localContent 是编辑器内部 LF 表示，写副本前按原文件换行风格还原，
+ *  否则 CRLF 文件的备份副本变成 LF，与原文件对比时再次产生整文件 EOL diff */
 async function saveLocalBackup(
   filePath: string,
   localContent: string,
+  eol: EolStyle | null,
+  finalNewline: boolean,
 ): Promise<string> {
   // 列出同目录已有文件，生成不冲突的 backup 路径（一次 IO 拿全量判断）
   const dir = filePath.replace(/[\\/][^\\/]+$/, "");
@@ -31,8 +36,11 @@ async function saveLocalBackup(
     // 列目录失败（如单文件模式目录已移除）：退化为无冲突检测的直接命名
   }
   const backupPath = nextBackupPath(filePath, existing);
-  // 备份是「丢了还能从编辑器重来」的副本，不需要掉电保证：省掉两次 fsync
-  await writeTextFile(backupPath, localContent, { durability: "none" });
+  // #368：按原文件换行风格还原本地内容；备份是「丢了还能从编辑器重来」的副本，
+  // 不需要掉电保证：省掉两次 fsync
+  await writeTextFile(backupPath, applyEol(localContent, eol, finalNewline), {
+    durability: "none",
+  });
   return backupPath;
 }
 
@@ -47,7 +55,14 @@ export function ConflictDialog() {
 
   const diff = useMemo(() => {
     if (!conflict || !showDiff) return null;
-    return diffLines(conflict.localContent, conflict.diskContent);
+    // #368：磁盘侧保留原始 CRLF（read_text_file 原样返回），本地侧是编辑器
+    // 的 LF 表示——比较前两侧统一归一为 LF，否则 CRLF 文件每行尾的 \r 会让
+    // diff 判成整篇差异（「内容一致（仅换行符差异）」文案也就永不可达）。
+    // 仅影响展示，不改 diskContent 基线本身的原始字节。
+    return diffLines(
+      applyEol(conflict.localContent, "lf"),
+      applyEol(conflict.diskContent, "lf"),
+    );
   }, [conflict, showDiff]);
 
   const overlayRef = useRef<HTMLDivElement>(null);
@@ -117,7 +132,15 @@ export function ConflictDialog() {
 
   /** 选项 1：本地内容另存副本，编辑器重载磁盘最新 */
   const handleBackup = wrap(async () => {
-    const backupPath = await saveLocalBackup(filePath, localContent);
+    // #368：副本沿用原文件记录的换行风格与末尾换行状态（tab 元数据读取处，
+    // 冲突对话框打开时 tab 必然存在——冲突只对已打开文件产生）
+    const tab = useWorkspace.getState().openTabs.find((t) => t.path === filePath);
+    const backupPath = await saveLocalBackup(
+      filePath,
+      localContent,
+      tab?.eol ?? null,
+      tab?.finalNewline ?? true,
+    );
     // reloadFile 强制从磁盘重读（openFile 对已打开 tab 只切缓存，不会真正重载）
     await reloadFile(filePath);
     await showMessage(
