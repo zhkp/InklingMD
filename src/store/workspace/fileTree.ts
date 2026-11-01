@@ -43,6 +43,13 @@ export interface FileTreeSlice {
   tree: FileNode | null;
   /** 正在打开或切换工作区 */
   workspaceLoading: boolean;
+  /**
+   * Quick Open 索引失效信号（#369）：refreshTree 每次刷新时自增，
+   * 打开中的 Quick Open 面板订阅它触发重新取数，弥补「索引已失效、
+   * 但面板不重新取数」的盲区。与 invalidateWorkspaceIndex() 成对出现
+   * （模块层负责缓存失效，这里负责让订阅方可感知）。
+   */
+  workspaceIndexVersion: number;
 
   /** 展开的目录路径集合（持久化，未记录的目录默认折叠） */
   expandedDirs: Set<string>;
@@ -81,6 +88,7 @@ export const createFileTreeSlice: StateCreator<
   workspaceMode: null,
   tree: null,
   workspaceLoading: false,
+  workspaceIndexVersion: 0,
   expandedDirs: loadExpandedDirs(),
   loadedDirs: new Set(),
   loadingDirs: new Set(),
@@ -243,7 +251,9 @@ export const createFileTreeSlice: StateCreator<
     if (!rootPath || workspaceMode !== "folder") return;
     try {
       await get().loadDirectory(dirPath ?? rootPath, true);
-      // 文件树内容已变化，Quick Open 的候选缓存随之失效（#228）
+      // 文件树内容已变化，Quick Open 的候选缓存随之失效（#228）；
+      // #369：版本号同步自增，让打开中的面板感知失效并重新取数
+      set((current) => ({ workspaceIndexVersion: current.workspaceIndexVersion + 1 }));
       invalidateWorkspaceIndex();
     } catch {
       // 刷新失败忽略，不阻塞用户操作

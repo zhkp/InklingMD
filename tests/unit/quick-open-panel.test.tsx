@@ -295,4 +295,25 @@ describe("QuickOpenPanel（交互）", () => {
     await waitFor(() => expect(useWorkspace.getState().currentFile).not.toBeNull());
     expect(onClose).toHaveBeenCalled();
   });
+
+  it("#369：索引失效信号自增后，打开中的面板原地重新取数（无需关闭重开）", async () => {
+    stubIndexFiles(["/w/old.md"]);
+    await renderQuickOpen();
+    expect(screen.getByText("old.md")).toBeTruthy();
+
+    // 外部文件变更 → refreshTree → 索引失效 + workspaceIndexVersion 自增。
+    // 模拟磁盘上多出了新文件后索引重建返回新清单
+    stubIndexFiles(["/w/old.md", "/w/external-new.md"]);
+    act(() => {
+      useWorkspace.setState((current) => ({
+        workspaceIndexVersion: current.workspaceIndexVersion + 1,
+      }));
+    });
+
+    // 面板未关闭重开，列表原地更新为最新索引结果
+    await waitFor(() => {
+      expect(screen.getByText("external-new.md")).toBeTruthy();
+    });
+    expect(screen.getByText("old.md")).toBeTruthy();
+  });
 });

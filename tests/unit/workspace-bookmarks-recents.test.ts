@@ -73,4 +73,65 @@ describe("Workspace Bookmarks & Recents Slices", () => {
       expect(useWorkspace.getState().bookmarks).toEqual([]);
     });
   });
+
+  describe("RecentsSlice in store（#370 评审：草稿虚拟路径不得入最近列表）", () => {
+    it("激活未命名草稿不写入 recentFiles（草稿关闭后不会留下打不开的幽灵项）", async () => {
+      localStorage.clear();
+      useWorkspace.setState({
+        openTabs: [
+          {
+            path: "untitled-1",
+            content: "# 草稿",
+            dirty: true,
+            isUntitled: true,
+            lastSavedAt: null,
+            cursorPos: null,
+            scrollTop: null,
+          },
+        ],
+        activeTabPath: "untitled-1",
+        currentFile: "untitled-1",
+        currentContent: "# 草稿",
+        recentFiles: [],
+        rootPath: "/ws",
+        workspaceMode: "file",
+      } as never);
+
+      // 全局搜索点击草稿命中走 openFile，verify 它不污染最近列表
+      await useWorkspace.getState().openFile("untitled-1");
+
+      expect(useWorkspace.getState().recentFiles).not.toContain("untitled-1");
+      expect(useWorkspace.getState().activeTabPath).toBe("untitled-1");
+      // 持久化层同样不得出现虚拟路径
+      expect(loadRecentFiles()).not.toContain("untitled-1");
+    });
+
+    it("对照组：激活真实文件仍会写入 recentFiles（证明上面的断言不是恒真）", async () => {
+      localStorage.clear();
+      useWorkspace.setState({
+        openTabs: [
+          {
+            path: "/ws/real.md",
+            content: "# 真实文件",
+            dirty: false,
+            isUntitled: false,
+            lastSavedAt: null,
+            cursorPos: null,
+            scrollTop: null,
+          },
+        ],
+        activeTabPath: null,
+        currentFile: null,
+        currentContent: "",
+        recentFiles: [],
+        rootPath: "/ws",
+        workspaceMode: "folder",
+      } as never);
+
+      await useWorkspace.getState().openFile("/ws/real.md");
+
+      expect(useWorkspace.getState().recentFiles).toEqual(["/ws/real.md"]);
+      expect(loadRecentFiles()).toEqual(["/ws/real.md"]);
+    });
+  });
 });

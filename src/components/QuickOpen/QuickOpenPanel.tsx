@@ -42,6 +42,10 @@ export function QuickOpenPanel({ onClose }: QuickOpenPanelProps) {
   const openTabs = useWorkspace((s) => s.openTabs);
   const recentFiles = useWorkspace((s) => s.recentFiles);
   const openFile = useWorkspace((s) => s.openFile);
+  // #369：索引失效信号（refreshTree 自增）。面板打开期间外部文件变更经
+  // refreshTree 失效索引后，这里驱动重新取数——否则缓存已失效但面板列表
+  // 停在旧结果，直到关闭重开。
+  const indexVersion = useWorkspace((s) => s.workspaceIndexVersion);
 
   const [query, setQuery] = useState("");
   const [paths, setPaths] = useState<string[]>([]);
@@ -118,7 +122,7 @@ export function QuickOpenPanel({ onClose }: QuickOpenPanelProps) {
     return () => {
       cancelled = true;
     };
-  }, [rootPath, workspaceMode, openTabs, recentFiles, retryToken]);
+  }, [rootPath, workspaceMode, openTabs, recentFiles, retryToken, indexVersion]);
 
   // 候选集只在「索引 / 工作区 / 标签 / 最近文件」变化时重建；纯打字只触发重新排序。
   // 与排序拆成两个 memo 是性能要求（#228 验收：首字符到结果渲染 < 50ms）：

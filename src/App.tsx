@@ -19,6 +19,7 @@ import { useUI } from "./store/ui";
 import { useSettings } from "./store/settings";
 import { useAutoSave } from "./lib/useAutoSave";
 import { useFileWatcher } from "./lib/useFileWatcher";
+import { useWorkspaceDirWatcher } from "./lib/workspaceDirWatcher";
 import { useCtrlWheelZoom } from "./lib/useCtrlWheelZoom";
 import { useGlobalShortcuts } from "./lib/useGlobalShortcuts";
 import { resolveModalAction, type ModalId } from "./lib/modals";
@@ -140,6 +141,8 @@ function App() {
   useAutoSave();
   // 启用外部文件修改监听（仅桌面端）
   useFileWatcher();
+  // 启用工作区目录外部变更监听（#369：外部新建/删除/重命名 3 秒内反映到文件树与 Quick Open）
+  useWorkspaceDirWatcher();
   // 启动时打开目标文件（派生窗口 / 文件关联 / 单实例转发）
   useStartupFile();
   useExitHandler();

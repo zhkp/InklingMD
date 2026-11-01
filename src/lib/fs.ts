@@ -198,6 +198,11 @@ export interface SearchHit {
   line: number;
   column: number;
   preview: string;
+  /**
+   * 命中来自未保存的内存缓冲（dirty tab / 未命名草稿）时为 true（#370）。
+   * 仅前端内存侧搜索（bufferSearch）产生；Rust 磁盘扫描不返回该字段。
+   */
+  unsaved?: boolean;
 }
 
 /** 全局搜索结果（#160：截断对前端可见） */

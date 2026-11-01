@@ -9,6 +9,8 @@ import { editorViewCtx } from "@milkdown/kit/core";
 import { TextSelection } from "@milkdown/kit/prose/state";
 import { useWorkspace } from "../../store/workspace";
 import { searchInWorkspace, type SearchHit } from "../../lib/fs";
+import { mergeSearchResults } from "../../lib/bufferSearch";
+import { flushAllMarkdownPublishers } from "../Editor/markdown-publisher";
 import { relativeToRoot } from "../../lib/path";
 import { IconFileText, IconX } from "../icons";
 import "./GlobalSearchPanel.css";
@@ -22,6 +24,20 @@ interface GlobalSearchPanelProps {
 interface GroupedResult {
   path: string;
   hits: SearchHit[];
+}
+
+/** 与 Rust 侧 MAX_TOTAL_HITS 一致：磁盘 + 内存合并后的总命中上限 */
+const MAX_TOTAL_HITS = 5000;
+
+/** 未命名草稿的展示名（与 TabsBar 的「未命名 N」口径一致） */
+function draftDisplayName(path: string): string | null {
+  const m = path.match(/^untitled-(\d+)$/);
+  return m ? `未命名 ${m[1]}` : null;
+}
+
+/** 分组标题展示：草稿用「未命名 N」，普通文件用相对 root 的路径 */
+function groupDisplayName(path: string, rootPath: string | null): string {
+  return draftDisplayName(path) ?? relativeToRoot(path, rootPath);
 }
 
 /** 高亮预览文本中的匹配词 */
@@ -61,6 +77,8 @@ export function GlobalSearchPanel({ getEditor, onClose }: GlobalSearchPanelProps
   const [useRegex, setUseRegex] = useState(false);
   const [hits, setHits] = useState<SearchHit[]>([]);
   const [truncated, setTruncated] = useState(false);
+  /** 内存侧正则编译失败（Rust 合法但 JS 不支持），未保存内容未被检索（#370 评审） */
+  const [bufferRegexUnsupported, setBufferRegexUnsupported] = useState(false);
   const [searching, setSearching] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [activeIndex, setActiveIndex] = useState(0);
@@ -100,6 +118,7 @@ export function GlobalSearchPanel({ getEditor, onClose }: GlobalSearchPanelProps
     if (!query.trim()) {
       setHits([]);
       setTruncated(false);
+      setBufferRegexUnsupported(false);
       setError(null);
       setActiveIndex(0);
       setSearching(false);
@@ -113,11 +132,27 @@ export function GlobalSearchPanel({ getEditor, onClose }: GlobalSearchPanelProps
     setSearching(true);
     setError(null);
     const timer = setTimeout(() => {
+      // #370：先 flush 编辑器序列化防抖（150ms），让「刚输入但未发布」的
+      // 内容进入 store，内存缓冲搜索才能覆盖（与保存/冲突路径同一口径）
+      flushAllMarkdownPublishers();
+      const { openTabs } = useWorkspace.getState();
+      // 未保存来源：dirty tab（含冲突暂停自动保存的）与未命名草稿。
+      // 这些文件的磁盘命中是旧版本，由 mergeSearchResults 按文件去重替换
+      const unsavedTabs = openTabs.filter((t) => t.dirty || t.isUntitled);
+
       searchInWorkspace(rootPath, query, caseSensitive, useRegex)
         .then((result) => {
           if (searchSeqRef.current !== seq) return;
-          setHits(result.hits);
-          setTruncated(result.truncated);
+          // 磁盘旧命中按文件去重后与内存命中合并（合并语义见 bufferSearch）
+          const merged = mergeSearchResults(
+            result,
+            unsavedTabs,
+            { query, caseSensitive, useRegex },
+            MAX_TOTAL_HITS,
+          );
+          setHits(merged.hits);
+          setTruncated(merged.truncated);
+          setBufferRegexUnsupported(merged.unsupportedBufferRegex);
           setActiveIndex(0);
           setSearching(false);
         })
@@ -290,36 +325,51 @@ export function GlobalSearchPanel({ getEditor, onClose }: GlobalSearchPanelProps
                 : "无匹配结果"}
             </span>
           )}
+          {/* #370 评审：内存侧正则编译失败时不得静默丢弃未保存内容的命中 */}
+          {!searching && !error && bufferRegexUnsupported && (
+            <span className="gs-warn" role="status">
+              该正则在未保存内容中不受支持，结果未包含未保存/未命名文件
+            </span>
+          )}
         </div>
         <div className="gs-results">
-          {grouped.map((group) => (
-            <div key={group.path} className="gs-group">
-              <div className="gs-group-header" title={group.path}>
-                <span className="gs-file-icon">
-                  <IconFileText size={14} />
-                </span>
-                <span className="gs-file-name">{relativeToRoot(group.path, rootPath)}</span>
-                <span className="gs-count">{group.hits.length}</span>
-              </div>
-              {group.hits.map((hit) => {
-                const idx = hits.indexOf(hit);
-                const active = idx === activeIndex;
-                return (
-                  <button
-                    key={`${hit.path}:${hit.line}:${hit.column}`}
-                    className={`gs-hit${active ? " gs-hit-active" : ""}`}
-                    onClick={() => void jumpTo(hit)}
-                    onMouseEnter={() => setActiveIndex(idx)}
-                  >
-                    <span className="gs-line">行 {hit.line}</span>
-                    <span className="gs-preview">
-                      {highlightPreview(hit.preview, query, useRegex, caseSensitive)}
+          {grouped.map((group) => {
+            // 同一文件的命中同源（磁盘或内存），任一带 unsaved 即整组标注
+            const unsaved = group.hits.some((h) => h.unsaved);
+            return (
+              <div key={group.path} className="gs-group">
+                <div className="gs-group-header" title={group.path}>
+                  <span className="gs-file-icon">
+                    <IconFileText size={14} />
+                  </span>
+                  <span className="gs-file-name">{groupDisplayName(group.path, rootPath)}</span>
+                  {unsaved && (
+                    <span className="gs-unsaved-badge" title="内容尚未保存到磁盘">
+                      未保存
                     </span>
-                  </button>
-                );
-              })}
-            </div>
-          ))}
+                  )}
+                  <span className="gs-count">{group.hits.length}</span>
+                </div>
+                {group.hits.map((hit) => {
+                  const idx = hits.indexOf(hit);
+                  const active = idx === activeIndex;
+                  return (
+                    <button
+                      key={`${hit.path}:${hit.line}:${hit.column}`}
+                      className={`gs-hit${active ? " gs-hit-active" : ""}`}
+                      onClick={() => void jumpTo(hit)}
+                      onMouseEnter={() => setActiveIndex(idx)}
+                    >
+                      <span className="gs-line">行 {hit.line}</span>
+                      <span className="gs-preview">
+                        {highlightPreview(hit.preview, query, useRegex, caseSensitive)}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            );
+          })}
           {!searching && !error && query.trim() && totalHits === 0 && (
             <div className="gs-empty">未找到匹配内容</div>
           )}
