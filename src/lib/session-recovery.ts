@@ -200,8 +200,9 @@ export async function discardDrafts(drafts: RecoverableDraft[]): Promise<number>
 /**
  * 把草稿恢复成 tab。
  *
- * 恢复出来的 tab 一律 `dirty: true` 且**不登记磁盘基线**（`diskStat` 为空）：
- * 崩溃前那份磁盘内容已经不可信，保存时会走「必须存在」的写盘并要求用户确认，
+ * 恢复出来的 tab 一律 `dirty: true`。对**有路径**的草稿会读一次当前磁盘内容作为基线
+ * （`diskContent` / `diskStat` / `diskMtime`）——之后磁盘若再变更，保存会走
+ * 「将覆盖外部修改」的冲突确认；文件已不存在则留空基线，保存被 `mustExist` 拒绝，
  * 不会静默覆盖用户在这期间对文件的修改。
  */
 export async function applyRecovery(
