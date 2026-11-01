@@ -9,7 +9,7 @@
 // 实例，等价于磁盘被外部程序改写；应用侧的轮询与 refreshTree 全链路真实执行）。
 
 import { test, expect } from "@playwright/test";
-import { MOD, openMockWorkspace } from "./helpers";
+import { MOD, openMockWorkspace, expandMockNotes } from "./helpers";
 
 /** 向 mock 文件树的根目录注入一个新文件节点（模拟外部新建） */
 async function createExternalFile(page: import("@playwright/test").Page, name: string) {
@@ -23,6 +23,29 @@ async function createExternalFile(page: import("@playwright/test").Page, name: s
       MOCK_TREE.children.push({ name: fileName, path, is_dir: false, children: [] });
     }
   }, name);
+}
+
+/** 向 mock 文件树的指定目录注入新文件节点（模拟子目录外部新建，#369 验收） */
+async function createExternalFileIn(
+  page: import("@playwright/test").Page,
+  dirPath: string,
+  name: string,
+) {
+  await page.evaluate(
+    async ({ dir, fileName }) => {
+      const { MOCK_TREE, findNode } = (await import(
+        // @ts-ignore Vite dev 专用绝对模块路径
+        "/src/lib/mockFs.ts"
+      )) as typeof import("../../src/lib/mockFs");
+      const parent = findNode(MOCK_TREE, dir);
+      if (!parent) throw new Error(`父目录不存在: ${dir}`);
+      const path = `${dir}/${fileName}`;
+      if (!parent.children.some((c) => c.path === path)) {
+        parent.children.push({ name: fileName, path, is_dir: false, children: [] });
+      }
+    },
+    { dir: dirPath, fileName: name },
+  );
 }
 
 /** 从 mock 文件树删除一个根目录文件节点（模拟外部删除） */
@@ -86,6 +109,20 @@ test.describe("工作区外部变更感知（#369）", () => {
     await expect(
       page.locator('[data-tree-row][data-path="/mock-workspace/intro.md"]'),
     ).toHaveCount(0, { timeout: WATCH_TIMEOUT });
+  });
+
+  test("已展开子目录中的外部新建在 3 秒量级内可见（#369 验收第 2 条）", async ({ page }) => {
+    await openMockWorkspace(page);
+    await expandMockNotes(page);
+    await expect(
+      page.locator('[data-tree-row][data-path="/mock-workspace/notes/readme.md"]'),
+    ).toBeVisible();
+
+    await createExternalFileIn(page, "/mock-workspace/notes", "notes-external-new.md");
+
+    await expect(
+      page.locator('[data-tree-row][data-path="/mock-workspace/notes/notes-external-new.md"]'),
+    ).toBeVisible({ timeout: WATCH_TIMEOUT });
   });
 
   test("外部重命名文件在 3 秒量级内更新：新名出现、旧名消失", async ({ page }) => {

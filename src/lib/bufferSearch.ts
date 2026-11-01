@@ -10,9 +10,14 @@
 // - 列号按「命中前的字符数 + 1」计；
 // - 预览为命中点前后各 PREVIEW_CONTEXT_CHARS 字符的窗口，命中片段本身
 //   上限 PREVIEW_MAX_MATCH_CHARS，两侧截断以 … 标记；
-// - 命中数达到 maxHits 后继续探测是否还有更多（exceeded），供上层标 truncated。
-// 差异（有意为之）：非法正则在此返回空结果而非错误——磁盘侧同一查询已
-// 产生用户可见的错误提示，内存侧不重复报错。
+// - 命中数达到 maxHits 后继续探测是否还有更多（exceeded），供上层标 truncated；
+// - 行切分与 Rust `BufRead::lines()` 一致：只按 \n 分行并剥行尾 \r，末尾换行
+//   不产生额外空行。
+// 差异（有意为之，且**不得**改回静默空结果）：JS 无法正确表达的 Rust 正则语法
+// （内联标志 (?i) 编译失败、\p{…} / POSIX 类 / 集合运算 / 类首 ] / 非 ASCII 内容上
+// 的 \w \d \b 等语义偏移）统一返回 `unsupported: true`，由上层（GlobalSearchPanel）
+// 渲染可见提示「该正则在未保存内容中不受支持」。绝不能退化为「返回空结果且不提示」
+// ——那会让 #370 要消除的「刚写下的文本搜不到」静默复发。
 
 import type { SearchHit, SearchResult } from "./fs";
 

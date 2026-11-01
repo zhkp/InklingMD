@@ -24,6 +24,7 @@ async function saveLocalBackup(
   filePath: string,
   localContent: string,
   eol: EolStyle | null,
+  finalNewline: boolean,
 ): Promise<string> {
   // 列出同目录已有文件，生成不冲突的 backup 路径（一次 IO 拿全量判断）
   const dir = filePath.replace(/[\\/][^\\/]+$/, "");
@@ -37,7 +38,9 @@ async function saveLocalBackup(
   const backupPath = nextBackupPath(filePath, existing);
   // #368：按原文件换行风格还原本地内容；备份是「丢了还能从编辑器重来」的副本，
   // 不需要掉电保证：省掉两次 fsync
-  await writeTextFile(backupPath, applyEol(localContent, eol), { durability: "none" });
+  await writeTextFile(backupPath, applyEol(localContent, eol, finalNewline), {
+    durability: "none",
+  });
   return backupPath;
 }
 
@@ -129,11 +132,15 @@ export function ConflictDialog() {
 
   /** 选项 1：本地内容另存副本，编辑器重载磁盘最新 */
   const handleBackup = wrap(async () => {
-    // #368：副本沿用原文件记录的换行风格（tab 元数据读取处，
+    // #368：副本沿用原文件记录的换行风格与末尾换行状态（tab 元数据读取处，
     // 冲突对话框打开时 tab 必然存在——冲突只对已打开文件产生）
-    const tabEol =
-      useWorkspace.getState().openTabs.find((t) => t.path === filePath)?.eol ?? null;
-    const backupPath = await saveLocalBackup(filePath, localContent, tabEol);
+    const tab = useWorkspace.getState().openTabs.find((t) => t.path === filePath);
+    const backupPath = await saveLocalBackup(
+      filePath,
+      localContent,
+      tab?.eol ?? null,
+      tab?.finalNewline ?? true,
+    );
     // reloadFile 强制从磁盘重读（openFile 对已打开 tab 只切缓存，不会真正重载）
     await reloadFile(filePath);
     await showMessage(

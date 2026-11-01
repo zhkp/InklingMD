@@ -24,6 +24,13 @@ const CRLF_DOC = [
   "",
 ].join("\r\n");
 
+/**
+ * 末行**无**换行的 CRLF fixture（评审 B3）：覆盖「文件末尾换行保持」。
+ * 原文件末行无换行时，序列化器恒补的 \n 必须被去掉，否则 git diff 除编辑行
+ * 外还会多一条「末尾换行」差异——这正是 #368 要消除的整文件 diff 来源之一。
+ */
+const CRLF_DOC_NO_FINAL_NEWLINE = CRLF_DOC.replace(/\r\n$/, "");
+
 /** 读取 mock 磁盘上指定路径的当前内容（与页面同一模块实例） */
 async function readMockContent(page: import("@playwright/test").Page, path: string) {
   return page.evaluate(async (p) => {
@@ -106,6 +113,25 @@ test.describe("换行保真（#368）", () => {
 
     const written = await readMockContent(page, path);
     assertCrlfDiffOnly(written, CRLF_DOC, "源码模式追加");
+  });
+
+  test("CRLF 文件末行无换行：保存后仍无末尾换行，仅编辑行变化（评审 B3）", async ({ page }) => {
+    const path = "/mock-workspace/notes/readme.md";
+    await openMockWorkspace(page);
+    await seedMockContent(page, path, CRLF_DOC_NO_FINAL_NEWLINE);
+    await expandMockNotes(page);
+    await openFile(page, "readme.md");
+
+    await page.locator(".ProseMirror").click();
+    await moveCaretToDocEnd(page);
+    await page.keyboard.type("（已编辑）");
+    await page.keyboard.press(`${MOD}+s`);
+
+    const written = await readMockContent(page, path);
+    assertCrlfDiffOnly(written, CRLF_DOC_NO_FINAL_NEWLINE, "（已编辑）");
+    // 关键：序列化器恒补的末尾换行被去掉——git diff 不会多出「末尾换行」这一行
+    expect(written.endsWith("\r\n"), "原文件末行无换行，保存后不得补末尾换行").toBe(false);
+    expect(written.endsWith("（已编辑）")).toBe(true);
   });
 
   test("LF 文件编辑保存：不引入 CR", async ({ page }) => {

@@ -362,8 +362,9 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
       throw new Error("文件在加载期间被外部删除");
     }
 
-    // #368：读取时检测原始换行风格，保存写盘前据此还原（编辑器内部统一 LF）
-    const { eol, mixed } = detectEol(snapshot.content);
+    // #368：读取时检测原始换行风格与末尾换行状态，保存写盘前据此还原
+    // （编辑器内部统一 LF，序列化器恒补末尾 \n）
+    const { eol, mixed, finalNewline } = detectEol(snapshot.content);
     let resolvedTab: OpenTab | undefined;
     set((current) => {
       // 按最终路径复查：并发请求（旧路径与迁移后新路径）可能已先建 tab
@@ -386,6 +387,7 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
         scrollTop: null,
         ...(eol !== null ? { eol } : {}),
         ...(mixed ? { eolMixed: true } : {}),
+        finalNewline,
       };
       return { openTabs: [...current.openTabs, resolvedTab] };
     });
@@ -729,10 +731,11 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
                   diskStat: snapshot.stat,
                   diskMtime: mtimeMsOf(snapshot.stat),
                   deletedOnDisk: false,
-                  // #368：重载即以磁盘内容为基准，换行风格同步重检
+                  // #368：重载即以磁盘内容为基准，换行风格与末尾换行同步重检
                   ...(reloadedEol.eol !== null
                     ? { eol: reloadedEol.eol, eolMixed: reloadedEol.mixed || undefined }
                     : { eol: undefined, eolMixed: undefined }),
+                  finalNewline: reloadedEol.finalNewline,
                   saveError: null,
                   // 重载即以磁盘内容为准，冲突已解决（issue #164）：
                   // 否则状态栏持续误报"外部冲突"且指示器点击无效
@@ -1390,10 +1393,16 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
           }
 
           // #368：合并写盘沿用目标文件已记录的换行风格（草稿本身没有磁盘历史）；
-          // 告警对象是被归一化的目标文件（activeTabPath 此时是草稿路径）
-          const mergeContentToWrite = applyEol(contentToSave, mergeTarget.eol ?? null);
-          warnMixedEol(savePath, mergeTarget);
+          // 告警对象是被归一化的目标文件（activeTabPath 此时是草稿路径）。
+          // 告警必须在写盘**成功之后**——写盘失败时磁盘一个字节都没变，
+          // 提前告警等于向用户报告未发生的事实（评审 B2）。
+          const mergeContentToWrite = applyEol(
+            contentToSave,
+            mergeTarget.eol ?? null,
+            mergeTarget.finalNewline ?? true,
+          );
           await writeTextFile(savePath, mergeContentToWrite);
+          warnMixedEol(savePath, mergeTarget);
           const mergedAt = Date.now();
           let mergedMtime: number | undefined;
           try {
@@ -1436,6 +1445,7 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
                       // #368：写盘已按主导风格归一，磁盘不再混合；不清会让
                       // 后续每次保存重复告警「原文件为混合换行」
                       eolMixed: undefined,
+                      finalNewline: mergeContentToWrite.endsWith("\n"),
                     };
                   }
                   return {
@@ -1448,6 +1458,7 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
                     diskContent: mergeContentToWrite,
                     diskMtime: mergedMtime,
                     eolMixed: undefined,
+                    finalNewline: mergeContentToWrite.endsWith("\n"),
                   };
                 }
                 if (!closeDraft && t.path === activeTabPath) {
@@ -1477,6 +1488,7 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
                   ...(mergeTarget.eol !== undefined
                     ? { eol: mergeTarget.eol, eolMixed: undefined }
                     : {}),
+                  finalNewline: mergeContentToWrite.endsWith("\n"),
                   diskContent: mergeContentToWrite,
                   diskMtime: mergedMtime,
                 };
@@ -1515,8 +1527,13 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
         // 未命名草稿 / 原文件无换行符时 eol 为 undefined，原样写出（LF）。
         // 所有写盘点（含另存为 / 重新创建）都必须用 contentToWrite，否则
         // CRLF 文件经这些旁路仍会被写成 LF。
-        const contentToWrite = applyEol(contentToSave, tab.eol ?? null);
-        warnMixedEol(activeTabPath, tab);
+        const contentToWrite = applyEol(
+          contentToSave,
+          tab.eol ?? null,
+          tab.finalNewline ?? true,
+        );
+        // 混合换行告警推迟到写盘成功之后（评审 B2）：写盘失败（TARGET_MISSING /
+        // PARENT_MISSING / 权限 / IO）时磁盘未变，不得宣称「已按主导风格归一」
         // 「已删除文件」经用户选择重新创建 / 另存为后，磁盘上多出一个文件
         let resolvedMissing = false;
         // 基线直接取写盘回执（#362 M1）：内容与磁盘身份来自同一次提交，
@@ -1656,6 +1673,9 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
             saveError: "保存可能未完成：写入后磁盘内容与预期不一致，请检查后另存副本。",
           });
         }
+        // 写盘成功后（走到这里 = 已实际写入，含另存为 / 重新创建）才宣告混合换行
+        // 已按主导风格归一（评审 B2）；写盘失败的各分支已提前 return，不会到这里
+        warnMixedEol(activeTabPath, tab);
         const pathChanged = savePath !== activeTabPath;
         const now = Date.now();
         const savedMtime = savedStat ? mtimeMsOf(savedStat) : undefined;
@@ -1693,6 +1713,9 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
               diskMtime: receiptUntrusted ? t.diskMtime : savedMtime,
               // 写盘已按主导风格归一，磁盘不再混合；不清会让后续每次保存重复告警
               eolMixed: undefined,
+              // #368：写盘后的磁盘末尾换行状态以实际写盘内容为准——原文件无末尾
+              // 换行时保持无末尾换行；用户额外输入的空行保留下来（多出的 \n 不被删）
+              finalNewline: contentToWrite.endsWith("\n"),
             };
           }
           return t;
@@ -1820,6 +1843,7 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
               ...(baselineEol.eol !== null
                 ? { eol: baselineEol.eol, eolMixed: baselineEol.mixed || undefined }
                 : { eol: undefined, eolMixed: undefined }),
+              finalNewline: baselineEol.finalNewline,
             }
           : t,
       );

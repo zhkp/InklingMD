@@ -114,6 +114,53 @@ describe("scanExpandedDirs（一轮扫描）", () => {
     expect(listDirMock).toHaveBeenCalledWith("/ws");
   });
 
+  it("已展开子目录中的外部删除/重命名被报告（#369 验收第 2 条）", async () => {
+    // 树里 notes 已展开且已加载一个文件；磁盘上它被外部改名
+    seedWorkspace({
+      tree: node("/ws", "ws", true, [
+        node("/ws/notes", "notes", true, [node("/ws/notes/old.md", "old.md", false)]),
+        node("/ws/a.md", "a.md", false),
+      ]),
+      expandedDirs: new Set(["/ws", "/ws/notes"]),
+      loadedDirs: new Set(["/ws", "/ws/notes"]),
+    });
+    listDirMock.mockImplementation(async (dir: string) => {
+      if (dir === "/ws") {
+        return rootListing([
+          node("/ws/notes", "notes", true, [node("/ws/notes/old.md", "old.md", false)]),
+          node("/ws/a.md", "a.md", false),
+        ]);
+      }
+      if (dir === "/ws/notes") {
+        // 外部把 old.md 改名为 new.md
+        return node("/ws/notes", "notes", true, [node("/ws/notes/new.md", "new.md", false)]);
+      }
+      throw new Error(`unexpected dir ${dir}`);
+    });
+
+    await expect(scanExpandedDirs(listDirMock, useWorkspace.getState)).resolves.toEqual([
+      "/ws/notes",
+    ]);
+    // 根与已展开子目录都实际被枚举（扫描集合覆盖二者）
+    expect(listDirMock).toHaveBeenCalledTimes(2);
+    expect(listDirMock).toHaveBeenCalledWith("/ws");
+    expect(listDirMock).toHaveBeenCalledWith("/ws/notes");
+  });
+
+  it("单目录大量文件突增（2 → 102 项）只报告该目录一次（#369 验收第 4 条）", async () => {
+    const burst = Array.from({ length: 102 }, (_, i) =>
+      node(`/ws/f-${i}.md`, `f-${i}.md`, false),
+    );
+    listDirMock.mockResolvedValue(rootListing(burst));
+
+    const changed = await scanExpandedDirs(listDirMock, useWorkspace.getState);
+
+    // 同一目录只报一条（去重由 scanExpandedDirs 的集合遍历保证）
+    expect(changed).toEqual(["/ws"]);
+    // 只枚举一次根，不因 100 条突增而重复扫描
+    expect(listDirMock).toHaveBeenCalledTimes(1);
+  });
+
   it("工作区根被折叠（expandedDirs 不含根）时仍扫描根：根级外部变更不漏", async () => {
     // 根行可折叠；折叠后 expandedDirs 不再含 rootPath，但 Quick Open 索引
     // 仍须随根级外部变更失效，因此根必须始终参与浅扫

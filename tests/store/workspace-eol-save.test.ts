@@ -449,6 +449,91 @@ describe("saveCurrent 换行保真（#368）", () => {
     expect(carried?.diskContent).toBe("# 草稿内容\r\n");
   });
 
+  it("写盘失败时不产生混合换行告警，eolMixed 保持（评审 B2）", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const internal = "# 标题\n\n正文段落。\n";
+    const tab = { ...diskTab("/docs/a.md", internal, "crlf"), eolMixed: true };
+    setState({
+      openTabs: [tab],
+      activeTabPath: "/docs/a.md",
+      currentFile: "/docs/a.md",
+      currentContent: internal,
+      dirty: true,
+      saving: false,
+      saveError: null,
+    });
+    // 写盘抛错（权限 / IO）：文件一个字节都没写
+    saveDocumentMock.mockRejectedValue(new Error("权限不足"));
+
+    await useWorkspace.getState().saveCurrent();
+
+    // 不得宣称「保存时已按主导风格整体归一」——写盘根本没发生
+    expect(warnSpy).not.toHaveBeenCalled();
+    // eolMixed 保持：磁盘仍是混合换行，后续保存仍应告警
+    expect(
+      useWorkspace.getState().openTabs.find((t) => t.path === "/docs/a.md")?.eolMixed,
+    ).toBe(true);
+  });
+
+  it("原文件末尾无换行（CRLF）：保存后仍无末尾换行，仅编辑行变化（评审 B3）", async () => {
+    const internal = "# 标题\n\n正文段落。\n";
+    setState({
+      openTabs: [{ ...diskTab("/docs/a.md", internal, "crlf"), finalNewline: false }],
+      activeTabPath: "/docs/a.md",
+      currentFile: "/docs/a.md",
+      currentContent: internal,
+      dirty: true,
+      saving: false,
+      saveError: null,
+    });
+
+    await useWorkspace.getState().saveCurrent();
+
+    // 序列化恒补的末尾 \n 被去掉：写盘无末尾换行
+    expect(lastSaveDocumentContent()).toBe("# 标题\r\n\r\n正文段落。");
+    // 写盘后元数据同步为「磁盘无末尾换行」，后续保存继续保持
+    const tab = useWorkspace.getState().openTabs.find((t) => t.path === "/docs/a.md");
+    expect(tab?.finalNewline).toBe(false);
+    expect(tab?.diskContent).toBe("# 标题\r\n\r\n正文段落。");
+  });
+
+  it("原文件有末尾换行：保存后仍以换行结尾（对照组，证明上一条非恒真）", async () => {
+    const internal = "# 标题\n\n正文段落。\n";
+    setState({
+      openTabs: [{ ...diskTab("/docs/a.md", internal, "crlf"), finalNewline: true }],
+      activeTabPath: "/docs/a.md",
+      currentFile: "/docs/a.md",
+      currentContent: internal,
+      dirty: true,
+      saving: false,
+      saveError: null,
+    });
+
+    await useWorkspace.getState().saveCurrent();
+
+    expect(lastSaveDocumentContent()).toBe("# 标题\r\n\r\n正文段落。\r\n");
+    expect(
+      useWorkspace.getState().openTabs.find((t) => t.path === "/docs/a.md")?.finalNewline,
+    ).toBe(true);
+  });
+
+  it("未记录 finalNewline（草稿 / 旧 tab）：按有末尾换行处理，不删用户内容", async () => {
+    const internal = "# 标题\n\n正文段落。\n";
+    setState({
+      openTabs: [{ ...diskTab("/docs/a.md", internal, "crlf"), finalNewline: undefined }],
+      activeTabPath: "/docs/a.md",
+      currentFile: "/docs/a.md",
+      currentContent: internal,
+      dirty: true,
+      saving: false,
+      saveError: null,
+    });
+
+    await useWorkspace.getState().saveCurrent();
+
+    expect(lastSaveDocumentContent()).toBe("# 标题\r\n\r\n正文段落。\r\n");
+  });
+
   it("打开文件时按成对快照内容检测换行风格并存入 tab", async () => {
     readDocumentMock.mockResolvedValue({ content: "# 磁盘内容\r\n\r\nCRLF 正文。\r\n", stat: STAT });
     setState({
