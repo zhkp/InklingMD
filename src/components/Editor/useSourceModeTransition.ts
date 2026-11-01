@@ -294,21 +294,19 @@ export function useSourceModeTransition({
             const newDoc = parser(value);
             // 整文档替换挂「同帧刷新大纲」标记（#375）：否则面板在退出后的
             // 首个可见帧仍是源码模式退出前的快照，新增标题要等 tracker 的
-            // 150ms 防抖才出现。同时把面板此刻的活动标题带过去——源码侧已按
-            // 最新文档定位过，tracker 自己手里的索引还停在进入源码模式那一刻。
-            // 快照按 filePath 取（selectOutlineForFile）：切到别的文件时
-            // 拿到空快照 → 索引为 null，不会把旧文件的高亮串过来。
-            const exitActiveIndex = selectOutlineForFile(
-              useOutline.getState(),
-              filePath,
-            ).activeIndex;
+            // 150ms 防抖才出现。同时把面板此刻的快照带过去——源码侧已按最新
+            // 文档定位过，tracker 自己手里的索引还停在进入源码模式那一刻；
+            // 快照里的标题集可能比最新文档旧一个防抖窗口，tracker 会按标题
+            // 身份（level + 文本）重映射，不是直接吃索引。
+            // 快照按 filePath 取（selectOutlineForFile）：切到别的文件时拿到
+            // 空快照 → activeIndex 为 null，不会把旧文件的高亮串过来。
             let tr = markOutlineImmediateRefresh(
               view.state.tr.replaceWith(
                 0,
                 view.state.doc.content.size,
                 newDoc.content,
               ),
-              { activeIndex: exitActiveIndex },
+              { active: selectOutlineForFile(useOutline.getState(), filePath) },
             );
             // 重置撤销历史（issue #27）：整文档替换后旧 PM undo 步骤指向
             // 切换前的快照，Ctrl+Z 会退回与当前 markdown 不一致的旧文档。

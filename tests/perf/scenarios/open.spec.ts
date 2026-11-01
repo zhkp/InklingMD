@@ -81,19 +81,6 @@ for (const tier of ctx.tiers) {
         const observersAfterFormula = await page.evaluate(readObservers);
         const buckets = await page.evaluate(readPerfProbe);
 
-        // 含公式的档位一律先校验「等到了完成条件」（#379 评审 P1）：帧预算耗尽时
-        // formula.at 只是超时时刻，拿它当 formulaReadyMs 等于把「还没渲染完」
-        // 记成「渲染耗时」，正好破坏 #376「先测量再决定」的证据边界。
-        // 测量失败就判红，不写不完整样本（宁缺勿假）。
-        if (formula.nodeViews > 0) {
-          expect(
-            formula.complete,
-            `${id}：KaTeX 未在 ${formula.frames} 帧内渲染完全` +
-              `（${formula.rendered}+${formula.empty} 空/${formula.nodeViews}），` +
-              `公式归因按测量失败处理`,
-          ).toBe(true);
-        }
-
         // 公式密集档必须真的有 200+ 公式节点（#376 的测量前提），否则数据不能用于决策
         if (
           kind === "rich" &&
@@ -111,6 +98,19 @@ for (const tier of ctx.tiers) {
 
         // warm-up 轮次只用来消除 Vite 首次编译 / PM 首次挂载 / JIT 预热的影响
         if (round >= ctx.warmups) {
+          // 含公式档位必须先确认「等到了完成条件」（#379 评审 P1）：帧预算耗尽时
+          // formula.at 只是超时时刻，拿它当 formulaReadyMs 等于把「还没渲染完」
+          // 记成「渲染耗时」，正好破坏 #376「先测量再决定」的证据边界。
+          // 测量失败就判红——本轮不落 raw，场景按「未测量」处理（exit 2）。
+          // 只对 measured 轮断言：warmup 的结果本就要丢弃，不该决定整场景结论。
+          if (formula.nodeViews > 0) {
+            expect(
+              formula.complete,
+              `${id}：KaTeX 未在 ${formula.frames} 帧内渲染完全` +
+                `（${formula.rendered}+${formula.empty} 空/${formula.nodeViews}），` +
+                `公式归因按测量失败处理`,
+            ).toBe(true);
+          }
           // 标定负载：#236 与编辑器代码无关的固定工作量，用于把「机器慢」与「代码回归」分开
           await probe.measure(page);
           ttiSamples.push(endAt - startAt);
@@ -123,8 +123,8 @@ for (const tier of ctx.tiers) {
               : 0,
           );
           attribution.add(buckets);
-          // 只记录等到完成条件的样本；超时轮次的公式桶不完整（#379 评审 P1）
-          if (formula.nodeViews > 0 && formula.complete) {
+          // 走到这里说明上面「等到完成条件」的断言已通过，记录的是完整样本
+          if (formula.nodeViews > 0) {
             formulaReadyMs.push(formula.at - startAt);
             formulaNodeViews.push(formula.nodeViews);
             formulaRendered.push(formula.rendered);

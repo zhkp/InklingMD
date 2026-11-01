@@ -4,6 +4,11 @@ import { useSourceModeTransition } from "../../src/components/Editor/useSourceMo
 import { editorViewCtx, parserCtx } from "@milkdown/kit/core";
 import { markdownOffsetToProsePos } from "../../src/lib/source-mode-cursor";
 import { useWorkspace } from "../../src/store/workspace";
+import {
+  EMPTY_EDITOR_OUTLINE,
+  type EditorOutlineSnapshot,
+} from "../../src/lib/outline";
+import { useOutline } from "../../src/store/outline";
 import * as dialogs from "../../src/lib/dialogs";
 
 describe("useSourceModeTransition", () => {
@@ -179,6 +184,16 @@ describe("useSourceModeTransition", () => {
     // 真实路径：由 onUnmountSnapshot 注入到 exitSnapshotRef
     result.current.exitSnapshotRef.current = exitSnap;
 
+    // 退出瞬间面板上的大纲快照（#375）：源码模式最后一次发布的结果，
+    // 必须随退出事务带给 tracker——它自己手里的索引停在进入源码模式那一刻
+    const exitOutline: EditorOutlineSnapshot = {
+      headings: [
+        { index: 0, level: 1, text: "Title", pos: 0, nodeId: null, id: "标题" },
+      ],
+      activeIndex: 0,
+    };
+    useOutline.setState({ file: filePath, snapshot: exitOutline });
+
     // Switch back to WYSIWYG mode
     rerender({ sourceMode: false });
 
@@ -191,6 +206,18 @@ describe("useSourceModeTransition", () => {
     // Verify PM transaction replaced content and restored selection
     expect(mockTr.replaceWith).toHaveBeenCalled();
     expect(mockView.dispatch).toHaveBeenCalled();
+
+    // 退出事务必须挂「同帧刷新大纲」标记（#375），负载就是面板当时的快照。
+    // 少了这一步，首个可见帧的列表与高亮都会停在退出前。
+    const outlineMeta = mockTr.setMeta.mock.calls.find((call) =>
+      String((call[0] as { key?: string })?.key ?? call[0]).startsWith(
+        "inkling-outline-tracker",
+      ),
+    );
+    expect(outlineMeta, "退出事务没有携带大纲同步刷新标记").toBeTruthy();
+    expect(outlineMeta?.[1]).toEqual({ active: exitOutline });
+
+    useOutline.setState({ file: null, snapshot: EMPTY_EDITOR_OUTLINE });
     // 内容锚点映射：锚点内容（布局偏移 100）滚到视口顶部 → scrollTop=100。
     // 与旧比例映射（50/100×200=100）数值巧合相同，但锚点偏移 20 ≠ 光标 5
     // 决定了选区与记忆位置，证明取的是视口顶部内容而非光标/比例

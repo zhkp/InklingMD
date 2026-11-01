@@ -16,6 +16,7 @@ import {
   markOutlineImmediateRefresh,
   outlineTrackerPlugin,
 } from "../../src/components/Editor/outline-tracker";
+import { extractEditorOutline } from "../../src/lib/outline";
 
 function rect(left: number, top: number, right: number, bottom: number): DOMRect {
   return {
@@ -434,16 +435,55 @@ describe("outlineTrackerPlugin 整文档替换的同步刷新（#375 首帧）",
     );
   }
 
-  function headingPositions(doc: ProseMirrorNode): number[] {
-    const positions: number[] = [];
-    doc.descendants((node, pos) => {
-      if (node.type.name === "heading") positions.push(pos);
-      return true;
+  it("重复标题按出现次序重映射（同名标题不能都指第一项）", () => {
+    // 源码侧的「按行号定位」允许同名标题（SM9 就在测）；重映射必须同样
+    // 按出现次序消歧，否则「小结 → 小结」这类文档的首帧高亮会跳到第一处。
+    const harness = makeHarness();
+    const onChange = vi.fn();
+    const plugin = outlineTrackerPlugin(onChange);
+    const initial = EditorState.create({
+      schema,
+      doc: makeDoc(["小结", "正文", "小结"]),
+      plugins: [plugin],
     });
-    return positions;
-  }
+    const nodeDOM = vi.fn(() => null);
+    const asView = (state: EditorState) =>
+      ({
+        dom: harness.editorDom,
+        state,
+        nodeDOM,
+      }) as unknown as EditorView;
 
-  it("带标记的替换同帧发布新标题集：沿用退出时索引、不重建几何、丢弃旧防抖", () => {
+    const pluginView = plugin.spec.view?.(asView(initial));
+    onChange.mockClear();
+
+    // 旧快照：高亮第二处「小结」（index 2）；新文档在开头再插一个标题
+    const exitHeadings = extractEditorOutline(initial.doc);
+    const replaced = makeDoc(["前言", "小结", "正文", "小结"]);
+    const tr = markOutlineImmediateRefresh(
+      initial.tr.replaceWith(0, initial.doc.content.size, replaced.content),
+      { active: { headings: exitHeadings, activeIndex: 2 } },
+    );
+    const next = initial.apply(tr);
+    pluginView?.update?.(asView(next), initial as never);
+
+    const snapshot = onChange.mock.calls.at(-1)?.[0] as {
+      headings: { text: string }[];
+      activeIndex: number | null;
+    };
+    expect(snapshot.headings.map((h) => h.text)).toEqual([
+      "前言",
+      "小结",
+      "正文",
+      "小结",
+    ]);
+    expect(snapshot.activeIndex).toBe(3); // 第二处「小结」，不是第一处（1）
+
+    vi.restoreAllMocks();
+    harness.scroller.remove();
+  });
+
+  it("带标记的替换同帧发布：索引按标题身份重映射、不重建几何、丢弃旧防抖", () => {
     vi.useFakeTimers();
     const harness = makeHarness();
     const onChange = vi.fn();
@@ -454,11 +494,9 @@ describe("outlineTrackerPlugin 整文档替换的同步刷新（#375 首帧）",
       doc: makeDoc(["一级标题", "二级标题", "三级标题"]),
       plugins: [plugin],
     });
-    const positions = headingPositions(initial.doc);
-    const nodeDOM = vi.fn(
-      (pos: number) =>
-        harness.headingEls[positions.indexOf(pos)] ?? null,
-    );
+    // 几何读取一律返回 null（等价于「标题元素还没挂载」），
+    // 让采样结果与 DOM 细节无关，只验证「是否/何时发生重建」
+    const nodeDOM = vi.fn(() => null);
     const asView = (state: EditorState) =>
       ({
         dom: harness.editorDom,
@@ -475,9 +513,6 @@ describe("outlineTrackerPlugin 整文档替换的同步刷新（#375 首帧）",
     }) as unknown as typeof window.requestAnimationFrame);
 
     const pluginView = plugin.spec.view?.(asView(initial));
-    expect(onChange).toHaveBeenLastCalledWith(
-      expect.objectContaining({ activeIndex: 0 }),
-    );
     onChange.mockClear();
     nodeDOM.mockClear();
 
@@ -486,11 +521,19 @@ describe("outlineTrackerPlugin 整文档替换的同步刷新（#375 首帧）",
     pluginView?.update?.(asView(edited), initial as never);
     expect(onChange).not.toHaveBeenCalled();
 
-    // ② 整文档替换 + 同步刷新标记：源码侧此刻高亮的是第 4 项
-    const replaced = makeDoc(["一级标题", "二级标题", "三级标题", "新增标题"]);
+    // ② 整文档替换 + 同步刷新标记。源码侧快照是「旧结构 + 高亮三级标题」：
+    //    新文档在开头插入了标题，三级标题的索引从 2 位移到 3。直接吃索引会错位，
+    //    必须按 level + 文本重映射。
+    const exitHeadings = extractEditorOutline(edited.doc);
+    const replaced = makeDoc(["新增标题", "一级标题", "二级标题", "三级标题"]);
     const tr = markOutlineImmediateRefresh(
       edited.tr.replaceWith(0, edited.doc.content.size, replaced.content),
-      { activeIndex: 3 },
+      {
+        active: {
+          headings: exitHeadings,
+          activeIndex: exitHeadings.findIndex((h) => h.text === "三级标题"),
+        },
+      },
     );
     const next = edited.apply(tr);
     pluginView?.update?.(asView(next), edited as never);
@@ -502,12 +545,12 @@ describe("outlineTrackerPlugin 整文档替换的同步刷新（#375 首帧）",
       activeIndex: number | null;
     };
     expect(snapshot.headings.map((h) => h.text)).toEqual([
+      "新增标题",
       "一级标题",
       "二级标题",
       "三级标题",
-      "新增标题",
     ]);
-    // 高亮沿用退出瞬间面板上的索引，不闪回进入源码模式前的章节
+    // 高亮跟着标题身份走（3 = 位移后的三级标题），不是照抄旧索引，也不闪回首标题
     expect(snapshot.activeIndex).toBe(3);
     // 退出帧不做几何重建（N 次 getBoundingClientRect 会把首帧继续推后）
     expect(nodeDOM).not.toHaveBeenCalled();
@@ -516,14 +559,15 @@ describe("outlineTrackerPlugin 整文档替换的同步刷新（#375 首帧）",
     vi.advanceTimersByTime(300);
     expect(onChange).toHaveBeenCalledTimes(1);
 
-    // ④ 替换后的第一次采样才重建几何（滚动恢复路径），并据此定位
+    // ④ 滚动帧仍不重建（#212：滚动帧零几何读取），只跳过采样
     harness.setScrollTop(650);
     harness.scroller.dispatchEvent(new Event("scroll"));
     (pendingFrame as ((time: number) => void) | null)?.(0);
+    expect(nodeDOM).not.toHaveBeenCalled();
+
+    // ⑤ 停歇 200ms 后由几何刷新一次性重建并重新定位
+    vi.advanceTimersByTime(200);
     expect(nodeDOM).toHaveBeenCalledTimes(4); // 4 个标题，一次批量重建
-    expect(onChange).toHaveBeenLastCalledWith(
-      expect.objectContaining({ activeIndex: 2 }),
-    );
 
     pluginView?.destroy?.();
     vi.useRealTimers();

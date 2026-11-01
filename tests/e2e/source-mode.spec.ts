@@ -17,9 +17,9 @@ const STRETCHED_DEBOUNCE_MS = 1200;
  * 拉长后它变成确定性事件。只包「延迟等于生产常量」的定时器，且只在打字期间生效：
  * 退出前恢复，避免 WYSIWYG tracker 自己的定时器混入计数。
  *
- * 命中次数记在 `__outlineTimerStretched`，调用方必须用
- * `expectStretchEngaged()` 断言 > 0——否则常量一改，补丁静默失效，
- * 两条竞态用例会退化成概率事件却仍然全绿。
+ * 补丁是否命中**不能靠计数定时器来判断**——仓库里还有别的 200ms 定时器
+ * （outline-tracker 的滚动停歇刷新），同值就会被误计入。改由
+ * `expectOutlineDebounceStretched()` 断行为：停笔 350ms 后大纲必须还没更新。
  */
 async function stretchSourceOutlineDebounce(page: Page): Promise<void> {
   await page.evaluate(
@@ -27,12 +27,10 @@ async function stretchSourceOutlineDebounce(page: Page): Promise<void> {
       const w = window as unknown as {
         __outlineTimerFires?: number;
         __outlineTimerArmed?: boolean;
-        __outlineTimerStretched?: number;
         __origSetTimeout?: typeof window.setTimeout;
       };
       w.__outlineTimerFires = 0;
       w.__outlineTimerArmed = false;
-      w.__outlineTimerStretched = 0;
       w.__origSetTimeout = window.setTimeout.bind(window);
       const orig = w.__origSetTimeout;
       window.setTimeout = ((
@@ -41,7 +39,6 @@ async function stretchSourceOutlineDebounce(page: Page): Promise<void> {
         ...args: unknown[]
       ) => {
         if (timeout === delayMs && typeof handler === "function") {
-          w.__outlineTimerStretched = (w.__outlineTimerStretched ?? 0) + 1;
           return orig(() => {
             if (w.__outlineTimerArmed) {
               w.__outlineTimerFires = (w.__outlineTimerFires ?? 0) + 1;
@@ -56,18 +53,20 @@ async function stretchSourceOutlineDebounce(page: Page): Promise<void> {
   );
 }
 
-/** 断言上面的补丁真的命中过（否则竞态用例失去确定性，等于静默放宽） */
-async function expectStretchEngaged(page: Page): Promise<void> {
-  const stretched = await page.evaluate(
-    () =>
-      (window as unknown as { __outlineTimerStretched?: number })
-        .__outlineTimerStretched ?? 0,
-  );
+/**
+ * 断言防抖窗口真的被拉长了（停笔 350ms 后大纲仍是 3 项）。
+ *
+ * 生产防抖是 200ms：补丁没生效的话此刻必然已是 4 项。这条断言同时证明
+ * 「补丁生效」+「退出时定时器确实还挂在队列上」，竞态不是概率事件。
+ */
+async function expectOutlineDebounceStretched(page: Page): Promise<void> {
+  await page.waitForTimeout(350);
+  const count = await page.locator(".outline-panel .outline-item").count();
   expect(
-    stretched,
-    `没有命中任何 ${SOURCE_OUTLINE_DEBOUNCE_MS}ms 定时器：防抖常量与 E2E 补丁不一致，` +
-      `退出竞态不再是确定性事件（SM8/SM10 会退化成概率用例）`,
-  ).toBeGreaterThan(0);
+    count,
+    `停笔 350ms 后大纲已是 ${count} 项：防抖未被拉长（生产值 ${SOURCE_OUTLINE_DEBOUNCE_MS}ms），` +
+      `退出竞态退化成概率用例`,
+  ).toBe(3);
 }
 
 /** 恢复被拉长的 setTimeout 并布防：此后的迟到触发才计入 __outlineTimerFires */
@@ -255,7 +254,7 @@ test.describe("源代码模式", () => {
     await moveCaretToDocEnd(page);
     await page.keyboard.press("Enter");
     await page.keyboard.type("# 竞态标题");
-    await expectStretchEngaged(page);
+    await expectOutlineDebounceStretched(page);
 
     // 打字结束：恢复 setTimeout 并布防（此后的迟到触发才计入），再切回 WYSIWYG。
     // 卸载若没清掉待执行定时器，它会在 1200ms 后触发并留下计数。
@@ -300,7 +299,7 @@ test.describe("源代码模式", () => {
     await moveCaretToDocEnd(page);
     await page.keyboard.press("Enter");
     await page.keyboard.type("# 首帧标题");
-    await expectStretchEngaged(page);
+    await expectOutlineDebounceStretched(page);
 
     // 首帧采样：ProseMirror 重新可见后的第一个绘制帧里，大纲面板有哪几项。
     // rAF 回调在绘制前执行，读到的就是这一帧真正会画出来的 DOM。

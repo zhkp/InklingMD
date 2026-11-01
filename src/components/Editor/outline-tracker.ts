@@ -18,6 +18,7 @@ import { Plugin, PluginKey, type Transaction } from "@milkdown/kit/prose/state";
 import {
   extractEditorOutline,
   findActiveHeadingIndex,
+  type EditorOutlineHeading,
   type EditorOutlineSnapshot,
 } from "../../lib/outline";
 
@@ -31,11 +32,44 @@ const SAMPLE_MIN_INTERVAL_MS = 120;
 interface ImmediateRefreshRequest {
   /** 已处理到的请求序号（单调递增，用来判定「这是新请求」） */
   seq: number;
-  /** 发起方给出的活动标题索引（退出源码模式时面板上正显示的那个） */
-  activeIndex: number | null;
+  /** 发起方给出的退出瞬间快照（活动标题按标题身份重映射，见 remapActiveIndex） */
+  active: EditorOutlineSnapshot | null;
 }
 
-const NO_REFRESH_REQUEST: ImmediateRefreshRequest = { seq: 0, activeIndex: null };
+const NO_REFRESH_REQUEST: ImmediateRefreshRequest = { seq: 0, active: null };
+
+/**
+ * 把「退出瞬间面板上的活动标题」映射到替换后的标题集（#375）。
+ *
+ * 源码侧传进来的是它最后一次发布的快照，而那次发布被 200ms 防抖门控：
+ * 用户若在这段窗口里在文档开头插入了标题，索引会整体位移，直接按索引取会错位。
+ * 因此按「level + 文本」重新定位，同名标题按在旧列表里的出现次序消歧
+ * （重复标题是合法文档结构，SM9 就在测这个）。找不到（标题被删/改名）时
+ * 退回原索引，越界则返回 null 交给调用方兜底。
+ */
+function remapActiveIndex(
+  next: readonly EditorOutlineHeading[],
+  active: EditorOutlineSnapshot | null,
+): number | null {
+  const index = active?.activeIndex;
+  if (active == null || typeof index !== "number") return null;
+  const target = active.headings[index];
+  if (!target) return null;
+  // 目标标题在旧列表里是第几个同名项（同 level + 同文本）
+  let ordinal = 0;
+  for (let i = 0; i < index; i += 1) {
+    const h = active.headings[i];
+    if (h && h.level === target.level && h.text === target.text) ordinal += 1;
+  }
+  let seen = 0;
+  for (let i = 0; i < next.length; i += 1) {
+    const h = next[i];
+    if (h.level !== target.level || h.text !== target.text) continue;
+    if (seen === ordinal) return i;
+    seen += 1;
+  }
+  return index < next.length ? index : null;
+}
 
 /**
  * 请求「整文档替换后同帧刷新大纲」（#375）。
@@ -45,21 +79,20 @@ const NO_REFRESH_REQUEST: ImmediateRefreshRequest = { seq: 0, activeIndex: null 
  * （用户在源码里新增的标题要等防抖落地才出现）。带上此标记的替换在本帧内
  * 重算并发布，不额外开一个异步窗口。
  *
- * `activeIndex` 是退出瞬间面板上的活动标题（源码侧已经按最新文档定位过）。必须由
- * 调用方给出：tracker 自身在源码模式期间是静默的，它手里的索引停留在「进入源码
- * 模式那一刻」，直接沿用会让高亮闪回进入前的章节。
+ * `active` 是退出瞬间面板上的快照。必须由调用方给出：tracker 自身在源码模式期间
+ * 是静默的，它手里的索引停留在「进入源码模式那一刻」，直接沿用会让高亮闪回
+ * 进入前的章节。
  *
  * 只由「整文档替换」这类昂贵且用户可见的过渡使用——按键路径仍是防抖，
  * 否则每敲一个字都要遍历全文（#375 的性能前提）。
  */
 export const markOutlineImmediateRefresh = (
   tr: Transaction,
-  opts: { activeIndex?: number | null } = {},
+  opts: { active?: EditorOutlineSnapshot | null } = {},
 ): Transaction =>
   tr.setMeta(key, {
-    activeIndex:
-      typeof opts.activeIndex === "number" ? opts.activeIndex : null,
-  });
+    active: opts.active ?? null,
+  } as Partial<ImmediateRefreshRequest>);
 
 export const outlineTrackerPlugin = (
   onChange: (snapshot: EditorOutlineSnapshot) => void,
@@ -69,13 +102,11 @@ export const outlineTrackerPlugin = (
     state: {
       init: (): ImmediateRefreshRequest => NO_REFRESH_REQUEST,
       apply: (tr, value): ImmediateRefreshRequest => {
-        const meta = tr.getMeta(key) as { activeIndex?: number | null } | undefined;
+        const meta = tr.getMeta(key) as
+          | Partial<ImmediateRefreshRequest>
+          | undefined;
         if (!meta) return value;
-        return {
-          seq: value.seq + 1,
-          activeIndex:
-            typeof meta.activeIndex === "number" ? meta.activeIndex : null,
-        };
+        return { seq: value.seq + 1, active: meta.active ?? null };
       },
     },
     view: (view) => {
@@ -88,7 +119,11 @@ export const outlineTrackerPlugin = (
       let refreshSeq = (
         key.getState(view.state) ?? NO_REFRESH_REQUEST
       ).seq;
-      /** 几何缓存已失效：整文档替换后由第一次采样重建（不在退出帧里强制布局） */
+      /**
+       * 几何缓存已失效：整文档替换后缓存描述的是替换前的 DOM。
+       * 由 `rebuildHeadingTops` 单点清除——散在调用点维护必然漏清一次，
+       * 漏掉的代价是同一回调里重建两遍（425 标题约 54ms 强制布局）。
+       */
       let geometryDirty = false;
       let scrollFrame: number | null = null;
       let sampleTimer: ReturnType<typeof setTimeout> | null = null;
@@ -107,8 +142,13 @@ export const outlineTrackerPlugin = (
       let builtScrollHeight = -1;
       let builtClientWidth = -1;
 
-      /** 批量重建标题位置缓存：所有 rect 在同一帧内读取，只触发一次布局 */
+      /**
+       * 批量重建标题位置缓存：所有 rect 在同一帧内读取，只触发一次布局。
+       * 同时清除 `geometryDirty`——缓存重建只有这一个入口，失效标记也只在
+       * 这里结束，避免「谁调用谁记得清」导致的重复布局。
+       */
       const rebuildHeadingTops = () => {
+        geometryDirty = false;
         if (!scroller) {
           headingTops = [];
           builtScrollHeight = -1;
@@ -145,15 +185,10 @@ export const outlineTrackerPlugin = (
         // 视口下方，视口上方块的文档内位置不变，缓存仍然准确；停歇后
         // 150ms 内完成校正。
         //
-        // 唯一例外是整文档替换后的第一次采样（#375）：此时缓存描述的是
-        // 替换前的 DOM，必须重建。放在这里而不是替换那一帧，是因为退出
-        // 过渡已经把「解析全文 + 整文档替换」压在同一帧，再叠加 N 次
-        // getBoundingClientRect 会把首帧继续推后；而采样发生在滚动恢复
-        // 之后的帧里，布局本来就要重算。
-        if (geometryDirty) {
-          rebuildHeadingTops();
-          geometryDirty = false;
-        }
+        // 整文档替换后的缓存属于替换前的 DOM：本帧不采样也不重建，等停歇路径
+        // 的 refreshGeometryAndSample 一次性重建（#375 首帧由退出时的发布保证，
+        // 不需要几何；而滚动帧做 N 次 rect 会重演 #212 的 p99 尖刺）。
+        if (geometryDirty) return;
         if (headingTops.length === 0) return;
         // 二分找最后一个 top <= scrollTop + offset 的标题（升序保证）
         const probe = scroller.scrollTop + VIEWPORT_HEADING_OFFSET;
@@ -189,8 +224,7 @@ export const outlineTrackerPlugin = (
           scroller.scrollHeight !== builtScrollHeight ||
           scroller.clientWidth !== builtClientWidth
         ) {
-          rebuildHeadingTops();
-          geometryDirty = false;
+          rebuildHeadingTops(); // 内部清 geometryDirty
         }
         sampleViewport();
       };
@@ -256,10 +290,10 @@ export const outlineTrackerPlugin = (
               const previousActive = activeIndex;
               headings = extractEditorOutline(nextView.state.doc);
               // 此刻 WYSIWYG 的选区与滚动还没恢复（退出过渡在 2 帧后才做锚点
-              // 恢复），按选区推导会把高亮闪回首标题。优先用调用方给的索引
-              // （退出瞬间面板上正显示的那个，源码侧已按最新文档定位过）；
+              // 恢复），按选区推导会把高亮闪回首标题。优先用调用方给的快照
+              // （退出瞬间面板上正显示的那一项，按标题身份重映射到新标题集）；
               // 其次保留 tracker 手里的原索引；越界才退回选区推导。
-              const preferred = request.activeIndex;
+              const preferred = remapActiveIndex(headings, request.active);
               activeIndex =
                 typeof preferred === "number" &&
                 preferred >= 0 &&

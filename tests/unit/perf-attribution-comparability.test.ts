@@ -4,10 +4,12 @@
 // baseline 算变化率。fixture 变了（或换了环境/模式）之后，归因行会显示「statsMs 7.8 → 7.8，
 // 0.0%」这种伪对照——读者会以为成本没变，实际两份数据根本不可比。
 //
-// 这里用子进程真跑 report.mjs，锁三件事：
-// ① 不可比：归因行标注原因，不显示旧参考值与变化率；
-// ② 可比但基线还没有该指标（本 PR 5 份 CI 基线的现状）：显示 `—`，既不写 0 也不标不可比；
-// ③ 可比且基线有参考值：照旧给出参考值与变化率（证明不是一刀切关掉归因对照）。
+// 这里用子进程真跑 report.mjs，锁四件事（归因表的三种状态必须互相可区分）：
+// ① 不可比：标注 `不可比：<原因>`，不显示旧参考值与变化率；
+// ② 可比但基线还没有该指标（新增指标刚上线时就是这种状态，例如 open-* 基线上
+//    至今没有 katexRenderMs）：参考值列必须显示 `—`，既不写 0 也不标不可比；
+// ③ 可比且基线参考为 0：参考值列显示 `0`（与 ② 的 `—` 区分），变化率仍为 `—`（除零）；
+// ④ 可比且有非零参考值：照旧给出参考值与变化率（证明不是一刀切关掉归因对照）。
 
 import { execFileSync } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -91,12 +93,21 @@ const FULL_METRICS = {
   outlinePublishCount: { median: 0, p95: null, max: null, n: null, scalar: true },
 };
 
-/** 只播种了不带 outlinePublishCount 的旧基线（本 PR 5 份 CI 基线的真实状态） */
+/** 只播种了不带 outlinePublishCount 的基线（「新指标尚未进基线」的真实形态） */
 const METRICS_WITHOUT_PUBLISH = {
   inputPaintMs: FULL_METRICS.inputPaintMs,
   statsMs: FULL_METRICS.statsMs,
   statsCount: FULL_METRICS.statsCount,
 };
+
+/** 把归因表的一行拆成单元格（`| a | b | c |` → ["a","b","c"]） */
+function cells(line: string): string[] {
+  return line
+    .replace(/^\|/, "")
+    .replace(/\|$/, "")
+    .split("|")
+    .map((cell) => cell.trim());
+}
 
 function runReport(): void {
   execFileSync(process.execPath, [REPORT, "--phase=final"], {
@@ -160,26 +171,41 @@ describe("归因表的可比性门禁（#379 评审 P1）", () => {
     expect(line).not.toMatch(/%/);
   });
 
-  it("可比但基线未播种该指标：显示 —，既不写 0 也不标不可比", () => {
-    // 本 PR 提交的 5 份 CI 基线就是这种状态：outlinePublishCount 尚未进基线。
-    // 读者必须能分清「未播种」与「不可比」与「0 次」。
+  it("可比但基线未播种该指标：参考值列显示 —，既不写 0 也不标不可比", () => {
+    // 读者必须能分清「未播种」「不可比」「0 次」三种状态——它们都会让
+    // 变化率变成 `—`，只看变化列无法区分，所以断言精确的单元格。
     writeBaseline(NOW_FIXTURE, METRICS_WITHOUT_PUBLISH);
     runReport();
 
-    const line = attributionLine("outlinePublishCount");
-    expect(line).not.toContain("不可比");
-    expect(line).toContain("| — |"); // 本次值 0 之外的基线与变化列都是 —
+    const row = cells(attributionLine("outlinePublishCount"));
+    expect(row[1]).toBe("outlinePublishCount");
+    expect(row[2]).toBe("—"); // 参考值：未播种
+    expect(row[3]).toBe("0"); // 本次值：0 次
+    expect(row[4]).toBe("—"); // 变化率：无参考值
     expect(latestAttributionRow("outlinePublishCount").base).toBeNull();
   });
 
-  it("可比且基线有参考值：照旧给出参考值与变化率（不是一刀切关掉归因对照）", () => {
+  it("可比且基线参考为 0：参考值列显示 0，与「未播种」的 — 区分开", () => {
+    // 只计次桶播种后参考值就是 0；若实现把 0 也渲染成 —，
+    // 读者会以为「发布次数」根本没进基线。
     writeBaseline(NOW_FIXTURE, FULL_METRICS);
     runReport();
 
-    const line = attributionLine("statsMs");
-    expect(line).toContain("7.8");
-    expect(line).toMatch(/%/);
-    expect(line).not.toContain("不可比");
+    const row = cells(attributionLine("outlinePublishCount"));
+    expect(row[2]).toBe("0");
+    expect(row[3]).toBe("0");
+    expect(row[4]).toBe("—"); // 除零仍是 —（与主表口径一致）
+    expect(latestAttributionRow("outlinePublishCount").base).toBe(0);
+  });
+
+  it("可比且有非零参考值：照旧给出参考值与变化率（不是一刀切关掉归因对照）", () => {
+    writeBaseline(NOW_FIXTURE, FULL_METRICS);
+    runReport();
+
+    const row = cells(attributionLine("statsMs"));
+    expect(row[2]).toBe("7.8");
+    expect(row[4]).toMatch(/%/);
+    expect(attributionLine("statsMs")).not.toContain("不可比");
     expect(latestAttributionRow("statsMs").base).toBe(7.8);
   });
 });

@@ -122,6 +122,15 @@ for (const tier of ctx.tiers) {
         const { burst, observers, buckets, windowCompleted } = measured;
 
         if (round >= ctx.warmups) {
+          // 测量窗口必须走完（#379 评审 P1）：缺少 outlineSettle 桶时「没有发布桶」
+          // 既可能是 0 次发布、也可能是防抖回调根本没跑，聚合器只能按未测量处理
+          // ——而「未测量」在产物里没有任何痕迹（归因表整行消失）。这里判红，
+          // 让「没测到」变成显式失败，而不是静默丢一行。
+          expect(
+            windowCompleted,
+            `${id}：停笔后的防抖窗口未在超时前走完（缺 outlineSettle 桶），` +
+              `本轮大纲归因不可用，按测量失败处理`,
+          ).toBe(true);
           await probe.measure(page);
           paintSamples.push(...burst.paint);
           syncSamples.push(...burst.sync);
@@ -133,6 +142,8 @@ for (const tier of ctx.tiers) {
               ? Math.round((observers.heapEndMB - observers.heapStartMB) * 100) / 100
               : 0,
           );
+          // complete 显式传入：即便将来有人把上面的断言放宽成告警，
+          // 聚合器也不会把「窗口没走完」写成「每轮 0 次发布」。
           attribution.add(buckets, { complete: windowCompleted });
         }
       }
