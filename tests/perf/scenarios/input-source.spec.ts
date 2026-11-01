@@ -97,9 +97,13 @@ for (const tier of ctx.tiers) {
               "outlineSettle",
               "statsSettle",
             ]);
+            // 测量窗口是否真的走完：outlineSettle 只在防抖回调里打点，
+            // 有它 = 停笔后的重算确实跑过。没有它时「没有发布桶」既可能是
+            // 0 次发布、也可能是窗口没走完，不能当成 0 次进基线。
+            const windowCompleted = Boolean(buckets.outlineSettle);
 
             if (burst.allApplied && burst.inserted >= CHARS) {
-              return { burst, observers, buckets };
+              return { burst, observers, buckets, windowCompleted };
             }
             if (attempt >= INPUT_LANDING_RETRIES) {
               expect(
@@ -107,7 +111,7 @@ for (const tier of ctx.tiers) {
                 `${id}：源码模式 execCommand 未能插入文本（含 ${INPUT_LANDING_RETRIES} 次重试）`,
               ).toBe(true);
               expect(burst.inserted).toBeGreaterThanOrEqual(CHARS);
-              return { burst, observers, buckets };
+              return { burst, observers, buckets, windowCompleted };
             }
             console.warn(
               `[perf] ${id} 第 ${round + 1} 轮源码输入未全部落地` +
@@ -115,7 +119,7 @@ for (const tier of ctx.tiers) {
             );
           }
         })();
-        const { burst, observers, buckets } = measured;
+        const { burst, observers, buckets, windowCompleted } = measured;
 
         if (round >= ctx.warmups) {
           await probe.measure(page);
@@ -129,7 +133,7 @@ for (const tier of ctx.tiers) {
               ? Math.round((observers.heapEndMB - observers.heapStartMB) * 100) / 100
               : 0,
           );
-          attribution.add(buckets);
+          attribution.add(buckets, { complete: windowCompleted });
         }
       }
 

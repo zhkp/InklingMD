@@ -27,6 +27,16 @@ const VIEWPORT_HEADING_OFFSET = 12;
 /** 滚动采样节流间隔：目录高亮延迟 120ms 人眼不可辨 */
 const SAMPLE_MIN_INTERVAL_MS = 120;
 
+/** 同步刷新请求：只在事务上存活，需要落进 plugin state 才能被 view.update 读到 */
+interface ImmediateRefreshRequest {
+  /** 已处理到的请求序号（单调递增，用来判定「这是新请求」） */
+  seq: number;
+  /** 发起方给出的活动标题索引（退出源码模式时面板上正显示的那个） */
+  activeIndex: number | null;
+}
+
+const NO_REFRESH_REQUEST: ImmediateRefreshRequest = { seq: 0, activeIndex: null };
+
 /**
  * 请求「整文档替换后同帧刷新大纲」（#375）。
  *
@@ -35,21 +45,38 @@ const SAMPLE_MIN_INTERVAL_MS = 120;
  * （用户在源码里新增的标题要等防抖落地才出现）。带上此标记的替换在本帧内
  * 重算并发布，不额外开一个异步窗口。
  *
+ * `activeIndex` 是退出瞬间面板上的活动标题（源码侧已经按最新文档定位过）。必须由
+ * 调用方给出：tracker 自身在源码模式期间是静默的，它手里的索引停留在「进入源码
+ * 模式那一刻」，直接沿用会让高亮闪回进入前的章节。
+ *
  * 只由「整文档替换」这类昂贵且用户可见的过渡使用——按键路径仍是防抖，
  * 否则每敲一个字都要遍历全文（#375 的性能前提）。
  */
-export const markOutlineImmediateRefresh = (tr: Transaction): Transaction =>
-  tr.setMeta(key, "immediate");
+export const markOutlineImmediateRefresh = (
+  tr: Transaction,
+  opts: { activeIndex?: number | null } = {},
+): Transaction =>
+  tr.setMeta(key, {
+    activeIndex:
+      typeof opts.activeIndex === "number" ? opts.activeIndex : null,
+  });
 
 export const outlineTrackerPlugin = (
   onChange: (snapshot: EditorOutlineSnapshot) => void,
 ) =>
   new Plugin({
     key,
-    // 同步刷新请求计数：meta 只在事务上存在，需要落进 plugin state 才能被 view.update 读到
     state: {
-      init: () => 0,
-      apply: (tr, seq) => (tr.getMeta(key) ? seq + 1 : seq),
+      init: (): ImmediateRefreshRequest => NO_REFRESH_REQUEST,
+      apply: (tr, value): ImmediateRefreshRequest => {
+        const meta = tr.getMeta(key) as { activeIndex?: number | null } | undefined;
+        if (!meta) return value;
+        return {
+          seq: value.seq + 1,
+          activeIndex:
+            typeof meta.activeIndex === "number" ? meta.activeIndex : null,
+        };
+      },
     },
     view: (view) => {
       let headings = extractEditorOutline(view.state.doc);
@@ -58,7 +85,11 @@ export const outlineTrackerPlugin = (
         view.state.selection.head,
       );
       /** 已处理到的同步刷新序号（初值取当前状态，避免把历史请求当成新请求） */
-      let refreshSeq = key.getState(view.state) ?? 0;
+      let refreshSeq = (
+        key.getState(view.state) ?? NO_REFRESH_REQUEST
+      ).seq;
+      /** 几何缓存已失效：整文档替换后由第一次采样重建（不在退出帧里强制布局） */
+      let geometryDirty = false;
       let scrollFrame: number | null = null;
       let sampleTimer: ReturnType<typeof setTimeout> | null = null;
       let lastSampleAt = 0;
@@ -113,6 +144,16 @@ export const outlineTrackerPlugin = (
         // 滚动中沿用缓存 headingTops 做纯二分：向下滚动时新挂载内容位于
         // 视口下方，视口上方块的文档内位置不变，缓存仍然准确；停歇后
         // 150ms 内完成校正。
+        //
+        // 唯一例外是整文档替换后的第一次采样（#375）：此时缓存描述的是
+        // 替换前的 DOM，必须重建。放在这里而不是替换那一帧，是因为退出
+        // 过渡已经把「解析全文 + 整文档替换」压在同一帧，再叠加 N 次
+        // getBoundingClientRect 会把首帧继续推后；而采样发生在滚动恢复
+        // 之后的帧里，布局本来就要重算。
+        if (geometryDirty) {
+          rebuildHeadingTops();
+          geometryDirty = false;
+        }
         if (headingTops.length === 0) return;
         // 二分找最后一个 top <= scrollTop + offset 的标题（升序保证）
         const probe = scroller.scrollTop + VIEWPORT_HEADING_OFFSET;
@@ -143,11 +184,13 @@ export const outlineTrackerPlugin = (
         if (stale) return; // doc 变更防抖窗口内，交由 update 的重建路径
         if (!view.dom.isConnected || !scroller) return;
         if (
+          geometryDirty ||
           headingTops.length !== headings.length ||
           scroller.scrollHeight !== builtScrollHeight ||
           scroller.clientWidth !== builtClientWidth
         ) {
           rebuildHeadingTops();
+          geometryDirty = false;
         }
         sampleViewport();
       };
@@ -197,9 +240,9 @@ export const outlineTrackerPlugin = (
             previousState.selection,
           );
           // 同步刷新请求（#375）：只由整文档替换携带，见 markOutlineImmediateRefresh
-          const nextSeq = key.getState(nextView.state) ?? refreshSeq;
-          const immediateRefresh = nextSeq !== refreshSeq;
-          refreshSeq = nextSeq;
+          const request = key.getState(nextView.state) ?? NO_REFRESH_REQUEST;
+          const immediateRefresh = request.seq !== refreshSeq;
+          refreshSeq = request.seq;
 
           if (docChanged) {
             // 整文档替换（退出源码模式）：本帧同步重算并发布，首个可见帧
@@ -213,18 +256,27 @@ export const outlineTrackerPlugin = (
               const previousActive = activeIndex;
               headings = extractEditorOutline(nextView.state.doc);
               // 此刻 WYSIWYG 的选区与滚动还没恢复（退出过渡在 2 帧后才做锚点
-              // 恢复），按选区推导会把高亮闪回首标题。标题集通常只在末尾新增，
-              // 优先保留原索引；越界时才退回选区推导。
+              // 恢复），按选区推导会把高亮闪回首标题。优先用调用方给的索引
+              // （退出瞬间面板上正显示的那个，源码侧已按最新文档定位过）；
+              // 其次保留 tracker 手里的原索引；越界才退回选区推导。
+              const preferred = request.activeIndex;
               activeIndex =
-                typeof previousActive === "number" &&
-                previousActive >= 0 &&
-                previousActive < headings.length
-                  ? previousActive
-                  : findActiveHeadingIndex(
-                      headings,
-                      nextView.state.selection.head,
-                    );
-              rebuildHeadingTops();
+                typeof preferred === "number" &&
+                preferred >= 0 &&
+                preferred < headings.length
+                  ? preferred
+                  : typeof previousActive === "number" &&
+                      previousActive >= 0 &&
+                      previousActive < headings.length
+                    ? previousActive
+                    : findActiveHeadingIndex(
+                        headings,
+                        nextView.state.selection.head,
+                      );
+              // 几何缓存在这一帧不重建：退出帧已付全文解析 + 整文档替换，
+              // 再叠加 N 次 getBoundingClientRect（425 标题实测 27ms）会把
+              // 首帧继续推后。交给替换后的第一次采样重建（滚动恢复必触发）。
+              geometryDirty = true;
               stale = false;
               onChange({ headings, activeIndex });
               return;

@@ -4,13 +4,15 @@
 // baseline 算变化率。fixture 变了（或换了环境/模式）之后，归因行会显示「statsMs 7.8 → 7.8，
 // 0.0%」这种伪对照——读者会以为成本没变，实际两份数据根本不可比。
 //
-// 这里用子进程真跑 report.mjs：不可比时归因行必须显式标注原因、不显示旧参考值与变化率；
-// 可比时照旧给出参考值与变化率（证明不是一刀切关掉）。
+// 这里用子进程真跑 report.mjs，锁三件事：
+// ① 不可比：归因行标注原因，不显示旧参考值与变化率；
+// ② 可比但基线还没有该指标（本 PR 5 份 CI 基线的现状）：显示 `—`，既不写 0 也不标不可比；
+// ③ 可比且基线有参考值：照旧给出参考值与变化率（证明不是一刀切关掉归因对照）。
 
 import { execFileSync } from "node:child_process";
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createPerfReportWorkspace, type PerfReportWorkspace } from "./perf-report-env";
 
 const REPORT = "tests/perf/report.mjs";
@@ -18,7 +20,6 @@ const ID = "input-source-S-rich";
 const NOW_FIXTURE = { version: 2, hash: "nowhash0001", lines: 1000, source: "generated:rich" };
 const OLD_FIXTURE = { version: 2, hash: "oldhash0002", lines: 1000, source: "generated:rich" };
 
-const roots: string[] = [];
 let perf: PerfReportWorkspace;
 
 function writeRaw(): void {
@@ -42,7 +43,7 @@ function writeRaw(): void {
       statsMs: 9,
       statsCount: 1,
       outlinePublishCount: 0,
-      // 判定用标量（用于确认主表确实进入了不可比分支）
+      // 判定用标量（用于确认主表确实进入了可比/不可比分支）
       longTaskCount: 0,
       longTaskMs: 0,
       cls: 0,
@@ -53,7 +54,11 @@ function writeRaw(): void {
   writeFileSync(join(perf.rawDir, `${ID}.json`), JSON.stringify(raw, null, 2), "utf8");
 }
 
-function writeBaseline(fixture: typeof NOW_FIXTURE): void {
+/** 写基线；`metrics` 缺哪个指标就等于「该指标还没播种进基线」 */
+function writeBaseline(
+  fixture: typeof NOW_FIXTURE,
+  metrics: Record<string, unknown>,
+): void {
   const dir = join(perf.baselineDir, "local", "quick", "headless", "r2");
   mkdirSync(dir, { recursive: true });
   writeFileSync(
@@ -69,12 +74,7 @@ function writeBaseline(fixture: typeof NOW_FIXTURE): void {
         tier: "S",
         kind: "rich",
         fixture,
-        metrics: {
-          inputPaintMs: { median: 20.4, p95: 21.4, max: 22, n: 120 },
-          statsMs: { median: 7.8, p95: null, max: null, n: null, scalar: true },
-          statsCount: { median: 1, p95: null, max: null, n: null, scalar: true },
-          outlinePublishCount: { median: 0, p95: null, max: null, n: null, scalar: true },
-        },
+        metrics,
         updatedAt: new Date().toISOString(),
       },
       null,
@@ -83,6 +83,20 @@ function writeBaseline(fixture: typeof NOW_FIXTURE): void {
     "utf8",
   );
 }
+
+const FULL_METRICS = {
+  inputPaintMs: { median: 20.4, p95: 21.4, max: 22, n: 120 },
+  statsMs: { median: 7.8, p95: null, max: null, n: null, scalar: true },
+  statsCount: { median: 1, p95: null, max: null, n: null, scalar: true },
+  outlinePublishCount: { median: 0, p95: null, max: null, n: null, scalar: true },
+};
+
+/** 只播种了不带 outlinePublishCount 的旧基线（本 PR 5 份 CI 基线的真实状态） */
+const METRICS_WITHOUT_PUBLISH = {
+  inputPaintMs: FULL_METRICS.inputPaintMs,
+  statsMs: FULL_METRICS.statsMs,
+  statsCount: FULL_METRICS.statsCount,
+};
 
 function runReport(): void {
   execFileSync(process.execPath, [REPORT, "--phase=final"], {
@@ -101,9 +115,19 @@ function attributionLine(metric: string): string {
   return line as string;
 }
 
+/** latest.json 里该场景的归因行（第三个消费出口，同样不能带不可比的参考值） */
+function latestAttributionRow(metric: string): { base: number | null; cur: number } {
+  const latest = JSON.parse(readFileSync(join(perf.outDir, "latest.json"), "utf8"));
+  const result = (latest.results ?? []).find((r: { id: string }) => r.id === ID);
+  const row = (result?.attribution ?? []).find(
+    (a: { metric: string }) => a.metric === metric,
+  );
+  expect(row, `latest.json 缺少 ${metric} 的归因行`).toBeTruthy();
+  return row;
+}
+
 beforeEach(() => {
   perf = createPerfReportWorkspace("perf-attr-cmp-");
-  roots.push(perf.root);
   writeRaw();
 });
 
@@ -112,13 +136,9 @@ afterEach(() => {
   perf.cleanup();
 });
 
-afterAll(() => {
-  for (const root of roots) rmSync(root, { recursive: true, force: true });
-});
-
 describe("归因表的可比性门禁（#379 评审 P1）", () => {
   it("fixture 变了：归因行标注不可比，不显示旧参考值与变化率", () => {
-    writeBaseline(OLD_FIXTURE);
+    writeBaseline(OLD_FIXTURE, FULL_METRICS);
     runReport();
 
     const line = attributionLine("statsMs");
@@ -127,10 +147,12 @@ describe("归因表的可比性门禁（#379 评审 P1）", () => {
     expect(line).not.toContain("7.8");
     // 也不得出现任何变化率
     expect(line).not.toMatch(/%/);
+    // latest.json 是机器可读出口，同样不能带不可比的参考值
+    expect(latestAttributionRow("statsMs").base).toBeNull();
   });
 
   it("只计次归因指标同样受门禁约束", () => {
-    writeBaseline(OLD_FIXTURE);
+    writeBaseline(OLD_FIXTURE, FULL_METRICS);
     runReport();
 
     const line = attributionLine("outlinePublishCount");
@@ -138,13 +160,26 @@ describe("归因表的可比性门禁（#379 评审 P1）", () => {
     expect(line).not.toMatch(/%/);
   });
 
-  it("可比时照旧给出参考值与变化率（不是一刀切关掉归因对照）", () => {
-    writeBaseline(NOW_FIXTURE);
+  it("可比但基线未播种该指标：显示 —，既不写 0 也不标不可比", () => {
+    // 本 PR 提交的 5 份 CI 基线就是这种状态：outlinePublishCount 尚未进基线。
+    // 读者必须能分清「未播种」与「不可比」与「0 次」。
+    writeBaseline(NOW_FIXTURE, METRICS_WITHOUT_PUBLISH);
+    runReport();
+
+    const line = attributionLine("outlinePublishCount");
+    expect(line).not.toContain("不可比");
+    expect(line).toContain("| — |"); // 本次值 0 之外的基线与变化列都是 —
+    expect(latestAttributionRow("outlinePublishCount").base).toBeNull();
+  });
+
+  it("可比且基线有参考值：照旧给出参考值与变化率（不是一刀切关掉归因对照）", () => {
+    writeBaseline(NOW_FIXTURE, FULL_METRICS);
     runReport();
 
     const line = attributionLine("statsMs");
     expect(line).toContain("7.8");
     expect(line).toMatch(/%/);
     expect(line).not.toContain("不可比");
+    expect(latestAttributionRow("statsMs").base).toBe(7.8);
   });
 });

@@ -162,6 +162,31 @@ describe("归因标量聚合（#379）", () => {
     expect(agg.scalars()).toEqual({ outlinePublishCount: 1.33 });
   });
 
+  it("测量窗口没走完的轮次不参与只计次均值（不用「没测」冒充 0 次）", () => {
+    // input-source 用 outlineSettle 桶是否存在判定窗口是否走完：某轮没走完
+    // （防抖回调没跑）时，该轮没有发布桶既可能是 0 次发布、也可能是根本没测，
+    // 必须剔除，不能按 0 计入分母。
+    const agg = createAttributionAggregator({ countOnly: ["outlinePublish"] });
+    agg.add({ outlinePublish: { count: 2, totalMs: 0, maxMs: 0 } }, { complete: true });
+    agg.add({}, { complete: false });
+    expect(agg.scalars()).toEqual({ outlinePublishCount: 2 });
+  });
+
+  it("所有轮次窗口都没走完 → 不输出（未测量，而不是 0 次）", () => {
+    const agg = createAttributionAggregator({ countOnly: ["outlinePublish"] });
+    agg.add({}, { complete: false });
+    agg.add({}, { complete: false });
+    expect(agg.scalars()).toEqual({});
+  });
+
+  it("countOnly 写错桶名（非只计次桶）直接抛错，不静默失效", () => {
+    // 「声明了但永远不生效」产出的效果与本 PR 修的「整列从基线消失」一模一样，
+    // 属于沉默错误，构造期就要炸。
+    expect(() =>
+      createAttributionAggregator({ countOnly: ["stat"] }),
+    ).toThrow(/countOnly/);
+  });
+
   it("桶派生名与 judgment 白名单一致（防止进了基线却永不显示）", () => {
     const derived = ATTRIBUTION_BUCKETS.flatMap((name) =>
       COUNT_ONLY_BUCKETS.has(name)

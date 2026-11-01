@@ -9,9 +9,13 @@
 // 4. doc 变更防抖重算与销毁清理（沿袭原契约）
 
 import { describe, expect, it, vi } from "vitest";
-import type { Node as ProseMirrorNode } from "@milkdown/kit/prose/model";
+import { Schema, type Node as ProseMirrorNode } from "@milkdown/kit/prose/model";
+import { EditorState } from "@milkdown/kit/prose/state";
 import type { EditorView } from "@milkdown/kit/prose/view";
-import { outlineTrackerPlugin } from "../../src/components/Editor/outline-tracker";
+import {
+  markOutlineImmediateRefresh,
+  outlineTrackerPlugin,
+} from "../../src/components/Editor/outline-tracker";
 
 function rect(left: number, top: number, right: number, bottom: number): DOMRect {
   return {
@@ -391,5 +395,173 @@ describe("outlineTrackerPlugin 编辑防抖", () => {
 
     vi.useRealTimers();
     editorDom.remove();
+  });
+});
+
+// #375 评审（PR #400）：退出源码模式的首个可见帧不得是替换前的旧快照。
+// 这条契约的唯一实现是「整文档替换事务带 markOutlineImmediateRefresh 」，
+// 状态机有四个易错点（清旧防抖 / stale 交接 / 索引保值 / 序号判定），
+// 只靠 E2E 抽样浏览器帧不够确定，这里用真实 EditorState 直接锁。
+describe("outlineTrackerPlugin 整文档替换的同步刷新（#375 首帧）", () => {
+  const schema = new Schema({
+    nodes: {
+      doc: { content: "block+" },
+      heading: {
+        content: "inline*",
+        group: "block",
+        defining: true,
+        attrs: { level: { default: 1 } },
+        parseDOM: [{ tag: "h1", attrs: { level: 1 } }],
+        toDOM: () => ["h1", 0],
+      },
+      paragraph: {
+        content: "inline*",
+        group: "block",
+        parseDOM: [{ tag: "p" }],
+        toDOM: () => ["p", 0],
+      },
+      text: { group: "inline" },
+    },
+  });
+
+  function makeDoc(titles: string[]): ProseMirrorNode {
+    return schema.node(
+      "doc",
+      null,
+      titles.map((t) =>
+        schema.node("heading", { level: 1 }, [schema.text(t)]),
+      ),
+    );
+  }
+
+  function headingPositions(doc: ProseMirrorNode): number[] {
+    const positions: number[] = [];
+    doc.descendants((node, pos) => {
+      if (node.type.name === "heading") positions.push(pos);
+      return true;
+    });
+    return positions;
+  }
+
+  it("带标记的替换同帧发布新标题集：沿用退出时索引、不重建几何、丢弃旧防抖", () => {
+    vi.useFakeTimers();
+    const harness = makeHarness();
+    const onChange = vi.fn();
+    const plugin = outlineTrackerPlugin(onChange);
+
+    const initial = EditorState.create({
+      schema,
+      doc: makeDoc(["一级标题", "二级标题", "三级标题"]),
+      plugins: [plugin],
+    });
+    const positions = headingPositions(initial.doc);
+    const nodeDOM = vi.fn(
+      (pos: number) =>
+        harness.headingEls[positions.indexOf(pos)] ?? null,
+    );
+    const asView = (state: EditorState) =>
+      ({
+        dom: harness.editorDom,
+        state,
+        nodeDOM,
+      }) as unknown as EditorView;
+
+    let pendingFrame: ((time: number) => void) | null = null;
+    vi.spyOn(window, "requestAnimationFrame").mockImplementation(((
+      callback: (time: number) => void,
+    ) => {
+      pendingFrame = callback;
+      return 17;
+    }) as unknown as typeof window.requestAnimationFrame);
+
+    const pluginView = plugin.spec.view?.(asView(initial));
+    expect(onChange).toHaveBeenLastCalledWith(
+      expect.objectContaining({ activeIndex: 0 }),
+    );
+    onChange.mockClear();
+    nodeDOM.mockClear();
+
+    // ① 先来一次普通编辑：挂上 150ms 提取防抖（这就是退出时可能还挂在队列上的那条）
+    const edited = initial.apply(initial.tr.insertText("x", 2));
+    pluginView?.update?.(asView(edited), initial as never);
+    expect(onChange).not.toHaveBeenCalled();
+
+    // ② 整文档替换 + 同步刷新标记：源码侧此刻高亮的是第 4 项
+    const replaced = makeDoc(["一级标题", "二级标题", "三级标题", "新增标题"]);
+    const tr = markOutlineImmediateRefresh(
+      edited.tr.replaceWith(0, edited.doc.content.size, replaced.content),
+      { activeIndex: 3 },
+    );
+    const next = edited.apply(tr);
+    pluginView?.update?.(asView(next), edited as never);
+
+    // 同帧发布：不等任何定时器/帧
+    expect(onChange).toHaveBeenCalledTimes(1);
+    const snapshot = onChange.mock.calls[0][0] as {
+      headings: { text: string }[];
+      activeIndex: number | null;
+    };
+    expect(snapshot.headings.map((h) => h.text)).toEqual([
+      "一级标题",
+      "二级标题",
+      "三级标题",
+      "新增标题",
+    ]);
+    // 高亮沿用退出瞬间面板上的索引，不闪回进入源码模式前的章节
+    expect(snapshot.activeIndex).toBe(3);
+    // 退出帧不做几何重建（N 次 getBoundingClientRect 会把首帧继续推后）
+    expect(nodeDOM).not.toHaveBeenCalled();
+
+    // ③ 被丢弃的旧防抖不得再回写替换前的标题集
+    vi.advanceTimersByTime(300);
+    expect(onChange).toHaveBeenCalledTimes(1);
+
+    // ④ 替换后的第一次采样才重建几何（滚动恢复路径），并据此定位
+    harness.setScrollTop(650);
+    harness.scroller.dispatchEvent(new Event("scroll"));
+    (pendingFrame as ((time: number) => void) | null)?.(0);
+    expect(nodeDOM).toHaveBeenCalledTimes(4); // 4 个标题，一次批量重建
+    expect(onChange).toHaveBeenLastCalledWith(
+      expect.objectContaining({ activeIndex: 2 }),
+    );
+
+    pluginView?.destroy?.();
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    harness.scroller.remove();
+  });
+
+  it("没有标记的整文档替换仍走 150ms 防抖（按键路径不退化）", () => {
+    vi.useFakeTimers();
+    const harness = makeHarness();
+    const onChange = vi.fn();
+    const plugin = outlineTrackerPlugin(onChange);
+    const initial = EditorState.create({
+      schema,
+      doc: makeDoc(["一", "二"]),
+      plugins: [plugin],
+    });
+    const asView = (state: EditorState) =>
+      ({
+        dom: harness.editorDom,
+        state,
+        nodeDOM: () => null,
+      }) as unknown as EditorView;
+
+    const pluginView = plugin.spec.view?.(asView(initial));
+    onChange.mockClear();
+
+    const replaced = makeDoc(["一", "二", "三"]);
+    const next = initial.apply(
+      initial.tr.replaceWith(0, initial.doc.content.size, replaced.content),
+    );
+    pluginView?.update?.(asView(next), initial as never);
+    expect(onChange).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(160);
+    expect(onChange).toHaveBeenCalledTimes(1);
+
+    pluginView?.destroy?.();
+    vi.useRealTimers();
+    harness.scroller.remove();
   });
 });
