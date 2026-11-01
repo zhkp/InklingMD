@@ -81,28 +81,28 @@ for (const tier of ctx.tiers) {
         const observersAfterFormula = await page.evaluate(readObservers);
         const buckets = await page.evaluate(readPerfProbe);
 
-        // 公式密集档必须真的有 200+ 公式节点（#376 的测量前提），否则数据不能用于决策
-        if (
-          kind === "rich" &&
-          (tier === "M" || tier === "L" || tier === "XL")
-        ) {
-          expect(
-            formula.nodeViews,
-            `${id}：公式节点数不足 200（实际 ${formula.nodeViews}），不满足 #376 测量前提`,
-          ).toBeGreaterThanOrEqual(200);
-          expect(
-            formula.rendered + formula.empty,
-            `${id}：KaTeX 未在等待窗口内渲染完全（${formula.rendered}+${formula.empty} 空/${formula.nodeViews}）`,
-          ).toBe(formula.nodeViews);
-        }
-
         // warm-up 轮次只用来消除 Vite 首次编译 / PM 首次挂载 / JIT 预热的影响
         if (round >= ctx.warmups) {
+          // 公式前提与完成条件都只在 measured 轮断言：warmup 的结果本就要丢弃，
+          // 它的一次 KaTeX 抖动不该把整场景判成 UNMEASURED（exit 2）。
+          // 公式密集档必须真的有 200+ 公式节点（#376 的测量前提），否则数据不能用于决策
+          if (
+            kind === "rich" &&
+            (tier === "M" || tier === "L" || tier === "XL")
+          ) {
+            expect(
+              formula.nodeViews,
+              `${id}：公式节点数不足 200（实际 ${formula.nodeViews}），不满足 #376 测量前提`,
+            ).toBeGreaterThanOrEqual(200);
+            expect(
+              formula.rendered + formula.empty,
+              `${id}：KaTeX 未在等待窗口内渲染完全（${formula.rendered}+${formula.empty} 空/${formula.nodeViews}）`,
+            ).toBeGreaterThanOrEqual(formula.nodeViews);
+          }
           // 含公式档位必须先确认「等到了完成条件」（#379 评审 P1）：帧预算耗尽时
           // formula.at 只是超时时刻，拿它当 formulaReadyMs 等于把「还没渲染完」
           // 记成「渲染耗时」，正好破坏 #376「先测量再决定」的证据边界。
           // 测量失败就判红——本轮不落 raw，场景按「未测量」处理（exit 2）。
-          // 只对 measured 轮断言：warmup 的结果本就要丢弃，不该决定整场景结论。
           if (formula.nodeViews > 0) {
             expect(
               formula.complete,

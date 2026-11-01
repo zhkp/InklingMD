@@ -53,20 +53,35 @@ async function stretchSourceOutlineDebounce(page: Page): Promise<void> {
   );
 }
 
+/** 打字前的大纲项数（作为「有没有更新」的基线，不写死标题数量） */
+async function outlineItemCount(page: Page): Promise<number> {
+  return page.locator(".outline-panel .outline-item").count();
+}
+
 /**
- * 断言防抖窗口真的被拉长了（停笔 350ms 后大纲仍是 3 项）。
+ * 断言防抖窗口真的被拉长了：停笔后 1s 内大纲项数始终不增长。
  *
- * 生产防抖是 200ms：补丁没生效的话此刻必然已是 4 项。这条断言同时证明
- * 「补丁生效」+「退出时定时器确实还挂在队列上」，竞态不是概率事件。
+ * 生产防抖 200ms、验收上限 250ms，而拉伸值是 1200ms——1s 的观察窗既比
+ * 拉伸值早 200ms（不会假红），又比生产口径晚 750ms 以上（慢机上也不会
+ * 因为「发布还没提交」而假绿：轮询每 100ms 一次，一旦出现新项立刻断言失败）。
+ *
+ * `baseline` 必须在**打字前**取：打完再取的话，补丁失效时读到的已经是
+ * 更新后的项数，断言就恒真了。
  */
-async function expectOutlineDebounceStretched(page: Page): Promise<void> {
-  await page.waitForTimeout(350);
-  const count = await page.locator(".outline-panel .outline-item").count();
-  expect(
-    count,
-    `停笔 350ms 后大纲已是 ${count} 项：防抖未被拉长（生产值 ${SOURCE_OUTLINE_DEBOUNCE_MS}ms），` +
-      `退出竞态退化成概率用例`,
-  ).toBe(3);
+async function expectOutlineDebounceStretched(
+  page: Page,
+  baseline: number,
+): Promise<void> {
+  const deadline = Date.now() + 1_000;
+  while (Date.now() < deadline) {
+    const count = await outlineItemCount(page);
+    expect(
+      count,
+      `停笔后 ${1_000 - Math.max(0, deadline - Date.now())}ms 内大纲已从 ${baseline} 项变成 ${count} 项：` +
+        `防抖未被拉长（生产值 ${SOURCE_OUTLINE_DEBOUNCE_MS}ms），退出竞态退化成概率用例`,
+    ).toBe(baseline);
+    await page.waitForTimeout(100);
+  }
 }
 
 /** 恢复被拉长的 setTimeout 并布防：此后的迟到触发才计入 __outlineTimerFires */
@@ -252,9 +267,10 @@ test.describe("源代码模式", () => {
 
     await source.locator(".cm-content").click();
     await moveCaretToDocEnd(page);
+    const outlineBaseline = await outlineItemCount(page); // 打字前：新标题还没进大纲
     await page.keyboard.press("Enter");
     await page.keyboard.type("# 竞态标题");
-    await expectOutlineDebounceStretched(page);
+    await expectOutlineDebounceStretched(page, outlineBaseline);
 
     // 打字结束：恢复 setTimeout 并布防（此后的迟到触发才计入），再切回 WYSIWYG。
     // 卸载若没清掉待执行定时器，它会在 1200ms 后触发并留下计数。
@@ -297,9 +313,10 @@ test.describe("源代码模式", () => {
 
     await source.locator(".cm-content").click();
     await moveCaretToDocEnd(page);
+    const outlineBaseline = await outlineItemCount(page); // 打字前：3 项
     await page.keyboard.press("Enter");
     await page.keyboard.type("# 首帧标题");
-    await expectOutlineDebounceStretched(page);
+    await expectOutlineDebounceStretched(page, outlineBaseline);
 
     // 首帧采样：ProseMirror 重新可见后的第一个绘制帧里，大纲面板有哪几项。
     // rAF 回调在绘制前执行，读到的就是这一帧真正会画出来的 DOM。

@@ -16,7 +16,10 @@ import {
   markOutlineImmediateRefresh,
   outlineTrackerPlugin,
 } from "../../src/components/Editor/outline-tracker";
-import { extractEditorOutline } from "../../src/lib/outline";
+import {
+  extractEditorOutline,
+  type EditorOutlineSnapshot,
+} from "../../src/lib/outline";
 
 function rect(left: number, top: number, right: number, bottom: number): DOMRect {
   return {
@@ -607,5 +610,158 @@ describe("outlineTrackerPlugin 整文档替换的同步刷新（#375 首帧）",
     pluginView?.destroy?.();
     vi.useRealTimers();
     harness.scroller.remove();
+  });
+
+  // ---- 重映射的兜底分支（#375 评审第三轮）：每条都得单独锁，否则改错不会红 ----
+
+  function setup(titles: string[]) {
+    const harness = makeHarness();
+    const onChange = vi.fn();
+    const plugin = outlineTrackerPlugin(onChange);
+    const state = EditorState.create({
+      schema,
+      doc: makeDoc(titles),
+      plugins: [plugin],
+    });
+    // 真实几何映射：按文档里标题节点的位置取 harness 的标题元素
+    const positions: number[] = [];
+    state.doc.descendants((node, pos) => {
+      if (node.type.name === "heading") positions.push(pos);
+      return true;
+    });
+    const asView = (s: EditorState) =>
+      ({
+        dom: harness.editorDom,
+        state: s,
+        nodeDOM: (pos: number) =>
+          harness.headingEls[positions.indexOf(pos)] ?? null,
+      }) as unknown as EditorView;
+    const pluginView = plugin.spec.view?.(asView(state));
+    onChange.mockClear();
+    return { harness, onChange, asView, pluginView, state };
+  }
+
+  /** 整文档替换 + 可选快照，返回本次发布的大纲 */
+  function replaceWith(
+    ctx: ReturnType<typeof setup>,
+    titles: string[],
+    active?: EditorOutlineSnapshot | null,
+  ) {
+    const replaced = makeDoc(titles);
+    const tr = markOutlineImmediateRefresh(
+      ctx.state.tr.replaceWith(0, ctx.state.doc.content.size, replaced.content),
+      active === undefined ? {} : { active },
+    );
+    const next = ctx.state.apply(tr);
+    ctx.pluginView?.update?.(ctx.asView(next), ctx.state as never);
+    const call = ctx.onChange.mock.calls.at(-1)?.[0] as
+      | { headings: { text: string }[]; activeIndex: number | null }
+      | undefined;
+    return call;
+  }
+
+  it("标题被改名/删除：退回原索引并钳进新列表（不返回 null）", () => {
+    const ctx = setup(["甲", "乙", "丙"]);
+    const exitHeadings = extractEditorOutline(ctx.state.doc);
+    // 新列表里没有任何同名标题（全部改名），原索引 2 落回 2
+    const published = replaceWith(ctx, ["A", "B", "C"], {
+      headings: exitHeadings,
+      activeIndex: 2,
+    });
+    expect(published?.headings.map((h) => h.text)).toEqual(["A", "B", "C"]);
+    expect(published?.activeIndex).toBe(2);
+  });
+
+  it("标题被删除且新列表更短：钳到最后一项而不是越界", () => {
+    const ctx = setup(["甲", "乙", "丙"]);
+    const exitHeadings = extractEditorOutline(ctx.state.doc);
+    const published = replaceWith(ctx, ["A"], {
+      headings: exitHeadings,
+      activeIndex: 2,
+    });
+    expect(published?.headings).toHaveLength(1);
+    expect(published?.activeIndex).toBe(0);
+  });
+
+  it("行内公式的标题按归一化文本匹配（markdown 与 PM 文本来源不同）", () => {
+    // 源码侧标题文本带 `$a^2$`（markdown 原文），PM 侧只有「公式」：
+    // 不归一化就会匹配失败、退回索引 0，位移场景仍错位
+    const ctx = setup(["公式 $a^2$", "正文"]);
+    const exitHeadings = extractEditorOutline(
+      // 用 markdown 侧形态的标题文本构造快照
+      ctx.state.doc,
+    );
+    const published = replaceWith(ctx, ["前言", "公式"], {
+      headings: [{ ...exitHeadings[0], text: "公式 $a^2$" }],
+      activeIndex: 0,
+    });
+    expect(published?.headings.map((h) => h.text)).toEqual(["前言", "公式"]);
+    expect(published?.activeIndex).toBe(1); // 按身份命中第 2 项，不是索引 0
+  });
+
+  it("没有快照的调用方：沿用 tracker 自己的索引", () => {
+    vi.useFakeTimers();
+    const ctx = setup(["一", "二", "三"]);
+    let frame: ((time: number) => void) | null = null;
+    vi.spyOn(window, "requestAnimationFrame").mockImplementation(((
+      cb: (time: number) => void,
+    ) => {
+      frame = cb;
+      return 17;
+    }) as unknown as typeof window.requestAnimationFrame);
+
+    // 滚动到第三项，让 tracker 自己的 activeIndex = 2
+    ctx.harness.setScrollTop(650);
+    ctx.harness.scroller.dispatchEvent(new Event("scroll"));
+    (frame as ((time: number) => void) | null)?.(0);
+    vi.advanceTimersByTime(220); // 停歇刷新：重建几何并按 scrollTop 定位
+    expect(ctx.onChange).toHaveBeenLastCalledWith(
+      expect.objectContaining({ activeIndex: 2 }),
+    );
+    ctx.onChange.mockClear();
+
+    const published = replaceWith(ctx, ["新的甲", "新的乙", "新的丙"]);
+    expect(published?.activeIndex).toBe(2); // 沿用 tracker 索引（无快照可用）
+
+    ctx.pluginView?.destroy?.();
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    ctx.harness.scroller.remove();
+  });
+
+  it("快照属于别的文件（空快照）：不沿用旧索引，退回选区推导", () => {
+    vi.useFakeTimers();
+    const ctx = setup(["一", "二", "三"]);
+    let frame: ((time: number) => void) | null = null;
+    vi.spyOn(window, "requestAnimationFrame").mockImplementation(((
+      cb: (time: number) => void,
+    ) => {
+      frame = cb;
+      return 17;
+    }) as unknown as typeof window.requestAnimationFrame);
+
+    ctx.harness.setScrollTop(650);
+    ctx.harness.scroller.dispatchEvent(new Event("scroll"));
+    (frame as ((time: number) => void) | null)?.(0);
+    vi.advanceTimersByTime(220);
+    expect(ctx.onChange).toHaveBeenLastCalledWith(
+      expect.objectContaining({ activeIndex: 2 }),
+    );
+    ctx.onChange.mockClear();
+
+    // 空快照 = 面板没有可用的活动项（例如切到了别的文件）：此时若沿用
+    // tracker 自己的 2，就把退出前章节的高亮串了过来。必须退回选区推导——
+    // 整文档替换会把选区映射到替换内容末尾，5 个标题时即第 5 项（索引 4），
+    // 与「沿用旧索引 2」可区分。
+    const published = replaceWith(ctx, ["甲", "乙", "丙", "丁", "戊"], {
+      headings: [],
+      activeIndex: null,
+    });
+    expect(published?.activeIndex).toBe(4);
+
+    ctx.pluginView?.destroy?.();
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    ctx.harness.scroller.remove();
   });
 });

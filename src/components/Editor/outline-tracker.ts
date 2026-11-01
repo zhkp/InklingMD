@@ -27,6 +27,11 @@ const key = new PluginKey("inkling-outline-tracker");
 const VIEWPORT_HEADING_OFFSET = 12;
 /** 滚动采样节流间隔：目录高亮延迟 120ms 人眼不可辨 */
 const SAMPLE_MIN_INTERVAL_MS = 120;
+/**
+ * 滚动停歇后多久做几何刷新（失效检测 + 批量重建 + 重新采样）。
+ * 也是「整文档替换后高亮恢复跟手」的最长等待。
+ */
+const GEO_REFRESH_MS = 200;
 
 /** 同步刷新请求：只在事务上存活，需要落进 plugin state 才能被 view.update 读到 */
 interface ImmediateRefreshRequest {
@@ -39,13 +44,34 @@ interface ImmediateRefreshRequest {
 const NO_REFRESH_REQUEST: ImmediateRefreshRequest = { seq: 0, active: null };
 
 /**
+ * 标题文本归一化，仅用于「同一个标题」的比对（#375）。
+ *
+ * 两侧文本来源不同：源码模式来自 markdown 原文（`extractMarkdownOutline`），
+ * WYSIWYG 来自 ProseMirror 的文本节点。行内公式/脚注在 PM 侧是原子节点、
+ * 不贡献文本（`getEditorHeadingText` 只累加 text/image/hardbreak），而 markdown
+ * 侧保留 `$a^2$`、`` `x` ``、`[^1]` 这些源码标记。不归一化会让「# 公式 $a^2$」
+ * 在新列表里永远匹配不到，退化成按索引取——正是重映射要修的错位。
+ */
+function normalizeOutlineText(text: string): string {
+  return text
+    .replace(/\$[^$\n]*\$/g, "") // 行内公式：PM 侧不留文本
+    .replace(/`([^`\n]*)`/g, "$1") // 行内代码：PM 侧保留代码内容
+    .replace(/\[\^[^\]\n]*\]/g, "") // 脚注引用：PM 侧是原子节点
+    .replace(/\s+/g, "")
+    .trim();
+}
+
+/**
  * 把「退出瞬间面板上的活动标题」映射到替换后的标题集（#375）。
  *
  * 源码侧传进来的是它最后一次发布的快照，而那次发布被 200ms 防抖门控：
  * 用户若在这段窗口里在文档开头插入了标题，索引会整体位移，直接按索引取会错位。
- * 因此按「level + 文本」重新定位，同名标题按在旧列表里的出现次序消歧
- * （重复标题是合法文档结构，SM9 就在测这个）。找不到（标题被删/改名）时
- * 退回原索引，越界则返回 null 交给调用方兜底。
+ * 因此按「level + 归一化文本」重新定位，同名标题按在旧列表里的出现次序消歧
+ * （重复标题是合法文档结构，SM9 就在测这个）。
+ *
+ * 返回 null 表示「无法从快照推出标题身份」（没有快照 / 快照没有活动项），
+ * 由调用方按自己的兜底链处理；「标题被删或改名」不算无法推出——退回原索引
+ * 并钳进新列表长度，这是最接近用户预期的一项。
  */
 function remapActiveIndex(
   next: readonly EditorOutlineHeading[],
@@ -53,22 +79,33 @@ function remapActiveIndex(
 ): number | null {
   const index = active?.activeIndex;
   if (active == null || typeof index !== "number") return null;
+  if (next.length === 0) return null;
+  const clamp = (i: number) => Math.min(Math.max(i, 0), next.length - 1);
   const target = active.headings[index];
-  if (!target) return null;
-  // 目标标题在旧列表里是第几个同名项（同 level + 同文本）
+  if (!target) return clamp(index);
+  const targetText = normalizeOutlineText(target.text);
+  // 目标标题在旧列表里是第几个同类项（同 level + 同归一化文本）
   let ordinal = 0;
   for (let i = 0; i < index; i += 1) {
     const h = active.headings[i];
-    if (h && h.level === target.level && h.text === target.text) ordinal += 1;
+    if (
+      h &&
+      h.level === target.level &&
+      normalizeOutlineText(h.text) === targetText
+    ) {
+      ordinal += 1;
+    }
   }
   let seen = 0;
   for (let i = 0; i < next.length; i += 1) {
     const h = next[i];
-    if (h.level !== target.level || h.text !== target.text) continue;
+    if (h.level !== target.level || normalizeOutlineText(h.text) !== targetText) {
+      continue;
+    }
     if (seen === ordinal) return i;
     seen += 1;
   }
-  return index < next.length ? index : null;
+  return clamp(index);
 }
 
 /**
@@ -183,11 +220,14 @@ export const outlineTrackerPlugin = (
         // 强制重排是 p99 尖刺来源；停歇时机一次重排无掉帧顾虑。
         // 滚动中沿用缓存 headingTops 做纯二分：向下滚动时新挂载内容位于
         // 视口下方，视口上方块的文档内位置不变，缓存仍然准确；停歇后
-        // 150ms 内完成校正。
+        // 200ms（GEO_REFRESH_MS）内完成校正。
         //
-        // 整文档替换后的缓存属于替换前的 DOM：本帧不采样也不重建，等停歇路径
-        // 的 refreshGeometryAndSample 一次性重建（#375 首帧由退出时的发布保证，
-        // 不需要几何；而滚动帧做 N 次 rect 会重演 #212 的 p99 尖刺）。
+        // 整文档替换后的缓存属于替换前的 DOM：**整个滚动会话**都不采样也不
+        // 重建，等停歇路径的 refreshGeometryAndSample 一次性重建。
+        // 代价是退出后连续滚动时高亮停在退出时发布的那一项、不跟手；换来的是
+        // 「滚动帧零几何读取」（#212）——滚动帧里做 N 次 rect 会重演 p99 尖刺，
+        // 而退出滚动恢复动画只有 ~250ms，跟着动反而更晃。首帧正确性由退出时的
+        // 同步发布保证，不依赖几何。
         if (geometryDirty) return;
         if (headingTops.length === 0) return;
         // 二分找最后一个 top <= scrollTop + offset 的标题（升序保证）
@@ -240,7 +280,7 @@ export const outlineTrackerPlugin = (
         restTimer = setTimeout(() => {
           restTimer = null;
           refreshGeometryAndSample();
-        }, 200);
+        }, GEO_REFRESH_MS);
         if (scrollFrame != null) return;
         scrollFrame = requestAnimationFrame(() => {
           scrollFrame = null;
@@ -290,26 +330,27 @@ export const outlineTrackerPlugin = (
               const previousActive = activeIndex;
               headings = extractEditorOutline(nextView.state.doc);
               // 此刻 WYSIWYG 的选区与滚动还没恢复（退出过渡在 2 帧后才做锚点
-              // 恢复），按选区推导会把高亮闪回首标题。优先用调用方给的快照
-              // （退出瞬间面板上正显示的那一项，按标题身份重映射到新标题集）；
-              // 其次保留 tracker 手里的原索引；越界才退回选区推导。
-              const preferred = remapActiveIndex(headings, request.active);
+              // 恢复），按选区推导会把高亮闪回首标题。三级兜底：
+              //   ① 调用方给了快照 → 按标题身份重映射（位移/改名都能对准）；
+              //   ② 没给快照（tracker 被别的调用方复用）→ 用自己手里的索引；
+              //   ③ 仍为空（例如快照属于别的文件，activeIndex 为 null）→ 选区推导。
+              // ②只在「完全没快照」时生效：给了快照却仍沿用旧索引，正是
+              // 让高亮闪回进入源码模式前章节的那条路径。
+              const preferred = request.active
+                ? remapActiveIndex(headings, request.active)
+                : previousActive;
               activeIndex =
                 typeof preferred === "number" &&
                 preferred >= 0 &&
                 preferred < headings.length
                   ? preferred
-                  : typeof previousActive === "number" &&
-                      previousActive >= 0 &&
-                      previousActive < headings.length
-                    ? previousActive
-                    : findActiveHeadingIndex(
-                        headings,
-                        nextView.state.selection.head,
-                      );
+                  : findActiveHeadingIndex(
+                      headings,
+                      nextView.state.selection.head,
+                    );
               // 几何缓存在这一帧不重建：退出帧已付全文解析 + 整文档替换，
               // 再叠加 N 次 getBoundingClientRect（425 标题实测 27ms）会把
-              // 首帧继续推后。交给替换后的第一次采样重建（滚动恢复必触发）。
+              // 首帧继续推后。交给替换后的停歇路径重建（见 sampleViewport）。
               geometryDirty = true;
               stale = false;
               onChange({ headings, activeIndex });
