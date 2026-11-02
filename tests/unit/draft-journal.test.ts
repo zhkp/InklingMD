@@ -19,6 +19,12 @@ vi.mock("../../src/lib/fs", () => ({
     files.set(path, content);
     writes.push({ path, options });
   }),
+  // 会话标记现在走恢复区通道（`write_recovery_file`）：同一个内存文件表，便于断言
+  writeRecoveryFile: vi.fn(async (path: string, content: string, durability?: string) => {
+    if (failWrite) throw new Error("disk full");
+    files.set(path, content);
+    writes.push({ path, options: { durability } });
+  }),
 }));
 
 import { writeTextFile } from "../../src/lib/fs";

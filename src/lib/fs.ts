@@ -306,6 +306,59 @@ export async function renamePath(from: string, to: string): Promise<void> {
   }
 }
 
+/** `recovery/` 下的条目（设计 §10 `list_dir_files`） */
+export interface RecoveryDirEntry {
+  name: string;
+  isDir: boolean;
+  size: number;
+  mtimeUs: number;
+}
+
+/**
+ * 只列一层（递归由调用方逐层做）。`includeTemps` 默认 false：
+ * 原子写残留 `.xxx.tmp.*` 不是草稿，列进面板会被当成可恢复内容。
+ */
+export async function listDirFiles(dirPath: string, includeTemps = false): Promise<RecoveryDirEntry[]> {
+  if (isTauri()) {
+    return invoke<RecoveryDirEntry[]>("list_dir_files", { dirPath, includeTemps });
+  }
+  const { MOCK_FILE_CONTENT } = await import("./mockFs");
+  const prefix = dirPath.endsWith("/") ? dirPath : `${dirPath}/`;
+  const out = new Map<string, RecoveryDirEntry>();
+  for (const [key, value] of Object.entries(MOCK_FILE_CONTENT)) {
+    if (!key.startsWith(prefix)) continue;
+    const rest = key.slice(prefix.length);
+    const name = rest.split("/")[0];
+    if (!name) continue;
+    if (!includeTemps && name.startsWith(".") && name.includes(".tmp.")) continue;
+    const isDir = rest.includes("/");
+    if (!out.has(name)) {
+      out.set(name, {
+        name,
+        isDir,
+        size: isDir ? 0 : (value as string).length,
+        mtimeUs: 0,
+      });
+    }
+  }
+  return [...out.values()].sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/**
+ * 写 `recovery/` 下的文件（草稿 / 会话标记 / 崩溃归档）。
+ * 耐久由调用方给：平时防抖用 `none`，退出与「标记必须留下」用 `sync`。
+ */
+export async function writeRecoveryFile(
+  path: string,
+  content: string,
+  durability: "sync" | "none" = "none",
+): Promise<void> {
+  if (isTauri()) {
+    return invoke<void>("write_recovery_file", { path, content, durability });
+  }
+  return writeTextFile(path, content, { createParents: true, durability });
+}
+
 /** 删除文件或目录（目录递归）。浏览器 mock 仅清内容表 */
 export async function deletePath(path: string): Promise<void> {
   if (isTauri()) {

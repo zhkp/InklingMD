@@ -21,6 +21,11 @@ vi.mock("../../src/components/Editor/markdown-publisher", () => ({
 }));
 vi.mock("../../src/lib/fs", () => ({
   writeTextFile: vi.fn(async () => undefined),
+  // 草稿现在走恢复区专用通道；这里把它转成 invoke 以便断言真实命令名
+  writeRecoveryFile: vi.fn(async (path: string, content: string, durability?: string) => {
+    await invokeMock("write_recovery_file", { path, content, durability });
+  }),
+  listDirFiles: vi.fn(async () => []),
   readTextFile: vi.fn(async () => "基线"),
   readDocument: vi.fn(async () => ({ content: "磁盘内容", stat: { mtimeUs: 5_000, size: 4 } })),
   fileStat: vi.fn(async () => ({ mtimeUs: 5_000, size: 4 })),
@@ -76,12 +81,12 @@ beforeEach(() => {
 });
 
 describe("#365 默认 IO 的命令名", () => {
-  it("写草稿用 write_text_file，删草稿用 delete_path（写错命令名会静默失败）", async () => {
+  it("写草稿用 write_recovery_file，删草稿用 delete_path（写错命令名会静默失败）", async () => {
     const written = await writeDraftNow({ path: "/w/a.md", isUntitled: false, content: "x" });
     expect(written).toBe(true);
     expect(invokeMock).toHaveBeenCalledWith(
-      "write_text_file",
-      expect.objectContaining({ filePath: expect.stringContaining("/drafts/") }),
+      "write_recovery_file",
+      expect.objectContaining({ path: expect.stringContaining("/drafts/") }),
     );
 
     await clearDraft("/w/a.md");
@@ -111,8 +116,8 @@ describe("#365 多窗口隔离", () => {
     const ok = await writeDraftNow({ path: "/w/a.md", isUntitled: false, content: "x" });
     expect(ok).toBe(true);
 
-    const writeCall = invokeMock.mock.calls.find((c) => c[0] === "write_text_file");
-    expect(String(writeCall?.[1]?.filePath)).toContain("/recovery/inkling-test/drafts/");
+    const writeCall = invokeMock.mock.calls.find((c) => c[0] === "write_recovery_file");
+    expect(String(writeCall?.[1]?.path)).toContain("/recovery/inkling-test/drafts/");
   });
 
   it("两个不同 label 各写自己的 session.json（草稿隔离不等于标记隔离）", async () => {
@@ -140,10 +145,12 @@ describe("#365 多窗口隔离", () => {
     await flushAllDrafts({ durability: "sync" });
     await markUncleanExit();
 
-    const sessionCalls = vi
-      .mocked(writeTextFile)
-      .mock.calls.filter((c) => String(c[0]).endsWith("/session.json"));
-    const byPath = new Map(sessionCalls.map((c) => [String(c[0]), JSON.parse(String(c[1]))]));
+    const sessionCalls = invokeMock.mock.calls.filter(
+      (c) => c[0] === "write_recovery_file" && String(c[1]?.path).endsWith("/session.json"),
+    );
+    const byPath = new Map(
+      sessionCalls.map((c) => [String(c[1].path), JSON.parse(String(c[1].content))]),
+    );
     // 两个 window 的标记各写各的文件，不互相覆盖
     expect(byPath.get("/appdata/recovery/inkling-a/session.json")?.windowLabel).toBe("inkling-a");
     expect(byPath.get("/appdata/recovery/inkling-b/session.json")?.windowLabel).toBe("inkling-b");
@@ -167,10 +174,9 @@ describe("#365 多窗口隔离", () => {
 
     await markCleanExit();
 
-    const paths = vi
-      .mocked(writeTextFile)
-      .mock.calls.filter((c) => String(c[0]).endsWith("/session.json"))
-      .map((c) => String(c[0]));
+    const paths = invokeMock.mock.calls
+      .filter((c) => c[0] === "write_recovery_file" && String(c[1]?.path).endsWith("/session.json"))
+      .map((c) => String(c[1].path));
     expect(paths).toContain("/appdata/recovery/inkling-test/session.json");
     expect(paths).not.toContain("/appdata/recovery/main/session.json");
   });

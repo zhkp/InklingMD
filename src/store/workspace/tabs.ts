@@ -1123,7 +1123,8 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
       // 更新活跃 tab 的内容与 dirty
       if (activeTabPath) {
         const nextTabs = openTabs.map((t) =>
-          t.path === activeTabPath ? { ...t, content, dirty: true } : t,
+          // 用户动手编辑了：恢复标记失效，重新进入自动保存调度
+          t.path === activeTabPath ? { ...t, content, dirty: true, recovered: false } : t,
         );
         set({ openTabs: nextTabs, currentContent: content, dirty: true });
       } else {
@@ -1139,7 +1140,7 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
       bumpPathRev(path);
       scheduleDraft({ path, isUntitled: !!tab.isUntitled, content });
       const nextTabs = openTabs.map((t) =>
-        t.path === path ? { ...t, content, dirty: true } : t,
+        t.path === path ? { ...t, content, dirty: true, recovered: false } : t,
       );
       // 同步所有当前拥有该 path 的镜像：活跃 tab 用 currentContent、
       // 分屏用 splitContent。swap 后的迟到 flush 可能指向新主/新分屏文件，

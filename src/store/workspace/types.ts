@@ -44,6 +44,8 @@ export interface OpenTab {
   /** 该 tab 的读取/保存错误（后台 tab 也可见；null 表示无错误）。
    *  与 `diskContent`/`diskStat` 分开：错误不清基线，基线不清错误。 */
   saveError?: string | null;
+  /** 由崩溃恢复/合并得来、用户还没动过：不参与自动保存（避免 2s 后静默覆盖磁盘） */
+  recovered?: boolean;
   /** 该标签页自身的保存进行中标志（issue #148：保存互斥按 tab 生效，
    *  避免某个 tab 的另存为/冲突对话框挂起期间吞掉其他 tab 的保存） */
   saving?: boolean;

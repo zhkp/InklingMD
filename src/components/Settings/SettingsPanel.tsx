@@ -2,10 +2,17 @@
 // 集中展示可由用户开关的编辑器行为，直接读写 settings store，实时生效。
 // 包含：专注模式、打字机模式、公式自动编号、代码块语法高亮主题。
 
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { useSettings, type CodeBlockTheme } from "../../store/settings";
 import { IconX } from "../icons";
 import "./SettingsPanel.css";
+import { RecoveryPanel } from "../Recovery/RecoveryPanel";
+import {
+  applyRecovery,
+  discardDrafts,
+  listDrafts,
+  type RecoverableDraft,
+} from "../../lib/session-recovery";
 
 const CODE_THEME_OPTIONS: { value: CodeBlockTheme; label: string }[] = [
   { value: "oneDark", label: "One Dark（深色）" },
@@ -27,6 +34,10 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
   const setAutoPair = useSettings((s) => s.setAutoPair);
   const setSpellcheck = useSettings((s) => s.setSpellcheck);
   const reset = useSettings((s) => s.reset);
+
+  // 恢复面板：打开时才读盘（正常情况下 recovery/ 目录可能还不存在）
+  const [recoveryOpen, setRecoveryOpen] = useState(false);
+  const [recoveryDrafts, setRecoveryDrafts] = useState<RecoverableDraft[]>([]);
 
   // Esc 键关闭面板
   useEffect(() => {
@@ -129,7 +140,41 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
               ))}
             </select>
           </div>
+
+          <div className="settings-row">
+            <div className="settings-label">
+              <span className="settings-name">恢复未保存内容</span>
+              <span className="settings-desc">
+                查看崩溃 / 强制结束后留下的草稿副本，可选择性恢复或丢弃（超过 7 天的会自动清理）。
+              </span>
+            </div>
+            <button
+              onClick={async () => {
+                setRecoveryDrafts(await listDrafts());
+                setRecoveryOpen(true);
+              }}
+            >
+              查看副本
+            </button>
+          </div>
         </div>
+        {recoveryOpen && (
+          <RecoveryPanel
+            drafts={recoveryDrafts}
+            onClose={() => setRecoveryOpen(false)}
+            onRestore={async (selected) => {
+              // 恢复**不删**草稿：已打开且 dirty 的 tab 不会被合并（内容只在草稿里），
+              // 新建的恢复 tab 在下一次编辑前也没有新副本——删了就是净丢内容。
+              // 草稿由「保存成功」或 TTL 清理收尾（与启动弹窗同一契约）。
+              await applyRecovery(selected);
+              setRecoveryOpen(false);
+            }}
+            onDiscard={async (selected) => {
+              await discardDrafts(selected);
+              setRecoveryDrafts(await listDrafts());
+            }}
+          />
+        )}
         <div className="settings-footer">
           <button className="settings-reset" onClick={reset}>
             恢复默认

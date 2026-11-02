@@ -117,6 +117,9 @@ export function useAutoSave() {
     const state = useWorkspace.getState();
     for (const tab of state.openTabs) {
       // 未命名草稿（交互另存为才有意义）、已删除、冲突待处理：不进调度
+      // 恢复/合并出来的 tab 在用户动手之前不自动保存：基线是恢复时刻的磁盘内容，
+      // 直接写盘会把停机期间的外部修改静默覆盖
+      if (tab.recovered) continue;
       if (!tab.dirty || tab.saving || tab.isUntitled) continue;
       if (tab.deletedOnDisk || tab.conflictPending) continue;
 
