@@ -15,8 +15,9 @@ vi.mock("../../src/components/Editor/markdown-publisher", () => ({
 }));
 
 // `applyRecovery` 对「有路径的草稿」会读一次当前磁盘基线，避免保存时静默覆盖
-const { readDocumentMock, saveDocumentMock } = vi.hoisted(() => ({
+const { readDocumentMock, saveDocumentMock, readTextFileMock } = vi.hoisted(() => ({
   readDocumentMock: vi.fn(),
+  readTextFileMock: vi.fn(async () => "基线"),
   saveDocumentMock: vi.fn(async (_p: string, content: string) => ({
     kind: "written" as const,
     stat: { mtimeUs: 9_000, size: content.length },
@@ -26,7 +27,7 @@ const { readDocumentMock, saveDocumentMock } = vi.hoisted(() => ({
 vi.mock("../../src/lib/fs", () => ({
   readDocument: readDocumentMock,
   saveDocument: saveDocumentMock,
-  readTextFile: vi.fn(async () => "基线"),
+  readTextFile: readTextFileMock,
   fileMtime: vi.fn(async () => 5),
   fileStat: vi.fn(async () => ({ mtimeUs: 5_000, size: 4 })),
   writeTextFile: vi.fn(async () => undefined),
@@ -89,6 +90,8 @@ beforeEach(() => {
   readDocumentMock
     .mockReset()
     .mockResolvedValue({ content: "磁盘内容", stat: { mtimeUs: 5_000, size: 4 } });
+  readTextFileMock.mockReset().mockResolvedValue("磁盘内容");
+  saveDocumentMock.mockClear();
   __setRecoveryIo({
     appDataDir: async () => "/appdata",
     readTextFile: async (path) => {
@@ -265,6 +268,29 @@ describe("#365 恢复与丢弃", () => {
 
     expect(deleted).toBe(1);
     expect(files.has(file)).toBe(false);
+  });
+});
+
+describe("#365 恢复出的 tab 必须保留磁盘换行风格", () => {
+  it("CRLF 文件恢复后保存：写盘内容仍含 \\r\\n（否则整份文件被改成 LF）", async () => {
+    const crlf = "第一行\r\n第二行\r\n";
+    files.set(SESSION, JSON.stringify({ version: 1, cleanExit: false }));
+    seedDraft("/w/a.md", { content: "第一行\r\n第二行\r\n崩溃新增", updatedAt: Date.now() });
+    readDocumentMock.mockResolvedValue({ content: crlf, stat: { mtimeUs: 5_000, size: crlf.length } });
+    // 写前比对读到的磁盘内容必须与基线一致，否则会走冲突询问而不是直接写
+    readTextFileMock.mockResolvedValue(crlf);
+
+    await applyRecovery(await listDrafts());
+
+    const tab = useWorkspace.getState().openTabs[0];
+    expect(tab.eol).toBe("crlf");
+    expect(tab.finalNewline).toBe(true);
+
+    await useWorkspace.getState().saveTab("/w/a.md", { interactive: true });
+
+    const written = saveDocumentMock.mock.calls.at(-1)?.[1] as string;
+    expect(written).toContain("\r\n");
+    expect(written.includes("\n") && !written.includes("\r\n")).toBe(false);
   });
 });
 

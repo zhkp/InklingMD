@@ -12,6 +12,7 @@
 import { isTauri } from "@tauri-apps/api/core";
 import { appDataDir } from "@tauri-apps/api/path";
 import { ensureWindowLabel, currentWindowLabel, draftFileKey } from "./draft-journal";
+import { detectEol } from "./eol";
 import { useWorkspace } from "../store/workspace";
 
 /** 设计 §8.3：7 天 TTL；只清超期且非 pinned 的草稿 */
@@ -224,12 +225,16 @@ export async function applyRecovery(
     let diskContent: string | undefined;
     let diskStat: { mtimeUs: number; size: number } | undefined;
     let diskMtime: number | undefined;
+    let eol: ReturnType<typeof detectEol> | undefined;
     if (!draft.isUntitled) {
       try {
         const snapshot = await readDocument(draft.tabPath);
         diskContent = snapshot.content;
         diskStat = snapshot.stat;
         diskMtime = snapshot.stat.mtimeUs / 1000;
+        // 换行风格必须跟磁盘一致：恢复出的 tab 没有这份元信息时，
+        // 保存会用 LF 重写整份 CRLF 文件（#401 刚做完的换行保真就白做了）
+        eol = detectEol(snapshot.content);
       } catch {
         // 文件已不在：留空基线，保存时会走「必须存在」的写盘并被拒
       }
@@ -245,6 +250,10 @@ export async function applyRecovery(
       diskContent,
       diskStat,
       diskMtime,
+      // 与 openFile 同源：不填就会按 LF 写回，整份 CRLF 文件被重写
+      eol: eol?.eol,
+      eolMixed: eol?.mixed,
+      finalNewline: eol?.finalNewline,
       // 用户还没动过：不排自动保存（否则 2s 后把停机期间的外部修改静默覆盖）
       recovered: true,
     });
