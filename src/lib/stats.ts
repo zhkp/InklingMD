@@ -1,6 +1,8 @@
 // 字数统计工具
 // 中文按字计，英文按词计，混合时取中文数 + 英文词数
 
+import { perfProbeEnd, perfProbeStart } from "./perf-probe";
+
 export interface DocStats {
   /** 字数（中文按字，英文按词，数字串算一个词） */
   words: number;
@@ -16,7 +18,9 @@ const WORDS_PER_MINUTE = 300; // 中文阅读速度，约 300 字/分钟
 
 /** 统计 Markdown 文本的字数等信息 */
 export function countStats(text: string): DocStats {
+  const probeStart = perfProbeStart();
   if (!text) {
+    perfProbeEnd("stats", probeStart);
     return { words: 0, chars: 0, lines: 0, readingMinutes: 0 };
   }
 
@@ -37,5 +41,6 @@ export function countStats(text: string): DocStats {
   const words = cjkCount + enWords.length;
   const readingMinutes = words > 0 ? Math.max(1, Math.ceil(words / WORDS_PER_MINUTE)) : 0;
 
+  perfProbeEnd("stats", probeStart);
   return { words, chars, lines, readingMinutes };
 }

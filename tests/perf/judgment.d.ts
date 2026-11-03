@@ -109,6 +109,8 @@ export function confirmVerdict(overRounds: boolean[]): "pass" | "warn" | "fail";
 export const RESOLUTION_WARN_PCT: number;
 /** 会话标定指标（进基线但不参与判定，issue #236） */
 export const SESSION_PROBE_METRICS: string[];
+/** 归因指标（进基线但不参与判定，issue #379） */
+export const ATTRIBUTION_METRICS: string[];
 /** 比基线差的相对行占比达到此比例时，报告提示「疑似整机变慢」（默认 70，仅披露不改判定） */
 export const DRIFT_WARN_PCT: number;
 /**

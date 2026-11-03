@@ -10,9 +10,12 @@ import { expect, test } from "@playwright/test";
 import { PERF_DOC_PATH } from "../inject";
 import { bootWithFiles, openFileInTree } from "../helpers";
 import {
+  createAttributionAggregator,
   createSessionProbe,
   installObservers,
+  installPerfProbe,
   readObservers,
+  readPerfProbe,
   runScrollFrames,
   waitRenderStable,
 } from "../metrics";
@@ -55,6 +58,7 @@ for (const tier of ctx.tiers) {
 
       const fixture = fixtureFor(tier, kind);
       const probe = createSessionProbe();
+      const attribution = createAttributionAggregator();
       const budget = frameBudgetMs();
       const frameSamples: number[] = [];
       const jankCounts: number[] = [];
@@ -76,11 +80,13 @@ for (const tier of ctx.tiers) {
         });
 
         await page.evaluate(installObservers);
+        await page.evaluate(installPerfProbe);
         const scroll = await page.evaluate(runScrollFrames, {
           frames,
           maxStep: MAX_STEP,
         });
         const observers = await page.evaluate(readObservers);
+        const buckets = await page.evaluate(readPerfProbe);
         // 收尾等滚动稳定（在计时窗口之外，避免把 tail settle 算进帧间隔）
         await waitScrollConverged(page, EDITOR_SCROLL, 120_000);
 
@@ -98,6 +104,7 @@ for (const tier of ctx.tiers) {
         if (round >= ctx.warmups) {
           // 标定负载：#236 与编辑器代码无关的固定工作量，用于把「机器慢」与「代码回归」分开
           await probe.measure(page);
+          attribution.add(buckets);
           frameSamples.push(...scroll.intervals);
           jankCounts.push(jankCount);
           jankRates.push(Math.round((jankCount / frames) * 1000) / 10);
@@ -132,6 +139,7 @@ for (const tier of ctx.tiers) {
         samples: { frameMs: frameSamples },
         scalars: {
           ...probe.scalars(),
+          ...attribution.scalars(),
           // 帧预算与步长是测量配置，随样本一起落盘（report 只比较白名单指标，不会误判为性能）
           frameBudgetMs: budget,
           jankFactor: JANK_FACTOR,

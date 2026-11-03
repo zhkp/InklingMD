@@ -11,10 +11,14 @@ import { PERF_DOC_PATH } from "../inject";
 import { bootWithFiles, openFileInTree } from "../helpers";
 import {
   armTiming,
+  createAttributionAggregator,
   createSessionProbe,
   installObservers,
+  installPerfProbe,
   readObservers,
+  readPerfProbe,
   readTimingStart,
+  waitFormulaSettled,
   waitRenderStable,
   waitTwoFrames,
 } from "../metrics";
@@ -41,15 +45,22 @@ for (const tier of ctx.tiers) {
 
       const fixture = fixtureFor(tier, kind);
       const probe = createSessionProbe();
+      const attribution = createAttributionAggregator();
       const ttiSamples: number[] = [];
       const longTaskCount: number[] = [];
       const longTaskMs: number[] = [];
       const clsValues: number[] = [];
       const heapDeltas: number[] = [];
+      const formulaReadyMs: number[] = [];
+      const formulaNodeViews: number[] = [];
+      const formulaRendered: number[] = [];
+      const formulaLateLongTaskCount: number[] = [];
+      const formulaLateLongTaskMs: number[] = [];
 
       for (let round = 0; round < ctx.warmups + ctx.rounds; round += 1) {
         await bootWithFiles(page, [{ path: PERF_DOC_PATH, content: fixture.content }]);
         await page.evaluate(installObservers);
+        await page.evaluate(installPerfProbe);
         await page.evaluate(armTiming, { event: "pointerdown" } as const);
 
         await openFileInTree(page, PERF_DOC_PATH, 120_000);
@@ -62,8 +73,44 @@ for (const tier of ctx.tiers) {
         const startAt = await page.evaluate(readTimingStart);
         const observers = await page.evaluate(readObservers);
 
+        // TTI 的既有口径不变（上面已读完判定用观测值）；公式归因在其后单独等待：
+        // KaTeX 动态导入可能在 TTI 之后才落地，若不等待就会把「还没渲染」记成「零成本」。
+        const formula = await page.evaluate(waitFormulaSettled, {
+          maxFrames: 1800,
+        });
+        const observersAfterFormula = await page.evaluate(readObservers);
+        const buckets = await page.evaluate(readPerfProbe);
+
         // warm-up 轮次只用来消除 Vite 首次编译 / PM 首次挂载 / JIT 预热的影响
         if (round >= ctx.warmups) {
+          // 公式前提与完成条件都只在 measured 轮断言：warmup 的结果本就要丢弃，
+          // 它的一次 KaTeX 抖动不该把整场景判成 UNMEASURED（exit 2）。
+          // 公式密集档必须真的有 200+ 公式节点（#376 的测量前提），否则数据不能用于决策
+          if (
+            kind === "rich" &&
+            (tier === "M" || tier === "L" || tier === "XL")
+          ) {
+            expect(
+              formula.nodeViews,
+              `${id}：公式节点数不足 200（实际 ${formula.nodeViews}），不满足 #376 测量前提`,
+            ).toBeGreaterThanOrEqual(200);
+            expect(
+              formula.rendered + formula.empty,
+              `${id}：KaTeX 未在等待窗口内渲染完全（${formula.rendered}+${formula.empty} 空/${formula.nodeViews}）`,
+            ).toBeGreaterThanOrEqual(formula.nodeViews);
+          }
+          // 含公式档位必须先确认「等到了完成条件」（#379 评审 P1）：帧预算耗尽时
+          // formula.at 只是超时时刻，拿它当 formulaReadyMs 等于把「还没渲染完」
+          // 记成「渲染耗时」，正好破坏 #376「先测量再决定」的证据边界。
+          // 测量失败就判红——本轮不落 raw，场景按「未测量」处理（exit 2）。
+          if (formula.nodeViews > 0) {
+            expect(
+              formula.complete,
+              `${id}：KaTeX 未在 ${formula.frames} 帧内渲染完全` +
+                `（${formula.rendered}+${formula.empty} 空/${formula.nodeViews}），` +
+                `公式归因按测量失败处理`,
+            ).toBe(true);
+          }
           // 标定负载：#236 与编辑器代码无关的固定工作量，用于把「机器慢」与「代码回归」分开
           await probe.measure(page);
           ttiSamples.push(endAt - startAt);
@@ -75,6 +122,20 @@ for (const tier of ctx.tiers) {
               ? Math.round((observers.heapEndMB - observers.heapStartMB) * 100) / 100
               : 0,
           );
+          attribution.add(buckets);
+          // 走到这里说明上面「等到完成条件」的断言已通过，记录的是完整样本
+          if (formula.nodeViews > 0) {
+            formulaReadyMs.push(formula.at - startAt);
+            formulaNodeViews.push(formula.nodeViews);
+            formulaRendered.push(formula.rendered);
+            // 只把 TTI 之后新增的 long task 算作「公式尾部渲染」的归因
+            formulaLateLongTaskCount.push(
+              Math.max(0, observersAfterFormula.longTaskCount - observers.longTaskCount),
+            );
+            formulaLateLongTaskMs.push(
+              Math.max(0, observersAfterFormula.longTaskMs - observers.longTaskMs),
+            );
+          }
         }
       }
 
@@ -98,6 +159,16 @@ for (const tier of ctx.tiers) {
         samples: { ttiMs: ttiSamples },
         scalars: {
           ...probe.scalars(),
+          ...attribution.scalars(),
+          ...(formulaReadyMs.length > 0
+            ? {
+                formulaReadyMs: avg(formulaReadyMs),
+                formulaNodeViews: avg(formulaNodeViews),
+                formulaRendered: avg(formulaRendered),
+                formulaLateLongTaskCount: avg(formulaLateLongTaskCount),
+                formulaLateLongTaskMs: avg(formulaLateLongTaskMs),
+              }
+            : {}),
           longTaskCount: avg(longTaskCount),
           longTaskMs: avg(longTaskMs),
           cls: avg(clsValues),

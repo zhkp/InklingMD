@@ -36,6 +36,7 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 
 import { resolve, join } from "node:path";
 import { baselineComparability, MODE_FALLBACK, ROUNDS_FALLBACK } from "./comparability.js";
 import {
+  ATTRIBUTION_METRICS,
   COMPARED_SCALARS,
   confirmVerdict,
   COUNT_FLOOR_FACTOR,
@@ -259,6 +260,31 @@ function absoluteRows(raw) {
   return rows;
 }
 
+/**
+ * 归因行（issue #379）：只披露、不判定。
+ * base 缺失时保留 `—`（新指标尚未播种进基线），不能伪造成 0。
+ *
+ * 可比性门禁与主判定**同一份**（#379 评审 P1）：baseline 只在
+ * `baselineComparability().ok` 时传入。归因行同样要显示变化率，若拿不同
+ * fixture / 不同环境的旧参考值来算，「钱花在哪」会变成伪对照——连"没有变化"
+ * 都是假的。不可比时传 incomparableReason，报告里替代参考值并显式标注原因。
+ */
+function attributionRows(raw, baseline, incomparableReason) {
+  const rows = [];
+  for (const metric of ATTRIBUTION_METRICS) {
+    const cur = raw.scalars?.[metric];
+    if (typeof cur !== "number") continue;
+    const base = baseline ? baselineValue(baseline, metric) : undefined;
+    rows.push({
+      metric,
+      base: typeof base === "number" ? base : null,
+      cur,
+      incomparable: incomparableReason ?? null,
+    });
+  }
+  return rows;
+}
+
 /** 计算一次 run 相对 baseline 的所有指标判定 */
 function compareRun(raw, baseline) {
   const rows = [];
@@ -364,9 +390,13 @@ function buildStats(raw) {
   for (const [metric, samples] of Object.entries(raw.samples ?? {})) {
     metrics[metric] = statsFor(samples);
   }
-  // 判定白名单 + 会话标定指标：标定值必须**持久化**（否则基线没有参考值与 3σ 门槛，
-  // 「环境归因」永远判不出来），但它不参与判定——见 judgment.SESSION_PROBE_METRICS 的说明。
-  for (const metric of [...COMPARED_SCALARS, ...SESSION_PROBE_METRICS]) {
+  // 判定白名单 + 会话标定指标 + 归因指标：后两者必须**持久化**（否则基线没有参考值，
+  // 「环境归因 / 钱花在哪」永远看不出来），但都不参与判定——见 judgment 里的说明。
+  for (const metric of [
+    ...COMPARED_SCALARS,
+    ...SESSION_PROBE_METRICS,
+    ...ATTRIBUTION_METRICS,
+  ]) {
     if (metric in (raw.scalars ?? {})) {
       const v = raw.scalars[metric];
       metrics[metric] = { median: v, p95: null, max: null, n: null, scalar: true };
@@ -809,6 +839,14 @@ function main() {
       baselineState: state.reason,
       metrics: verdicts,
       overMetrics,
+      // 归因指标（#379）：不参与判定，只披露统计 / 大纲 / 公式各花在哪。
+      // baseline 与主判定同一门禁：不可比时不传，避免把旧 fixture / 旧环境的
+      // 参考值算成变化率（归因行也显示百分比，同样会误导）。
+      attribution: attributionRows(
+        raw,
+        state.ok ? baseline : null,
+        state.ok ? null : state.reason,
+      ),
       // 会话标定（#236）：不参与判定，只供「环境归因」披露使用（首轮 / 复测 / 确认轮三轮对账）
       sessionProbe: probe,
       // 该场景是否进入了确认轮（#294）：由 retest2.json 决定，不是「碰巧有第三轮数据」。
@@ -854,6 +892,7 @@ function main() {
           baselineState: `UNMEASURED(${status})`,
           metrics: [],
           overMetrics: [],
+          attribution: [],
           sessionProbe: null,
           // 合成对象没进任何轮次，#294 的新字段一律置空（它不参与判定，也不该被披露成候选）。
           // 字段集必须与正常场景**完全一致**——否则 latest.json 里同一份 schema
@@ -1241,6 +1280,32 @@ function main() {
         `| ${r.id} | ${m.metric} | ${m.base} | ${m.cur} | ${m.retest ?? "—"} | ${m.retest2 ?? "—"} | ${delta} | ${noiseCell} | ${
           m.verdict
         }${m.note ? `（${m.note}）` : ""} |`,
+      );
+    }
+  }
+  // 归因指标（issue #379）：与判定表分开，避免被读成 PASS/FAIL 行。
+  const attributionRowsAll = results.flatMap((r) =>
+    (r.attribution ?? []).map((row) => ({ id: r.id, ...row })),
+  );
+  if (attributionRowsAll.length > 0) {
+    lines.push("");
+    lines.push("### 归因指标（进基线、不参与判定，issue #379）");
+    lines.push("");
+    lines.push("| 场景 | 指标 | 基线参考 | 本次 | 变化 |");
+    lines.push("|---|---|---|---|---|");
+    for (const row of attributionRowsAll) {
+      // 不可比：不展示旧参考值，也不展示变化率（那会是伪对照），只标原因
+      const baseCell = row.incomparable
+        ? `不可比：${row.incomparable}`
+        : (row.base ?? "—");
+      const delta =
+        row.incomparable ||
+        typeof row.base !== "number" ||
+        row.base === 0
+          ? "—"
+          : `${(((row.cur - row.base) / row.base) * 100).toFixed(1)}%`;
+      lines.push(
+        `| ${row.id} | ${row.metric} | ${baseCell} | ${round(row.cur)} | ${delta} |`,
       );
     }
   }
