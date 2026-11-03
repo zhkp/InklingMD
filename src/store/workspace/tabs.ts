@@ -1123,7 +1123,8 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
       // 更新活跃 tab 的内容与 dirty
       if (activeTabPath) {
         const nextTabs = openTabs.map((t) =>
-          t.path === activeTabPath ? { ...t, content, dirty: true } : t,
+          // 用户动手编辑了：恢复标记失效，重新进入自动保存调度
+          t.path === activeTabPath ? { ...t, content, dirty: true, recovered: false } : t,
         );
         set({ openTabs: nextTabs, currentContent: content, dirty: true });
       } else {
@@ -1139,7 +1140,7 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
       bumpPathRev(path);
       scheduleDraft({ path, isUntitled: !!tab.isUntitled, content });
       const nextTabs = openTabs.map((t) =>
-        t.path === path ? { ...t, content, dirty: true } : t,
+        t.path === path ? { ...t, content, dirty: true, recovered: false } : t,
       );
       // 同步所有当前拥有该 path 的镜像：活跃 tab 用 currentContent、
       // 分屏用 splitContent。swap 后的迟到 flush 可能指向新主/新分屏文件，
@@ -1702,6 +1703,8 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
               dirty: isStillDirty || receiptUntrusted,
               conflictPending: false,
               saving: false,
+              // 已经落盘：不再是「用户还没动过的恢复内容」，让自动保存恢复正常调度
+              recovered: false,
               // 写成功即清掉该 tab 的失败痕迹（后台 tab 的 saveError 只落在自己身上）
               saveError: null,
               // 写盘成功即说明文件已（重新）落在 savePath 上

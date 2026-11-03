@@ -15,8 +15,24 @@ vi.mock("../../src/components/Editor/markdown-publisher", () => ({
 }));
 
 // `applyRecovery` 对「有路径的草稿」会读一次当前磁盘基线，避免保存时静默覆盖
-const { readDocumentMock } = vi.hoisted(() => ({ readDocumentMock: vi.fn() }));
-vi.mock("../../src/lib/fs", () => ({ readDocument: readDocumentMock }));
+const { readDocumentMock, saveDocumentMock, readTextFileMock } = vi.hoisted(() => ({
+  readDocumentMock: vi.fn(),
+  readTextFileMock: vi.fn(async () => "基线"),
+  saveDocumentMock: vi.fn(async (_p: string, content: string) => ({
+    kind: "written" as const,
+    stat: { mtimeUs: 9_000, size: content.length },
+    foreignWrite: false,
+  })),
+}));
+vi.mock("../../src/lib/fs", () => ({
+  readDocument: readDocumentMock,
+  saveDocument: saveDocumentMock,
+  readTextFile: readTextFileMock,
+  fileMtime: vi.fn(async () => 5),
+  fileStat: vi.fn(async () => ({ mtimeUs: 5_000, size: 4 })),
+  writeTextFile: vi.fn(async () => undefined),
+  writeRecoveryFile: vi.fn(async () => undefined),
+}));
 const { messageMock } = vi.hoisted(() => ({ messageMock: vi.fn() }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ message: messageMock, ask: vi.fn(), save: vi.fn() }));
 
@@ -74,6 +90,8 @@ beforeEach(() => {
   readDocumentMock
     .mockReset()
     .mockResolvedValue({ content: "磁盘内容", stat: { mtimeUs: 5_000, size: 4 } });
+  readTextFileMock.mockReset().mockResolvedValue("磁盘内容");
+  saveDocumentMock.mockClear();
   __setRecoveryIo({
     appDataDir: async () => "/appdata",
     readTextFile: async (path) => {
@@ -175,11 +193,50 @@ describe("#365 恢复与丢弃", () => {
     expect(state.activeTabPath).toBe("/w/a.md");
   });
 
-  it("已经打开的 path 不会被恢复动作覆盖", async () => {
+  it("已打开的干净 tab：草稿内容合并进来（不新建重复 tab）", async () => {
     files.set(SESSION, JSON.stringify({ version: 1, cleanExit: false }));
-    seedDraft("/w/a.md", { content: "草稿" });
+    const draftFile = seedDraft("/w/a.md", { content: "草稿" });
     useWorkspace.setState({
-      openTabs: [{ path: "/w/a.md", content: "当前编辑中", dirty: false }],
+      openTabs: [{ path: "/w/a.md", content: "上次磁盘内容", dirty: false }],
+      activeTabPath: "/w/a.md",
+    } as never);
+
+    const restored = await applyRecovery(await listDrafts());
+
+    expect(restored.restored).toBe(0);
+    expect(restored.restoredPaths).toEqual(["/w/a.md"]);
+    const state = useWorkspace.getState();
+    expect(state.openTabs).toHaveLength(1);
+    expect(state.openTabs[0].content).toBe("草稿");
+    expect(state.openTabs[0].dirty).toBe(true);
+    // 合并后 content 只在编辑器里（未保存），草稿文件必须留着
+    expect(files.has(draftFile)).toBe(true);
+  });
+
+  it("同一批里同时有合并与新建：合并结果不能被随后的 setState 回滚", async () => {
+    files.set(SESSION, JSON.stringify({ version: 1, cleanExit: false }));
+    seedDraft("/w/open.md", { content: "合并进来的内容", updatedAt: 3_000 });
+    seedDraft("/w/new.md", { content: "新 tab 内容", updatedAt: 2_000 });
+    useWorkspace.setState({
+      openTabs: [{ path: "/w/open.md", content: "上次磁盘内容", dirty: false }],
+      activeTabPath: "/w/open.md",
+    } as never);
+
+    await applyRecovery(await listDrafts());
+
+    const tabs = useWorkspace.getState().openTabs;
+    expect(tabs).toHaveLength(2);
+    const openTab = tabs.find((t) => t.path === "/w/open.md")!;
+    expect(openTab.content).toBe("合并进来的内容");
+    expect(openTab.dirty).toBe(true);
+    expect(tabs.some((t) => t.path === "/w/new.md")).toBe(true);
+  });
+
+  it("已打开的 tab 有本地修改：不覆盖用户内容，草稿保留", async () => {
+    files.set(SESSION, JSON.stringify({ version: 1, cleanExit: false }));
+    const draftFile = seedDraft("/w/a.md", { content: "草稿" });
+    useWorkspace.setState({
+      openTabs: [{ path: "/w/a.md", content: "当前编辑中", dirty: true }],
       activeTabPath: "/w/a.md",
     } as never);
 
@@ -187,6 +244,7 @@ describe("#365 恢复与丢弃", () => {
 
     expect(restored.restored).toBe(0);
     expect(useWorkspace.getState().openTabs[0].content).toBe("当前编辑中");
+    expect(files.has(draftFile)).toBe(true);
   });
 
   it("文件已被删除的草稿：恢复后没有磁盘基线（保存会被 mustExist 拒，不会复活）", async () => {
@@ -210,6 +268,62 @@ describe("#365 恢复与丢弃", () => {
 
     expect(deleted).toBe(1);
     expect(files.has(file)).toBe(false);
+  });
+});
+
+describe("#365 恢复出的 tab 必须保留磁盘换行风格", () => {
+  it("CRLF 文件恢复后保存：写盘内容仍含 \\r\\n（否则整份文件被改成 LF）", async () => {
+    const crlf = "第一行\r\n第二行\r\n";
+    files.set(SESSION, JSON.stringify({ version: 1, cleanExit: false }));
+    seedDraft("/w/a.md", { content: "第一行\r\n第二行\r\n崩溃新增", updatedAt: Date.now() });
+    readDocumentMock.mockResolvedValue({ content: crlf, stat: { mtimeUs: 5_000, size: crlf.length } });
+    // 写前比对读到的磁盘内容必须与基线一致，否则会走冲突询问而不是直接写
+    readTextFileMock.mockResolvedValue(crlf);
+
+    await applyRecovery(await listDrafts());
+
+    const tab = useWorkspace.getState().openTabs[0];
+    expect(tab.eol).toBe("crlf");
+    expect(tab.finalNewline).toBe(true);
+
+    await useWorkspace.getState().saveTab("/w/a.md", { interactive: true });
+
+    const written = saveDocumentMock.mock.calls.at(-1)?.[1] as string;
+    expect(written).toContain("\r\n");
+    expect(written.includes("\n") && !written.includes("\r\n")).toBe(false);
+  });
+});
+
+describe("#365 恢复出来的内容不能被自动保存立刻写盘", () => {
+  it("恢复后 3s 内不排自动保存；用户编辑一次之后才回到调度", async () => {
+    files.set(SESSION, JSON.stringify({ version: 1, cleanExit: false }));
+    seedDraft("/w/a.md", { content: "崩溃前的内容", updatedAt: Date.now() });
+    await applyRecovery(await listDrafts());
+
+    // 只看「调度器有没有排这次保存」：真的走 saveTab 会牵扯写前预检与冲突弹窗，
+    // 那是 save-receipt 用例的职责，这里只需证明 recovered 被跳过
+    const saveTabMock = vi.fn(async () => undefined);
+    useWorkspace.setState({ saveTab: saveTabMock as never });
+
+    vi.useFakeTimers();
+    try {
+      const { renderHook } = await import("@testing-library/react");
+      const { useAutoSave } = await import("../../src/lib/useAutoSave");
+      renderHook(() => useAutoSave());
+
+      await vi.advanceTimersByTimeAsync(3_000);
+      // 基线是「恢复时刻的磁盘内容」：自动写盘会静默覆盖停机期间的外部修改
+      expect(saveTabMock).not.toHaveBeenCalled();
+
+      // 用户真的动手了：标记失效，2s 后正常自动保存
+      useWorkspace.getState().setContent("恢复了并继续编辑");
+      await vi.advanceTimersByTimeAsync(2_100);
+      expect(saveTabMock).toHaveBeenCalledTimes(1);
+      expect(useWorkspace.getState().openTabs[0].recovered).toBe(false);
+    } finally {
+      // 断言失败也必须还原，否则假定时器会污染后续用例（上一版就是这样连累 4 条）
+      vi.useRealTimers();
+    }
   });
 });
 

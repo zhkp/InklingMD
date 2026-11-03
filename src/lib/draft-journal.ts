@@ -83,12 +83,10 @@ export interface JournalIo {
 
 const defaultIo: JournalIo = {
   async writeTextFile(path, content, options) {
-    await invoke("write_text_file", {
-      filePath: path,
-      content,
-      createParents: options?.createParents,
-      durability: options?.durability,
-    });
+    // 走恢复区专用通道（`write_recovery_file`）：它固定 createParents、不需要 expected，
+    // 与文档保存的 `write_text_file` 契约分开，避免误用到「可能被外部程序改写」的路径上
+    const { writeRecoveryFile } = await import("./fs");
+    await writeRecoveryFile(path, content, options?.durability === "sync" ? "sync" : "none");
   },
   async readTextFile(path) {
     return invoke<string>("read_text_file", { filePath: path });

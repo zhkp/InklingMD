@@ -9,7 +9,7 @@
 
 import { isTauri } from "@tauri-apps/api/core";
 import { appDataDir } from "@tauri-apps/api/path";
-import { writeTextFile } from "./fs";
+import { writeRecoveryFile } from "./fs";
 import { useWorkspace } from "../store/workspace";
 import {
   cancelPendingDrafts,
@@ -103,7 +103,9 @@ async function writeSessionMarker(
   }
   try {
     // 标记本身丢了能重写，不需要掉电保证
-    await writeTextFile(
+    // 与草稿走同一条恢复区通道（`write_recovery_file`）：同一个文件两种契约会让
+    // 耐久默认值/父目录语义分叉
+    await writeRecoveryFile(
       file,
       JSON.stringify({
         version: 1,
@@ -111,7 +113,7 @@ async function writeSessionMarker(
         cleanExit,
         savedAt: Date.now(),
       }),
-      { createParents: true, durability },
+      durability,
     );
     return true;
   } catch {

@@ -12,6 +12,7 @@
 import { isTauri } from "@tauri-apps/api/core";
 import { appDataDir } from "@tauri-apps/api/path";
 import { ensureWindowLabel, currentWindowLabel, draftFileKey } from "./draft-journal";
+import { detectEol } from "./eol";
 import { useWorkspace } from "../store/workspace";
 
 /** 设计 §8.3：7 天 TTL；只清超期且非 pinned 的草稿 */
@@ -46,16 +47,14 @@ const defaultIo: RecoveryIo = {
     return readTextFile(path);
   },
   async writeTextFile(path, content, options) {
-    const { writeTextFile } = await import("./fs");
-    await writeTextFile(path, content, {
-      createParents: options?.createParents,
-      durability: options?.durability,
-    });
+    const { writeRecoveryFile } = await import("./fs");
+    await writeRecoveryFile(path, content, options?.durability === "sync" ? "sync" : "none");
   },
   async listDir(path) {
-    const { listDir } = await import("./fs");
-    const tree = await listDir(path);
-    return (tree.children ?? []).map((child) => ({ name: child.name, isDir: child.is_dir }));
+    // `list_dir_files` 只列一层，正好是草稿目录需要的粒度（`drafts/*.json`）
+    const { listDirFiles } = await import("./fs");
+    const entries = await listDirFiles(path);
+    return entries.map((e) => ({ name: e.name, isDir: e.isDir }));
   },
   async deletePath(path) {
     const { deletePath } = await import("./fs");
@@ -210,24 +209,32 @@ export async function applyRecovery(
 ): Promise<{ restored: number; restoredPaths: string[] }> {
   if (drafts.length === 0) return { restored: 0, restoredPaths: [] };
   const state = useWorkspace.getState();
-  const existing = new Set(state.openTabs.map((t) => t.path));
-  const candidates = drafts.filter((d) => !existing.has(d.tabPath));
-  if (candidates.length === 0) return { restored: 0, restoredPaths: [] };
-
   const { readDocument } = await import("./fs");
   const restored = [];
-  for (const draft of candidates) {
+  /** 合并进已打开 tab 的 path：内容已被接手，但仍要排除在本次 TTL 清理之外 */
+  const mergedPaths: string[] = [];
+  for (const draft of drafts) {
+    // 已打开的 tab 走合并：不能因为「这个文件已经开着」就把草稿丢掉，
+    // 也不能无条件用草稿覆盖用户手上正在改的内容
+    if (state.openTabs.some((t) => t.path === draft.tabPath)) {
+      if (mergeDraftIntoExistingTab(draft) === "merged") mergedPaths.push(draft.tabPath);
+      continue;
+    }
     // 有路径的草稿必须先取一次「当前磁盘基线」：否则 `saveTab` 的一致性预检
     // 因为基线为空而永远判「没冲突」，用户点恢复再保存就会静默覆盖外部改动
     let diskContent: string | undefined;
     let diskStat: { mtimeUs: number; size: number } | undefined;
     let diskMtime: number | undefined;
+    let eol: ReturnType<typeof detectEol> | undefined;
     if (!draft.isUntitled) {
       try {
         const snapshot = await readDocument(draft.tabPath);
         diskContent = snapshot.content;
         diskStat = snapshot.stat;
         diskMtime = snapshot.stat.mtimeUs / 1000;
+        // 换行风格必须跟磁盘一致：恢复出的 tab 没有这份元信息时，
+        // 保存会用 LF 重写整份 CRLF 文件（#401 刚做完的换行保真就白做了）
+        eol = detectEol(snapshot.content);
       } catch {
         // 文件已不在：留空基线，保存时会走「必须存在」的写盘并被拒
       }
@@ -243,22 +250,65 @@ export async function applyRecovery(
       diskContent,
       diskStat,
       diskMtime,
+      // 与 openFile 同源：不填就会按 LF 写回，整份 CRLF 文件被重写
+      eol: eol?.eol,
+      eolMixed: eol?.mixed,
+      finalNewline: eol?.finalNewline,
+      // 用户还没动过：不排自动保存（否则 2s 后把停机期间的外部修改静默覆盖）
+      recovered: true,
     });
   }
 
-  const first = restored[0];
-  useWorkspace.setState({
-    openTabs: [...state.openTabs, ...restored],
-    activeTabPath: first.path,
-    // 与 mainTabPatch 的约定一致：无标题草稿也有虚拟路径（untitled-N）
-    currentFile: first.path,
-    currentContent: first.content,
-    dirty: true,
-  } as never);
+  if (restored.length > 0) {
+    const first = restored[0];
+    // 必须重取：循环里的 mergeDraftIntoExistingTab 已经改过 openTabs，
+    // 用进入函数时那份快照整体替换会把合并结果回滚（内容还在草稿里，但 tab 又变干净）
+    const latest = useWorkspace.getState();
+    useWorkspace.setState({
+      openTabs: [...latest.openTabs, ...restored],
+      activeTabPath: first.path,
+      // 与 mainTabPatch 的约定一致：无标题草稿也有虚拟路径（untitled-N）
+      currentFile: first.path,
+      currentContent: first.content,
+      dirty: true,
+      // 新激活的 tab 是「未保存的新内容」：旧 tab 的保存状态不能继承过来
+      saving: false,
+      saveError: null,
+      conflictPending: false,
+      lastSavedAt: null,
+    } as never);
+  }
   return {
     restored: restored.length,
-    restoredPaths: restored.map((tab) => tab.path),
+    restoredPaths: [...restored.map((tab) => tab.path), ...mergedPaths],
   };
+}
+
+/**
+ * 把草稿合并进**已打开**的 tab。
+ *
+ * 只在该 tab 是干净的（没有本地修改）时合并：否则用户手上有一份可能更新的内容，
+ * 用草稿覆盖它就是拿旧副本砸新内容。保留草稿文件，交给「保存成功」或 TTL 收尾。
+ */
+export function mergeDraftIntoExistingTab(
+  draft: RecoverableDraft,
+): "merged" | "kept-existing" {
+  const state = useWorkspace.getState();
+  const tab = state.openTabs.find((t) => t.path === draft.tabPath);
+  if (!tab) return "kept-existing";
+  if (tab.dirty || tab.content === draft.content) return "kept-existing";
+
+  const openTabs = state.openTabs.map((t) =>
+    t.path === draft.tabPath
+        ? { ...t, content: draft.content, dirty: true, recovered: true }
+        : t,
+  );
+  const isActive = state.activeTabPath === draft.tabPath;
+  useWorkspace.setState({
+    openTabs,
+    ...(isActive ? { currentContent: draft.content, dirty: true } : {}),
+  } as never);
+  return "merged";
 }
 
 /**

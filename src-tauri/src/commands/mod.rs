@@ -457,6 +457,84 @@ mod tests {
         assert!(entries[0]["tempPath"].as_str().unwrap().ends_with(".tmp.1-0"));
     }
 
+    /// `list_dir_files`：默认不列原子写残留（`.<name>.tmp.*`），按 name 排序并带 size/mtime
+    #[test]
+    fn list_dir_files_skips_temps_and_reports_meta() {
+        let dir = TestDir::new("list-dir-files");
+        fs::write(dir.path.join("draft-a.json"), "aa").unwrap();
+        fs::write(dir.path.join(".doc.md.tmp.1-0"), "tmp").unwrap();
+        fs::create_dir_all(dir.path.join("nested")).unwrap();
+
+        let entries = list_dir_files_sync(&dir.path.to_string_lossy(), false).unwrap();
+        let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, vec!["draft-a.json", "nested"], "temps 默认不列，且按 name 排序");
+        assert_eq!(entries[0].size, 2, "size 来自 metadata");
+        assert!(entries[0].mtime_us > 0, "mtime 必须可读，否则 TTL 清理会误判");
+        assert!(entries[1].is_dir);
+
+        let with_temps = list_dir_files_sync(&dir.path.to_string_lossy(), true).unwrap();
+        assert!(with_temps.iter().any(|e| e.name.contains(".tmp.")));
+    }
+
+    /// 目录不存在是**正常**的（从没崩溃过）：返回空表而不是让前端把错误当「有草稿」
+    #[test]
+    fn list_dir_files_missing_dir_is_empty() {
+        let dir = TestDir::new("list-dir-missing");
+        let entries =
+            list_dir_files_sync(&dir.path.join("never-existed").to_string_lossy(), false).unwrap();
+        assert!(entries.is_empty());
+    }
+
+    /// 恢复区路径守卫：相对路径与 `..` 一律拒绝（否则就是任意路径写入通道）
+    #[test]
+    fn recovery_path_rejects_relative_and_parent_dir() {
+        let dir = TestDir::new("recovery-path-guard");
+        // 用平台真实的绝对路径：Windows 上 `/appdata/...` 不算 absolute，会误判
+        let ok = dir.path.join("recovery").join("main").join("drafts").join("x.json");
+        let escape = dir.path.join("recovery").join("..").join("escape.json");
+
+        let root = dir.path.join("recovery");
+        assert!(
+            validate_recovery_path("recovery/main/a.json", &root).is_err(),
+            "相对路径必须拒绝"
+        );
+        assert!(
+            validate_recovery_path(&escape.to_string_lossy(), &root).is_err(),
+            "`..` 必须拒绝"
+        );
+        assert!(validate_recovery_path(&ok.to_string_lossy(), &root).is_ok());
+        // 绝对路径但落在恢复区之外：必须拒绝（否则写 Windows\Temp 也能过）
+        let outside = dir.path.join("elsewhere").join("x.json");
+        assert!(validate_recovery_path(&outside.to_string_lossy(), &root).is_err());
+    }
+
+    /// `write_recovery_file` 的落盘语义：自动建父目录、内容原样、不留 temp
+    #[test]
+    fn write_recovery_file_creates_parents() {
+        let dir = TestDir::new("recovery-write");
+        let target = dir
+            .path
+            .join("recovery")
+            .join("main")
+            .join("drafts")
+            .join("x.json");
+
+        write_text_file_with_durability(
+            target.to_string_lossy().to_string(),
+            "{\"a\":1}".into(),
+            WriteTextOptions {
+                must_exist: false,
+                create_parents: true,
+            },
+            write_engine::Durability::None,
+            || {},
+        )
+        .unwrap();
+
+        assert_eq!(fs::read_to_string(&target).unwrap(), "{\"a\":1}");
+        assert_no_dot_temp(target.parent().unwrap());
+    }
+
     /// 目录里不得残留 `.<name>.tmp.*`（半失败时的 temp 必须登记或删除，不能凭空留下）
     fn assert_no_dot_temp(dir: &Path) {
         for entry in fs::read_dir(dir).unwrap() {
@@ -2180,6 +2258,143 @@ fn copy_dir_contents(from: &Path, to: &Path) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// `recovery/` 下的条目（草稿 / 会话 / 崩溃归档）
+///
+/// 设计 §10 §8.3：journal 枚举与清理需要「文件 + 大小 + mtime」，且**只要一层**
+/// （递归由调用方逐层做，避免一次列出整棵子树把内存打满）。
+#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RecoveryFileEntry {
+    pub name: String,
+    pub is_dir: bool,
+    pub size: u64,
+    /// 微秒时间戳；拿不到 stat 时为 0（前端按「未知」处理，不据此判过期）
+    pub mtime_us: u64,
+}
+
+#[tauri::command]
+pub async fn list_dir_files(
+    dir_path: String,
+    include_temps: Option<bool>,
+) -> Result<Vec<RecoveryFileEntry>, String> {
+    let include_temps = include_temps.unwrap_or(false);
+    tauri::async_runtime::spawn_blocking(move || list_dir_files_sync(&dir_path, include_temps))
+        .await
+        .map_err(|e| format!("目录扫描任务失败: {e}"))?
+}
+
+pub(crate) fn list_dir_files_sync(
+    dir_path: &str,
+    include_temps: bool,
+) -> Result<Vec<RecoveryFileEntry>, String> {
+    let dir = Path::new(dir_path);
+    if !dir.is_dir() {
+        // 目录还不存在是**正常**的（从没崩溃过）：返回空表，不报错
+        if !dir.exists() {
+            return Ok(vec![]);
+        }
+        return Err(format!("不是目录: {}", dir.display()));
+    }
+    let mut out = Vec::new();
+    for entry in fs::read_dir(dir).map_err(|e| format!("读取目录失败: {e}"))? {
+        let entry = entry.map_err(|e| format!("读取目录项失败: {e}"))?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        // 原子写残留（`.xxx.tmp.*`）：默认不列，避免面板把半成品当草稿
+        if !include_temps && name.starts_with('.') && name.contains(".tmp.") {
+            continue;
+        }
+        let meta = entry.metadata().ok();
+        out.push(RecoveryFileEntry {
+            name,
+            is_dir: meta.as_ref().map(|m| m.is_dir()).unwrap_or(false),
+            size: meta.as_ref().map(|m| m.len()).unwrap_or(0),
+            mtime_us: meta
+                .as_ref()
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_micros() as u64)
+                .unwrap_or(0),
+        });
+    }
+    // 稳定排序：面板展示与测试都依赖顺序
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(out)
+}
+
+/// 写 `recovery/` 下的文件（草稿 / 会话标记 / 崩溃归档）
+///
+/// 与文档保存走同一个写引擎（temp + rename），但耐久由调用方给：
+/// 平时的防抖草稿用 `none`，退出时用 `sync`。**不提供** `expected` 语义——
+/// 恢复区文件是「自己的目录」，不存在与外部程序抢写的问题。
+/// 恢复区写入的路径守卫（设计 §5.7）：目标必须落在 `<appData>/recovery/` 之内。
+///
+/// 关键词是**边界**而不是「绝对路径」：只判绝对路径 + 无 `..` 仍然能写到
+/// `C:\\Windows\\Temp\\x.json`——那这条守卫就等于没有。
+pub(crate) fn validate_recovery_path(path: &str, recovery_root: &Path) -> Result<(), String> {
+    let p = Path::new(path);
+    if !p.is_absolute() {
+        return Err("恢复区路径必须是绝对路径".to_string());
+    }
+    if p.components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return Err("恢复区路径不得包含 `..`".to_string());
+    }
+    // 词法归一后再比前缀：目标可能尚不存在，不能依赖 canonicalize
+    let mut target = PathBuf::new();
+    for component in p.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            other => target.push(other.as_os_str()),
+        }
+    }
+    let mut root = PathBuf::new();
+    for component in recovery_root.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            other => root.push(other.as_os_str()),
+        }
+    }
+    if !target.starts_with(&root) {
+        return Err(format!("恢复区之外不可写: {}", p.display()));
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn write_recovery_file(
+    app: tauri::AppHandle,
+    path: String,
+    content: String,
+    durability: Option<String>,
+) -> Result<(), String> {
+    use tauri::Manager as _;
+    let root = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("取应用数据目录失败: {e}"))?
+        .join("recovery");
+    validate_recovery_path(&path, &root)?;
+    let durability = match durability.as_deref() {
+        Some("sync") => write_engine::Durability::Sync,
+        _ => write_engine::Durability::None,
+    };
+    tauri::async_runtime::spawn_blocking(move || {
+        write_text_file_with_durability(
+            path,
+            content,
+            WriteTextOptions {
+                must_exist: false,
+                create_parents: true,
+            },
+            durability,
+            || {},
+        )
+    })
+    .await
+    .map_err(|e| format!("恢复区写入任务失败: {e}"))?
 }
 
 /// 删除文件或目录（目录时递归删除）
