@@ -117,7 +117,7 @@ export function RecoveryPanel({
               <div className="settings-row">
                 <div className="settings-label">
                   <span className="settings-desc">
-                    恢复后草稿文件仍会保留，等保存成功或超过 7 天再清理。
+                    恢复后草稿文件仍会保留，直到保存成功或你在这里丢弃它。
                   </span>
                 </div>
                 <div style={{ display: "flex", gap: 8 }}>

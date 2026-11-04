@@ -13,6 +13,8 @@ import { writeRecoveryFile } from "./fs";
 import { useWorkspace } from "../store/workspace";
 import {
   cancelPendingDrafts,
+  currentSessionId,
+  currentSessionStartedAt,
   currentWindowLabel,
   ensureWindowLabel,
   writeDraftNow,
@@ -110,6 +112,10 @@ async function writeSessionMarker(
       JSON.stringify({
         version: 1,
         windowLabel: currentWindowLabel(),
+        // 会话身份必须一起写：下次启动靠它把「这份标记」与「这批草稿」对上，
+        // 否则归档只能退化成 legacy-*，handled 永远匹配不到 → 草稿被当孤儿清掉
+        sessionId: currentSessionId(),
+        startedAt: currentSessionStartedAt(),
         cleanExit,
         savedAt: Date.now(),
       }),

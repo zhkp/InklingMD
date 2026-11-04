@@ -3,7 +3,7 @@
 // 只在桌面端跑；顺序固定为：
 //   ① `beginSession()` 先把本次会话标成 `cleanExit:false`（进程被杀下次才有提示）
 //   ② 读上次标记 + 草稿 → 明确询问用户「恢复 / 丢弃 / 稍后」
-//   ③ 收尾清理超过 TTL 的草稿
+//   ③ 收尾清理「已处理且超过 TTL」的草稿
 //
 // 为什么不自动恢复：一份过期草稿直接铺到编辑器里，用户很可能顺手保存，
 // 把他在这期间对文件做的修改覆盖掉。
@@ -16,6 +16,7 @@ import {
   cleanupExpiredDrafts,
   discardDrafts,
   findRecoverableDrafts,
+  markDraftsHandled,
 } from "./session-recovery";
 
 export const RECOVER = "恢复";
@@ -66,8 +67,11 @@ export function useStartupRecovery(): void {
           // ② 恢复出来的 tab 在下一次编辑前不会产生新草稿，此时崩溃等于没有副本。
           const { restoredPaths } = await applyRecovery(drafts);
           restored.push(...restoredPaths);
+          // 恢复**不标 handled**：内容此刻只在编辑器里（下次编辑前不会写新草稿），
+          // 标成「已处理」会让下次启动的 TTL 清理把它删掉
         } else if (!cancelled && (choice === DISCARD || choice === "No")) {
           await discardDrafts(drafts);
+          await markDraftsHandled(drafts);
         }
       }
 

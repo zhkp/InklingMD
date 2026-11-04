@@ -4,28 +4,54 @@
 // 三件事：
 //   1. `beginSession()`：本次启动先落一个 `cleanExit:false` 的会话标记；
 //   2. `findRecoverableDrafts()`：上次不是正常退出 → 把草稿读出来交给用户决定；
-//   3. `cleanupExpiredDrafts()`：只清「超过 7 天且非 pinned」的，绝不碰近期副本。
+//   3. `cleanupExpiredDrafts()`：只清「已归档会话里被用户处理过」且超 7 天的；
+//      本次会话的、未处理过的崩溃副本、pinned 一律保留。
 //
 // 恢复入口**不自动恢复**：用户必须明确选择「恢复 / 丢弃」，否则一份过期草稿会
 // 悄悄覆盖他已经改过的文件。
 
 import { isTauri } from "@tauri-apps/api/core";
 import { appDataDir } from "@tauri-apps/api/path";
-import { ensureWindowLabel, currentWindowLabel, draftFileKey } from "./draft-journal";
+import {
+  currentSessionId,
+  currentWindowLabel,
+  draftFileKey,
+  ensureWindowLabel,
+} from "./draft-journal";
 import { detectEol } from "./eol";
 import { useWorkspace } from "../store/workspace";
 
-/** 设计 §8.3：7 天 TTL；只清超期且非 pinned 的草稿 */
+/** 设计 §8.3：7 天 TTL（是否可清还取决于会话归属与 handled，见 cleanupExpiredDrafts） */
 export const DRAFT_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 export interface RecoverableDraft {
   draftId: string;
+  /** 写这份草稿的会话：清理与「已处理」判定都按会话维度，不能跨会话按路径匹配 */
+  sessionId: string;
   tabPath: string;
   isUntitled: boolean;
   title: string;
   content: string;
   pinned: boolean;
   updatedAt: number;
+}
+
+/** 归档的一次「未正常退出」会话（`recovery/<label>/crashed-<startedAt>.json`） */
+export interface CrashedSession {
+  version: 1;
+  sessionId: string;
+  windowLabel: string;
+  startedAt: number;
+  archivedAt: number;
+  cleanExit: false;
+  /** 归档时属于该会话的草稿路径（用于判断「是否全部处理完」） */
+  draftPaths: string[];
+  /**
+   * 已处理的草稿：**本实现存的是 `tabPath`**（设计 §8.1 写的是 draft id，
+   * 目前 draftId 就是 `base64url(tabPath)`，两者等价；改名时要一起改）。
+   */
+  handledDraftIds: string[];
+  fullyHandled: boolean;
 }
 
 export interface RecoveryIo {
@@ -83,6 +109,9 @@ async function sessionPaths(): Promise<{ dir: string; session: string; drafts: s
 interface SessionMarker {
   version?: number;
   windowLabel?: string;
+  /** 会话身份：归档与 cleaned-up 都靠它区分「哪一次运行」 */
+  sessionId?: string;
+  startedAt?: number;
   cleanExit?: boolean;
   savedAt?: number;
 }
@@ -116,14 +145,150 @@ export async function beginSession(now = Date.now()): Promise<SessionMarker | nu
       JSON.stringify({
         version: 1,
         windowLabel: currentWindowLabel(),
+        sessionId: currentSessionId(),
+        startedAt: now,
         cleanExit: false,
         savedAt: now,
       }),
       { createParents: true, durability: "sync" },
     );
-    return previous;
   } catch {
+    // 写不进去也要把旧标记交回去：本次仍能恢复，只是这次崩溃不会有归档
     return previous;
+  }
+  // 归档必须在「读完旧标记、写完新标记」之后做；`sessionId` 相同说明那是本次
+  // 运行自己刚写的（StrictMode 双跑 effect），不能自我归档
+  await archivePreviousSession(previous, now);
+  return previous;
+}
+
+async function crashedFiles(): Promise<Array<{ file: string; data: CrashedSession }>> {
+  try {
+    const { dir } = await sessionPaths();
+    const sep = sepOf(dir);
+    const out: Array<{ file: string; data: CrashedSession }> = [];
+    for (const entry of await io.listDir(dir)) {
+      if (entry.isDir || !entry.name.startsWith("crashed-") || !entry.name.endsWith(".json")) {
+        continue;
+      }
+      const file = `${dir}${sep}${entry.name}`;
+      try {
+        const raw = JSON.parse(await io.readTextFile(file)) as Partial<CrashedSession>;
+        // 旧版本 / 半写坏的归档：缺数组字段就当空，别让整个清理抛 TypeError
+        if (!raw || typeof raw.sessionId !== "string") continue;
+        out.push({
+          file,
+          data: {
+            version: 1,
+            sessionId: raw.sessionId,
+            windowLabel: raw.windowLabel ?? "",
+            startedAt: Number(raw.startedAt ?? 0),
+            archivedAt: Number(raw.archivedAt ?? 0),
+            cleanExit: false,
+            draftPaths: Array.isArray(raw.draftPaths) ? raw.draftPaths : [],
+            handledDraftIds: Array.isArray(raw.handledDraftIds) ? raw.handledDraftIds : [],
+            fullyHandled: !!raw.fullyHandled,
+          },
+        });
+      } catch {
+        // 单条损坏跳过：不让一个坏归档拖垮清理
+      }
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * 把上一次「未正常退出」的会话归档成 `crashed-<startedAt>.json`。
+ *
+ * `draftPaths` 只收**属于该会话**的草稿（按 DraftFile.sessionId 过滤），
+ * 这样「已处理」判定才不会被后来会话的同名路径污染。
+ *
+ * 唯一例外：旧版本写的标记没有 `sessionId`（`legacy-*` 分支），只能把
+ * 「不是本次会话」的草稿都收进来——这类归档的 handled 匹配会失准，
+ * 所以清理时对它们只保留不清（见 `cleanupExpiredDrafts` 的 `!crash` 分支）。
+ */
+export async function archivePreviousSession(
+  previous: SessionMarker | null,
+  now = Date.now(),
+): Promise<string | null> {
+  if (!previous || previous.cleanExit !== false) return null;
+  // 同一次运行自己刚写的标记：不归档（StrictMode 会双跑 effect）
+  if (previous.sessionId && previous.sessionId === currentSessionId()) return null;
+
+  const rawStartedAt = Number(previous.startedAt ?? previous.savedAt ?? now);
+  // 非数字会让文件名变成 `crashed-NaN.json`，不同会话互相覆盖
+  const startedAt = Number.isFinite(rawStartedAt) ? rawStartedAt : now;
+  const legacySession = !previous.sessionId;
+  const sessionId = previous.sessionId ?? `legacy-${startedAt}`;
+  const draftPaths = (await listDrafts())
+    .filter((d) => (legacySession ? d.sessionId !== currentSessionId() : d.sessionId === sessionId))
+    .map((d) => d.tabPath);
+
+  const { dir } = await sessionPaths();
+  const sep = sepOf(dir);
+  const file = `${dir}${sep}crashed-${startedAt}.json`;
+  const payload: CrashedSession = {
+    version: 1,
+    sessionId,
+    windowLabel: currentWindowLabel(),
+    startedAt,
+    archivedAt: now,
+    cleanExit: false,
+    draftPaths,
+    handledDraftIds: [],
+    // 没有草稿可处理的归档直接算「处理完」，否则它会永远留着
+    fullyHandled: draftPaths.length === 0,
+  };
+  try {
+    await io.writeTextFile(file, JSON.stringify(payload), {
+      createParents: true,
+      durability: "sync",
+    });
+    return file;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 标记这些草稿已被用户处理（恢复 / 丢弃）。
+ *
+ * 按**会话**写入各自的归档：旧归档里的同名路径不能给新会话的草稿授权删除。
+ * 未出现在任何归档里的会话（无归档可写）只能靠 orphan 规则兜底，不会误删。
+ */
+export async function markDraftsHandled(
+  drafts: Array<Pick<RecoverableDraft, "sessionId" | "tabPath">>,
+  now = Date.now(),
+): Promise<void> {
+  if (drafts.length === 0) return;
+  const bySession = new Map<string, string[]>();
+  for (const draft of drafts) {
+    if (!draft.sessionId) continue;
+    bySession.set(draft.sessionId, [...(bySession.get(draft.sessionId) ?? []), draft.tabPath]);
+  }
+  if (bySession.size === 0) return;
+
+  for (const { file, data } of await crashedFiles()) {
+    const paths = bySession.get(data.sessionId);
+    if (!paths) continue; // 不碰别的会话的归档
+    const handled = new Set([...(data.handledDraftIds ?? []), ...paths]);
+    try {
+      await io.writeTextFile(
+        file,
+        JSON.stringify({
+          ...data,
+          handledDraftIds: [...handled],
+          fullyHandled: data.draftPaths.every((p) => handled.has(p)),
+          handledAt: now,
+        }),
+        { createParents: true, durability: "sync" },
+      );
+    } catch {
+      // 写不进去就宁可下次再问一次，也不假装已处理
+    }
   }
 }
 
@@ -151,6 +316,7 @@ export async function listDrafts(): Promise<RecoverableDraft[]> {
       }
       out.push({
         draftId: parsed.draftId ?? name.replace(/\.json$/, ""),
+        sessionId: typeof parsed.sessionId === "string" ? parsed.sessionId : "",
         tabPath: parsed.tabPath,
         isUntitled: !!parsed.isUntitled,
         title: parsed.title ?? parsed.tabPath,
@@ -312,10 +478,15 @@ export function mergeDraftIntoExistingTab(
 }
 
 /**
- * 只清「超过 TTL 且非 pinned」的草稿；返回删除条数。
+ * 只清两类草稿（设计 §8.3）；返回删除条数。
  *
- * `exclude` 里的 path 一律不删：刚被用户「恢复」的草稿可能已经很旧，但那份内容
- * 现在只在编辑器里（下次编辑前不会写新草稿），删了等于一次崩溃就全丢。
+ * ① 属于某个**已归档会话**、该会话已把这条标记为 handled，**且已超 TTL**；
+ * ② 孤儿（没有对应归档、也不是本次会话）且超过 TTL —— **本片未实现**：
+ *    判孤儿需要 `session.tabs`，当前标记里没有；缺了它只会「多留」，不会误删。
+ *
+ * 本次会话的草稿永不自动清；已归档但**未处理**的崩溃副本也永不自动清
+ * ——否则「很久没打开」就等于自动丢用户内容。`pinned` 一律豁免。
+ * `exclude` 是本次刚恢复的 path（内容此刻只在编辑器里）。
  */
 export async function cleanupExpiredDrafts(
   now = Date.now(),
@@ -323,13 +494,21 @@ export async function cleanupExpiredDrafts(
   options: { exclude?: Set<string> } = {},
 ): Promise<number> {
   const drafts = await listDrafts();
-  const expired = drafts.filter(
-    (d) =>
-      !d.pinned &&
-      d.updatedAt > 0 &&
-      now - d.updatedAt > ttlMs &&
-      !options.exclude?.has(d.tabPath),
-  );
+  const archived = new Map<string, CrashedSession>();
+  for (const { data } of await crashedFiles()) archived.set(data.sessionId, data);
+  const current = currentSessionId();
+
+  const expired = drafts.filter((d) => {
+    if (d.pinned || d.updatedAt <= 0 || now - d.updatedAt <= ttlMs) return false;
+    if (options.exclude?.has(d.tabPath)) return false;
+    if (!d.sessionId || d.sessionId === current) return false;
+    const crash = archived.get(d.sessionId);
+    // 没有归档（归档写失败 / 旧版本残留）：一律保留。
+    // 「孤儿清理」需要 session.tabs 才能判定，本片不做——宁可占盘也不误删唯一副本
+    if (!crash) return false;
+    // 有归档：只在「用户已处理这条」时清
+    return (crash.handledDraftIds ?? []).includes(d.tabPath);
+  });
   if (expired.length === 0) return 0;
   return discardDrafts(expired);
 }
