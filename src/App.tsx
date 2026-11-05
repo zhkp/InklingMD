@@ -26,6 +26,7 @@ import { resolveModalAction, type ModalId } from "./lib/modals";
 import { useStartupFile } from "./lib/useStartupFile";
 import { useExitHandler } from "./lib/useExitHandler";
 import { useStartupRecovery } from "./lib/useStartupRecovery";
+import { useCursorCheckpoint } from "./lib/useCursorCheckpoint";
 import { type EditorOutlineSnapshot } from "./lib/outline";
 import { useOutline } from "./store/outline";
 import { IconPanelLeft } from "./components/icons";
@@ -148,6 +149,8 @@ function App() {
   useStartupFile();
   // 上次未正常退出时提示恢复草稿（#365 / #378）
   useStartupRecovery();
+  // 失焦 / 页面隐藏时把光标 checkpoint 落盘（#378）
+  useCursorCheckpoint();
   useExitHandler();
 
   // 稳定引用：避免 OutlinePanel 列表项 memo 因 getEditor 身份变化失效

@@ -49,6 +49,12 @@ import {
   readSessionMarker,
 } from "../../src/lib/session-recovery";
 import { currentSessionId } from "../../src/lib/draft-journal";
+import {
+  __resetCursorCheckpoint,
+  __setCursorIo,
+  flushCursorCheckpoint,
+  scheduleCursorCheckpoint,
+} from "../../src/lib/cursor-checkpoint";
 import { useWorkspace } from "../../src/store/workspace";
 
 const SESSION = "/appdata/recovery/main/session.json";
@@ -221,6 +227,44 @@ describe("#365 恢复与丢弃", () => {
     expect(files.has(draftFile)).toBe(true);
   });
 
+  it("合并进已打开的干净 tab 时也恢复光标；本次会话已有光标则不覆盖", async () => {
+    files.set(SESSION, JSON.stringify({ version: 1, cleanExit: false }));
+    seedDraft("/w/open.md", { content: "草稿", updatedAt: 1_000 });
+    __setCursorIo({
+      appDataDir: async () => "/appdata",
+      readTextFile: async () =>
+        JSON.stringify({
+          version: 1,
+          tabs: { "/w/open.md": { pos: 9, scrollTop: 7, updatedAt: 1 } },
+        }),
+      writeTextFile: async () => undefined,
+    });
+    useWorkspace.setState({
+      openTabs: [
+        { path: "/w/open.md", content: "磁盘", dirty: false, cursorPos: null, scrollTop: null },
+      ],
+      activeTabPath: "/w/open.md",
+    } as never);
+
+    await applyRecovery(await listDrafts());
+    const merged = useWorkspace.getState().openTabs[0];
+    expect(merged.content).toBe("草稿");
+    expect(merged.cursorPos).toBe(9);
+    expect(merged.scrollTop).toBe(7);
+
+    // 第二次：本次会话已设过视口位置，不能被上次会话的 checkpoint 覆盖
+    useWorkspace.setState({
+      openTabs: [
+        { path: "/w/open.md", content: "磁盘", dirty: false, cursorPos: 42, scrollTop: 11 },
+      ],
+    } as never);
+    await applyRecovery(await listDrafts());
+    expect(useWorkspace.getState().openTabs[0].cursorPos).toBe(42);
+
+    __setCursorIo(null);
+    __resetCursorCheckpoint();
+  });
+
   it("同一批里同时有合并与新建：合并结果不能被随后的 setState 回滚", async () => {
     files.set(SESSION, JSON.stringify({ version: 1, cleanExit: false }));
     seedDraft("/w/open.md", { content: "合并进来的内容", updatedAt: 3_000 });
@@ -332,6 +376,73 @@ describe("#365 恢复出来的内容不能被自动保存立刻写盘", () => {
       // 断言失败也必须还原，否则假定时器会污染后续用例（上一版就是这样连累 4 条）
       vi.useRealTimers();
     }
+  });
+});
+
+describe("#378 崩溃重启链路（注入 IO 的端到端模拟）", () => {
+  it("上次异常退出 → 重启 → 命名/未命名/后台 dirty 草稿都恢复，光标随 checkpoint 回来，草稿不删", async () => {
+    // 光标 checkpoint 与草稿正文分文件存；这里用同一份内存文件系统模拟真实重启后的磁盘
+    __setCursorIo({
+      appDataDir: async () => "/appdata",
+      readTextFile: async (path) => files.get(path) ?? "",
+      writeTextFile: async (path, content) => {
+        files.set(path, content);
+      },
+    });
+    // 走**真实的写入侧**：节流登记 → 立即 flush，而不是手工播种 JSON
+    scheduleCursorCheckpoint("/w/named.md", 12, 80, 1);
+    scheduleCursorCheckpoint("untitled-1", 3, 0, 1);
+    expect(await flushCursorCheckpoint()).toBe(true);
+    files.set(
+      SESSION,
+      JSON.stringify({ version: 1, sessionId: "s-crashed", startedAt: 1_000, cleanExit: false }),
+    );
+    const named = seedDraft("/w/named.md", {
+      content: "命名文档正文",
+      updatedAt: 1_100,
+      sessionId: "s-crashed",
+    });
+    const untitled = seedDraft("untitled-1", {
+      content: "未命名草稿正文",
+      updatedAt: 1_200,
+      sessionId: "s-crashed",
+      isUntitled: true,
+    });
+    const background = seedDraft("/w/background.md", {
+      content: "后台 tab 的改动",
+      updatedAt: 1_300,
+      sessionId: "s-crashed",
+    });
+
+    // 重启：先读旧标记再写新标记，随后用旧标记筛选草稿并恢复
+    const previous = await beginSession(2_000);
+    const recoverable = await findRecoverableDrafts(previous);
+    expect(recoverable).toHaveLength(3);
+
+    const result = await applyRecovery(recoverable);
+    expect(result.restored).toBe(3);
+
+    const tabs = useWorkspace.getState().openTabs;
+    expect(tabs.map((t) => t.path).sort()).toEqual(
+      ["/w/named.md", "/w/background.md", "untitled-1"].sort(),
+    );
+    const namedTab = tabs.find((t) => t.path === "/w/named.md")!;
+    expect(namedTab.content).toBe("命名文档正文");
+    expect(namedTab.cursorPos).toBe(12);
+    expect(namedTab.scrollTop).toBe(80);
+    expect(namedTab.recovered).toBe(true);
+    expect(tabs.find((t) => t.path === "untitled-1")!.isUntitled).toBe(true);
+    expect(tabs.find((t) => t.path === "untitled-1")!.cursorPos).toBe(3);
+    expect(tabs.find((t) => t.path === "/w/background.md")!.content).toBe("后台 tab 的改动");
+
+    // 恢复不删草稿：内容此刻只落在编辑器里（下一次编辑前不会有新副本）
+    expect(files.has(named)).toBe(true);
+    expect(files.has(untitled)).toBe(true);
+    expect(files.has(background)).toBe(true);
+
+    // 全局 IO / pending / timer 不能泄漏给本文件后续用例
+    __setCursorIo(null);
+    __resetCursorCheckpoint();
   });
 });
 

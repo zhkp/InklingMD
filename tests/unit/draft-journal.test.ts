@@ -46,6 +46,11 @@ import {
   markUncleanExit,
 } from "../../src/lib/exit-session";
 import { useWorkspace } from "../../src/store/workspace";
+import {
+  __resetCursorCheckpoint,
+  __setCursorIo,
+  scheduleCursorCheckpoint,
+} from "../../src/lib/cursor-checkpoint";
 
 function tab(path: string, extra: Partial<OpenTab> = {}): OpenTab {
   return {
@@ -89,6 +94,28 @@ beforeEach(() => {
 afterEach(() => {
   __setJournalIo(null);
   vi.useRealTimers();
+});
+
+describe("#378 光标 flush 失败的健康度", () => {
+  it("草稿全部写成功也不能把光标失败造成的 degraded 覆盖回 healthy", async () => {
+    __setCursorIo({
+      appDataDir: async () => "/appdata",
+      readTextFile: async () => "",
+      writeTextFile: async () => {
+        throw new Error("EIO: cursor.json 写失败");
+      },
+    });
+    scheduleCursorCheckpoint("/w/a.md", 4, 40, 1);
+    useWorkspace.setState({ openTabs: [tab("/w/a.md")], activeTabPath: "/w/a.md" } as never);
+
+    await flushAllDrafts({ durability: "sync" });
+
+    expect(journalHealth).toBe("degraded");
+    expect(hasRecoverableDraft()).toBe(false);
+
+    __setCursorIo(null);
+    __resetCursorCheckpoint();
+  });
 });
 
 describe("#365 草稿日志", () => {
