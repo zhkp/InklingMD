@@ -9,6 +9,7 @@ import type { RecoverableDraft } from "../../src/lib/session-recovery";
 function draft(tabPath: string, content: string, updatedAt = Date.now()): RecoverableDraft {
   return {
     draftId: tabPath,
+    sessionId: "s1",
     tabPath,
     isUntitled: false,
     title: tabPath.split("/").pop() ?? tabPath,

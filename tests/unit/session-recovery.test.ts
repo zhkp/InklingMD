@@ -45,8 +45,10 @@ import {
   discardDrafts,
   findRecoverableDrafts,
   listDrafts,
+  markDraftsHandled,
   readSessionMarker,
 } from "../../src/lib/session-recovery";
+import { currentSessionId } from "../../src/lib/draft-journal";
 import { useWorkspace } from "../../src/store/workspace";
 
 const SESSION = "/appdata/recovery/main/session.json";
@@ -65,7 +67,13 @@ function draftFile(path: string): string {
 
 function seedDraft(
   tabPath: string,
-  opts: { content?: string; updatedAt?: number; pinned?: boolean; isUntitled?: boolean } = {},
+  opts: {
+    content?: string;
+    updatedAt?: number;
+    pinned?: boolean;
+    isUntitled?: boolean;
+    sessionId?: string;
+  } = {},
 ): string {
   const file = draftFile(tabPath);
   files.set(
@@ -73,7 +81,7 @@ function seedDraft(
     JSON.stringify({
       version: 1,
       draftId: file,
-      sessionId: "s1",
+      sessionId: opts.sessionId ?? "s1",
       tabPath,
       isUntitled: !!opts.isUntitled,
       title: tabPath.split("/").pop(),
@@ -327,6 +335,121 @@ describe("#365 恢复出来的内容不能被自动保存立刻写盘", () => {
   });
 });
 
+describe("#365 会话归档与「已处理」的会话维度", () => {
+  function seedCrashed(startedAt: number, data: Record<string, unknown>): void {
+    files.set(
+      `/appdata/recovery/main/crashed-${startedAt}.json`,
+      JSON.stringify({
+        version: 1,
+        sessionId: "s-old",
+        windowLabel: "main",
+        startedAt,
+        archivedAt: startedAt + 1,
+        cleanExit: false,
+        draftPaths: [],
+        handledDraftIds: [],
+        fullyHandled: false,
+        ...data,
+      }),
+    );
+  }
+
+  it("上次非正常退出：归档 crashed-<startedAt>.json，draftPaths 只收该会话的草稿", async () => {
+    files.set(
+      SESSION,
+      JSON.stringify({ version: 1, sessionId: "s-old", startedAt: 1_111, cleanExit: false }),
+    );
+    seedDraft("/w/a.md", { updatedAt: 1_000, sessionId: "s-old" });
+    seedDraft("/w/b.md", { updatedAt: 1_000, sessionId: "s-other" });
+
+    await beginSession(2_222);
+
+    const archived = JSON.parse(files.get("/appdata/recovery/main/crashed-1111.json")!);
+    expect(archived.sessionId).toBe("s-old");
+    expect(archived.draftPaths).toEqual(["/w/a.md"]);
+    expect(archived.fullyHandled).toBe(false);
+  });
+
+  it("同一次运行（sessionId 相同）不会自我归档：StrictMode 双跑不产生假归档", async () => {
+    // 第一次：没有旧标记
+    expect(await beginSession(1_000)).toBeNull();
+
+    // 第二次读到的是自己刚写的标记（sessionId 相同）→ 不归档、不误报
+    const previous = await beginSession(1_050);
+    expect(previous?.sessionId).toBe(currentSessionId());
+    expect(previous?.cleanExit).toBe(false);
+
+    const archives = [...files.keys()].filter((k) => k.includes("crashed-"));
+    expect(archives).toEqual([]);
+  });
+
+  it("markDraftsHandled 只写匹配 sessionId 的归档，并按 draftPaths 判定 fullyHandled", async () => {
+    seedCrashed(10, { sessionId: "s-old", draftPaths: ["/w/a.md", "/w/b.md"] });
+    seedCrashed(20, { sessionId: "s-other", draftPaths: ["/w/a.md"] });
+    const otherBefore = files.get("/appdata/recovery/main/crashed-20.json")!;
+
+    await markDraftsHandled([{ sessionId: "s-old", tabPath: "/w/a.md" }]);
+
+    const mine = JSON.parse(files.get("/appdata/recovery/main/crashed-10.json")!);
+    expect(mine.handledDraftIds).toEqual(["/w/a.md"]);
+    expect(mine.fullyHandled).toBe(false); // /w/b.md 还没处理
+    // 别的会话不受影响
+    expect(files.get("/appdata/recovery/main/crashed-20.json")).toBe(otherBefore);
+  });
+
+  it("TTL：已处理的删、未处理的留、本次会话的留、pinned 留、孤儿留", async () => {
+    const now = 10 * DRAFT_TTL_MS;
+    const old = now - DRAFT_TTL_MS - 1;
+    const handledFile = seedDraft("/w/handled.md", { updatedAt: old, sessionId: "s-old" });
+    const unhandledFile = seedDraft("/w/unhandled.md", { updatedAt: old, sessionId: "s-old" });
+    const currentFile = seedDraft("/w/current.md", {
+      updatedAt: old,
+      sessionId: currentSessionId(),
+    });
+    const orphanFile = seedDraft("/w/orphan.md", { updatedAt: old, sessionId: "s-vanished" });
+    const pinnedFile = seedDraft("/w/pinned.md", {
+      updatedAt: old,
+      sessionId: "s-old",
+      pinned: true,
+    });
+    seedCrashed(1_000, {
+      sessionId: "s-old",
+      draftPaths: ["/w/handled.md", "/w/unhandled.md", "/w/pinned.md"],
+      // pinned 这条也标了 handled：能留下来只能是因为 pinned 豁免
+      handledDraftIds: ["/w/handled.md", "/w/pinned.md"],
+    });
+
+    const removed = await cleanupExpiredDrafts(now);
+
+    expect(removed).toBe(1);
+    expect(files.has(handledFile)).toBe(false);
+    // 未处理的崩溃副本永不自动清；无归档的（归档写失败/旧残留）同样只留不删
+    expect(files.has(unhandledFile)).toBe(true);
+    expect(files.has(orphanFile)).toBe(true);
+    // 本次会话的草稿永不自动清
+    expect(files.has(currentFile)).toBe(true);
+    expect(files.has(pinnedFile)).toBe(true);
+  });
+
+  it("跨会话：旧归档里处理过的同路径，不能授权删除新会话的草稿", async () => {
+    const old = 10 * DRAFT_TTL_MS - DRAFT_TTL_MS - 1;
+    // 旧归档说处理过 /w/a.md
+    seedCrashed(1_000, {
+      sessionId: "s-old",
+      draftPaths: ["/w/a.md"],
+      handledDraftIds: ["/w/a.md"],
+    });
+    // 磁盘上这份 /w/a.md 属于另一个**已归档但未处理**的会话
+    seedCrashed(2_000, { sessionId: "s-new", draftPaths: ["/w/a.md"], handledDraftIds: [] });
+    const fresh = seedDraft("/w/a.md", { updatedAt: old, sessionId: "s-new" });
+
+    const removed = await cleanupExpiredDrafts(10 * DRAFT_TTL_MS);
+
+    expect(removed).toBe(0);
+    expect(files.has(fresh)).toBe(true);
+  });
+});
+
 describe("#365 启动入口（useStartupRecovery）", () => {
   it("选择「恢复」：tab 恢复出来，但草稿**不删**（恢复本身不消费副本）", async () => {
     files.set(SESSION, JSON.stringify({ version: 1, cleanExit: false }));
@@ -390,20 +513,37 @@ describe("#365 启动入口（useStartupRecovery）", () => {
 });
 
 describe("#365 TTL 清理", () => {
-  it("只清超过 7 天且非 pinned 的，近期与 pinned 一律保留", async () => {
+  it("已处理 + 超 7 天才清；近期与 pinned 一律保留", async () => {
     const now = 10 * DRAFT_TTL_MS;
-    const oldFile = seedDraft("/w/old.md", { updatedAt: now - DRAFT_TTL_MS - 1 });
-    const recentFile = seedDraft("/w/recent.md", { updatedAt: now - 1_000 });
+    const old = now - DRAFT_TTL_MS - 1;
+    const handledFile = seedDraft("/w/handled.md", { updatedAt: old, sessionId: "s0" });
+    const recentFile = seedDraft("/w/recent.md", { updatedAt: now - 1_000, sessionId: "s0" });
     const pinnedFile = seedDraft("/w/pinned.md", {
-      updatedAt: now - DRAFT_TTL_MS - 1,
+      updatedAt: old,
+      sessionId: "s0",
       pinned: true,
     });
+    files.set(
+      "/appdata/recovery/main/crashed-1.json",
+      JSON.stringify({
+        version: 1,
+        sessionId: "s0",
+        windowLabel: "main",
+        startedAt: 1,
+        archivedAt: 2,
+        cleanExit: false,
+        draftPaths: ["/w/handled.md", "/w/pinned.md"],
+        handledDraftIds: ["/w/handled.md", "/w/pinned.md"],
+        fullyHandled: false,
+      }),
+    );
 
     const removed = await cleanupExpiredDrafts(now);
 
     expect(removed).toBe(1);
-    expect(files.has(oldFile)).toBe(false);
+    expect(files.has(handledFile)).toBe(false);
     expect(files.has(recentFile)).toBe(true);
+    // 同样标了 handled 且超期，能留下只因 pinned
     expect(files.has(pinnedFile)).toBe(true);
   });
 });

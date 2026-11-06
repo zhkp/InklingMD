@@ -11,6 +11,7 @@ import {
   applyRecovery,
   discardDrafts,
   listDrafts,
+  markDraftsHandled,
   type RecoverableDraft,
 } from "../../lib/session-recovery";
 
@@ -145,7 +146,7 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
             <div className="settings-label">
               <span className="settings-name">恢复未保存内容</span>
               <span className="settings-desc">
-                查看崩溃 / 强制结束后留下的草稿副本，可选择性恢复或丢弃（超过 7 天的会自动清理）。
+                查看崩溃 / 强制结束后留下的草稿副本，可选择性恢复或丢弃（只有标记为已处理、且超过 7 天的才会被清理）。
               </span>
             </div>
             <button
@@ -167,10 +168,12 @@ export function SettingsPanel({ onClose }: { onClose: () => void }) {
               // 新建的恢复 tab 在下一次编辑前也没有新副本——删了就是净丢内容。
               // 草稿由「保存成功」或 TTL 清理收尾（与启动弹窗同一契约）。
               await applyRecovery(selected);
+              // 恢复**不标 handled**：草稿留到「保存成功」或用户显式丢弃
               setRecoveryOpen(false);
             }}
             onDiscard={async (selected) => {
               await discardDrafts(selected);
+              await markDraftsHandled(selected);
               setRecoveryDrafts(await listDrafts());
             }}
           />

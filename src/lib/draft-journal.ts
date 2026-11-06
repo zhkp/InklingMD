@@ -43,6 +43,8 @@ function newId(): string {
 let windowLabel = "main";
 let labelReady: Promise<void> | null = null;
 let sessionId = newId();
+/** 本次运行开始时间：会话标记里记它，归档文件名才能稳定指向「哪一次运行」 */
+const sessionStartedAt = Date.now();
 
 /**
  * 首次写盘前把窗口 label 换成真实的（`getCurrentWindow().label`）。
@@ -121,6 +123,11 @@ export function __resetSession(windowLabelOverride?: string): void {
 
 export function currentSessionId(): string {
   return sessionId;
+}
+
+/** 本次运行的开始时间（会话标记里记它，归档文件名 `crashed-<startedAt>` 用） */
+export function currentSessionStartedAt(): number {
+  return sessionStartedAt;
 }
 
 export function currentWindowLabel(): string {
