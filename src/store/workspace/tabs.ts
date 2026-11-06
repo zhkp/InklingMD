@@ -18,6 +18,7 @@ import { applyEol, detectEol } from "../../lib/eol";
 import { formatCmdError } from "../../lib/cmd-error";
 import { isSamePath } from "../../lib/path-utils";
 import { clearDraft, scheduleDraft } from "../../lib/draft-journal";
+import { scheduleCursorCheckpoint } from "../../lib/cursor-checkpoint";
 import { evaluateBaseline, reconcileDiskContent } from "../../lib/save-guard";
 import { writeErrorCode, type WriteErrorCode } from "../../lib/writeErrors";
 import { flushAllMarkdownPublishers } from "../../components/Editor/markdown-publisher";
@@ -1832,6 +1833,8 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
         t.path === path ? { ...t, cursorPos: pos, scrollTop } : t,
       );
       set({ openTabs: nextTabs });
+      // #378：光标/滚动单独走轻量 checkpoint（5s 节流，不重刷草稿正文）
+      scheduleCursorCheckpoint(path, pos, scrollTop);
     },
 
     getCursorStateFor: (path) => {

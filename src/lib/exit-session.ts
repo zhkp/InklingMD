@@ -4,12 +4,14 @@
 // 的数据来源：
 // - `flushAllDrafts({ durability })`：把每个 dirty tab 的正文写进
 //   `recovery/<windowLabel>/drafts/<key>.json`；退出时用 `sync`，平时由 draft-journal 防抖写。
+//   同时 flush 光标 checkpoint（`recovery/<label>/cursor.json`），失败即 `journalHealth=degraded`。
 // - `markCleanExit()`：先删掉本次会话的草稿（内容都已落盘），再写 `cleanExit: true`。
 // - `markUncleanExit()`：保留草稿，只把 `cleanExit` 写成 false —— 下次启动据此弹恢复。
 
 import { isTauri } from "@tauri-apps/api/core";
 import { appDataDir } from "@tauri-apps/api/path";
 import { writeRecoveryFile } from "./fs";
+import { flushCursorCheckpoint } from "./cursor-checkpoint";
 import { useWorkspace } from "../store/workspace";
 import {
   cancelPendingDrafts,
@@ -46,6 +48,9 @@ export async function flushAllDrafts(
   if (!isTauri()) return;
   // 先取消挂着的防抖定时器，避免同一次输入写两遍
   cancelPendingDrafts();
+  // 退出是最后一次落盘机会：把还没到 5s 节流窗口的光标 checkpoint 也刷出去。
+  // 退出路径要 fsync；失败必须降级（不能对外承诺「有恢复副本」）
+  if (!(await flushCursorCheckpoint("sync"))) journalHealth = "degraded";
   const { openTabs } = useWorkspace.getState();
   const dirty = openTabs.filter((tab) => tab.dirty);
   if (dirty.length === 0) return;
@@ -67,7 +72,10 @@ export async function flushAllDrafts(
     }),
   );
   // 任意一条写失败都视为不可信：退出时的文案不能承诺「有恢复副本」
-  journalHealth = failed === 0 ? "healthy" : "degraded";
+  // 只升级、不覆盖之前记下的 degraded（例如光标 checkpoint flush 失败）：
+  // 草稿写成功不等于所有恢复副本都成功
+  if (failed > 0) journalHealth = "degraded";
+  else if (journalHealth !== "degraded") journalHealth = "healthy";
 }
 
 /** 是否存在可信的恢复副本（草稿写成功过，且健康度正常） */

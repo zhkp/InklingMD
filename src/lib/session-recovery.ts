@@ -1,10 +1,11 @@
 // 崩溃恢复（#365 / #378 第二片）
 //
 // 数据来源：`recovery/<windowLabel>/session.json`（上次是否正常退出）+ `drafts/*.json`。
-// 三件事：
+// 四件事：
 //   1. `beginSession()`：本次启动先落一个 `cleanExit:false` 的会话标记；
 //   2. `findRecoverableDrafts()`：上次不是正常退出 → 把草稿读出来交给用户决定；
-//   3. `cleanupExpiredDrafts()`：只清「已归档会话里被用户处理过」且超 7 天的；
+//   3. `applyRecovery()`：把草稿恢复成 tab，并从 checkpoint 取回光标/滚动（#378）；
+//   4. `cleanupExpiredDrafts()`：只清「已归档会话里被用户处理过」且超 7 天的；
 //      本次会话的、未处理过的崩溃副本、pinned 一律保留。
 //
 // 恢复入口**不自动恢复**：用户必须明确选择「恢复 / 丢弃」，否则一份过期草稿会
@@ -19,6 +20,7 @@ import {
   ensureWindowLabel,
 } from "./draft-journal";
 import { detectEol } from "./eol";
+import { readCursorCheckpoint } from "./cursor-checkpoint";
 import { useWorkspace } from "../store/workspace";
 
 /** 设计 §8.3：7 天 TTL（是否可清还取决于会话归属与 handled，见 cleanupExpiredDrafts） */
@@ -383,7 +385,8 @@ export async function applyRecovery(
     // 已打开的 tab 走合并：不能因为「这个文件已经开着」就把草稿丢掉，
     // 也不能无条件用草稿覆盖用户手上正在改的内容
     if (state.openTabs.some((t) => t.path === draft.tabPath)) {
-      if (mergeDraftIntoExistingTab(draft) === "merged") mergedPaths.push(draft.tabPath);
+      const cursor = await readCursorCheckpoint(draft.tabPath);
+      if (mergeDraftIntoExistingTab(draft, cursor) === "merged") mergedPaths.push(draft.tabPath);
       continue;
     }
     // 有路径的草稿必须先取一次「当前磁盘基线」：否则 `saveTab` 的一致性预检
@@ -405,14 +408,16 @@ export async function applyRecovery(
         // 文件已不在：留空基线，保存时会走「必须存在」的写盘并被拒
       }
     }
+    // #378：光标/滚动与草稿正文分开存，恢复时从 checkpoint 取回（没有就保持 null）
+    const cursor = await readCursorCheckpoint(draft.tabPath);
     restored.push({
       path: draft.tabPath,
       content: draft.content,
       dirty: true,
       isUntitled: draft.isUntitled,
       lastSavedAt: null,
-      cursorPos: null,
-      scrollTop: null,
+      cursorPos: cursor?.pos ?? null,
+      scrollTop: cursor?.scrollTop ?? null,
       diskContent,
       diskStat,
       diskMtime,
@@ -458,15 +463,25 @@ export async function applyRecovery(
  */
 export function mergeDraftIntoExistingTab(
   draft: RecoverableDraft,
+  cursor: { pos: number | null; scrollTop: number | null } | null = null,
 ): "merged" | "kept-existing" {
   const state = useWorkspace.getState();
   const tab = state.openTabs.find((t) => t.path === draft.tabPath);
   if (!tab) return "kept-existing";
   if (tab.dirty || tab.content === draft.content) return "kept-existing";
 
+  // 设计 §8.2 合并路径也要恢复光标；但**本次会话已经设过光标**时以本次为准，
+  // 不拿上次会话的位置覆盖用户当前视口
+  const restoreCursor = tab.cursorPos === null && tab.scrollTop === null && cursor !== null;
   const openTabs = state.openTabs.map((t) =>
     t.path === draft.tabPath
-        ? { ...t, content: draft.content, dirty: true, recovered: true }
+        ? {
+            ...t,
+            content: draft.content,
+            dirty: true,
+            recovered: true,
+            ...(restoreCursor ? { cursorPos: cursor.pos, scrollTop: cursor.scrollTop } : {}),
+          }
         : t,
   );
   const isActive = state.activeTabPath === draft.tabPath;
