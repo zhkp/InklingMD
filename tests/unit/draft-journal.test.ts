@@ -93,11 +93,13 @@ beforeEach(() => {
 
 afterEach(() => {
   __setJournalIo(null);
+  __setCursorIo(null);
+  __resetCursorCheckpoint();
   vi.useRealTimers();
 });
 
-describe("#378 光标 flush 失败的健康度", () => {
-  it("草稿全部写成功也不能把光标失败造成的 degraded 覆盖回 healthy", async () => {
+describe("#378 光标 flush 失败不参与内容副本判定", () => {
+  it("光标 checkpoint 写失败、草稿成功 → 仍视为有恢复副本", async () => {
     __setCursorIo({
       appDataDir: async () => "/appdata",
       readTextFile: async () => "",
@@ -110,8 +112,11 @@ describe("#378 光标 flush 失败的健康度", () => {
 
     await flushAllDrafts({ durability: "sync" });
 
-    expect(journalHealth).toBe("degraded");
-    expect(hasRecoverableDraft()).toBe(false);
+    // 断言落在真实副作用上：草稿正文确实落在恢复区，退出确认不该说「永久丢失」
+    const draft = `${DRAFT_DIR}/${draftFileKey("/w/a.md")}.json`;
+    expect(JSON.parse(files.get(draft)!).content).toBe("# 未保存内容");
+    expect(journalHealth).toBe("healthy");
+    expect(hasRecoverableDraft()).toBe(true);
 
     __setCursorIo(null);
     __resetCursorCheckpoint();
@@ -186,6 +191,21 @@ describe("#365 草稿日志", () => {
 
     expect(journalHealth).toBe("degraded");
     expect(hasRecoverableDraft()).toBe(false);
+  });
+
+  it("草稿写失败降级后，下一次全部写成功即恢复 healthy", async () => {
+    useWorkspace.setState({ openTabs: [tab("/w/a.md")] } as never);
+    failWrite = true;
+    await flushAllDrafts({ durability: "sync" });
+    expect(journalHealth).toBe("degraded");
+    expect(hasRecoverableDraft()).toBe(false);
+
+    failWrite = false;
+    await flushAllDrafts({ durability: "sync" });
+    expect(journalHealth).toBe("healthy");
+    expect(hasRecoverableDraft()).toBe(true);
+    const draft = `${DRAFT_DIR}/${draftFileKey("/w/a.md")}.json`;
+    expect(JSON.parse(files.get(draft)!).content).toBe("# 未保存内容");
   });
 
   it("markCleanExit 先清干净 tab 的草稿，再写 cleanExit:true", async () => {

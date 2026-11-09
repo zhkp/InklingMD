@@ -112,4 +112,23 @@ describe("#378 光标 checkpoint", () => {
     expect(await readCursorCheckpoint("/w/keep.md")).toMatchObject({ pos: 1 });
     expect(await readCursorCheckpoint("/w/new.md")).toMatchObject({ pos: 5 });
   });
+
+  it("cursor.json 内容损坏时按空表重建，后续 flush 都能写出可解析的新表", async () => {
+    const path = "/appdata/recovery/main/cursor.json";
+    files.set(path, "{ 坏 JSON：外部改写截断");
+
+    scheduleCursorCheckpoint("/w/fresh.md", 12, 120, 6_000);
+    expect(await flushCursorCheckpoint()).toBe(true);
+
+    const stored = JSON.parse(files.get(path)!);
+    expect(stored.version).toBe(1);
+    expect(stored.tabs["/w/fresh.md"]).toMatchObject({ pos: 12, scrollTop: 120, updatedAt: 6_000 });
+    expect(await readCursorCheckpoint("/w/fresh.md")).toMatchObject({ pos: 12 });
+
+    // 不是一次侥幸：坏文件被覆盖后，第二次 flush 仍能正常合并
+    scheduleCursorCheckpoint("/w/again.md", 13, 130, 7_000);
+    expect(await flushCursorCheckpoint()).toBe(true);
+    expect(await readCursorCheckpoint("/w/fresh.md")).toMatchObject({ pos: 12 });
+    expect(await readCursorCheckpoint("/w/again.md")).toMatchObject({ pos: 13 });
+  });
 });

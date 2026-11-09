@@ -80,29 +80,43 @@ async function cursorPath(): Promise<string> {
   return `${base.replace(/[\\/]+$/, "")}${sep}recovery${sep}${currentWindowLabel()}${sep}cursor.json`;
 }
 
+function emptyFile(): CursorFile {
+  return { version: 1, tabs: Object.create(null) };
+}
+
 /**
  * 读回整表。`ok=false` 表示「读失败但文件可能存在」——此时**绝不能**按空表写回，
  * 否则一次瞬时 IO 错误就会抹掉其它所有 tab 的 checkpoint。
+ * 内容损坏（JSON 解析失败）不同：整份表已不可用、救不回任何记录，按空表重建，
+ * 让下一次 flush 覆盖坏文件；否则 checkpoint 会永久失效且每 5s 重试一次注定失败的读。
  */
 async function readFile(): Promise<{ ok: boolean; file: CursorFile }> {
-  let raw: string | undefined;
+  let raw: string;
   try {
     raw = await io.readTextFile(await cursorPath());
-    // 文件不存在 / 空文件都等价于「没有 checkpoint」，可以按空表写
-    if (raw.trim() === "") return { ok: true, file: { version: 1, tabs: Object.create(null) } };
-    const parsed = JSON.parse(raw) as Partial<CursorFile>;
-    const tabs: Record<string, CursorSnapshot> = Object.create(null);
-    if (parsed?.tabs && typeof parsed.tabs === "object") {
-      for (const [path, value] of Object.entries(parsed.tabs)) {
-        if (isSnapshot(value)) tabs[path] = value;
-      }
-    }
-    return { ok: true, file: { version: 1, tabs } };
   } catch (err) {
     const missing = err instanceof Error && /not found|不存在|ENOENT/i.test(err.message);
-    // 解析失败或瞬时 IO 错误：ok=false → 调用方拒绝按空表覆盖已有 checkpoint
-    return { ok: missing, file: { version: 1, tabs: Object.create(null) } };
+    // 文件不存在可以按空表写；真正的读 IO 失败必须拒绝覆盖（仍可能有完好的其它 tab）
+    return { ok: missing, file: emptyFile() };
   }
+  // 空文件也等价于「没有 checkpoint」
+  if (raw.trim() === "") return { ok: true, file: emptyFile() };
+
+  let parsed: Partial<CursorFile>;
+  try {
+    parsed = JSON.parse(raw) as Partial<CursorFile>;
+  } catch {
+    // 外部改写 / 磁盘损坏 / 杀软截断：按空表重建，下一次 flush 会写出可解析的新表
+    return { ok: true, file: emptyFile() };
+  }
+
+  const tabs: Record<string, CursorSnapshot> = Object.create(null);
+  if (parsed?.tabs && typeof parsed.tabs === "object") {
+    for (const [path, value] of Object.entries(parsed.tabs)) {
+      if (isSnapshot(value)) tabs[path] = value;
+    }
+  }
+  return { ok: true, file: { version: 1, tabs } };
 }
 
 /** 重新排队：写失败后仍要有一次自动重试，不能只靠「下次用户再动光标」 */
