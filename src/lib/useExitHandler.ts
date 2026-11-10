@@ -165,7 +165,7 @@ async function askExitChoice(unresolvedCount: number, attempt: number): Promise<
 
 /** 没有恢复副本时的二选一确认；返回 true 表示仍然退出 */
 async function confirmDiscard(unresolvedCount: number): Promise<boolean> {
-  // PR-4 还没有 draft 正文：此时「没有恢复副本」是事实，不是假承诺
+  // 草稿正文已落盘：退出后仍可从恢复区取回，不必再问「永久丢失」
   if (hasRecoverableDraft()) return true;
   try {
     const { message } = await import("@tauri-apps/plugin-dialog");

@@ -4,12 +4,15 @@
 // 的数据来源：
 // - `flushAllDrafts({ durability })`：把每个 dirty tab 的正文写进
 //   `recovery/<windowLabel>/drafts/<key>.json`；退出时用 `sync`，平时由 draft-journal 防抖写。
+//   同时 flush 光标 checkpoint（`recovery/<label>/cursor.json`）；光标写失败只影响
+//   光标 / 滚动能否恢复，不参与 `journalHealth`（内容副本是否可信）的判定。
 // - `markCleanExit()`：先删掉本次会话的草稿（内容都已落盘），再写 `cleanExit: true`。
 // - `markUncleanExit()`：保留草稿，只把 `cleanExit` 写成 false —— 下次启动据此弹恢复。
 
 import { isTauri } from "@tauri-apps/api/core";
 import { appDataDir } from "@tauri-apps/api/path";
 import { writeRecoveryFile } from "./fs";
+import { flushCursorCheckpoint } from "./cursor-checkpoint";
 import { useWorkspace } from "../store/workspace";
 import {
   cancelPendingDrafts,
@@ -22,7 +25,7 @@ import {
 
 export type JournalHealth = "healthy" | "degraded";
 
-/** journal 健康度：写失败会置 degraded，退出时据此判断「恢复副本是否可信」 */
+/** 内容副本健康度：只由草稿正文写入结果决定；光标 checkpoint 失败不参与 */
 export let journalHealth: JournalHealth = "healthy";
 
 /** draftId(tabPath) → 最近一次写盘是否成功 */
@@ -46,6 +49,11 @@ export async function flushAllDrafts(
   if (!isTauri()) return;
   // 先取消挂着的防抖定时器，避免同一次输入写两遍
   cancelPendingDrafts();
+  // 退出是最后一次落盘机会：把还没到 5s 节流窗口的光标 checkpoint 也刷出去。
+  // 退出路径要 fsync。光标写失败只意味着「下次恢复没有光标位置」，草稿正文仍完整；
+  // checkpoint 内部已自行排队重试。据此把内容判成不可恢复会让退出确认错误地
+  // 提示「退出将永久丢失这些修改」，而副本其实就在磁盘上。
+  await flushCursorCheckpoint("sync");
   const { openTabs } = useWorkspace.getState();
   const dirty = openTabs.filter((tab) => tab.dirty);
   if (dirty.length === 0) return;
@@ -66,7 +74,8 @@ export async function flushAllDrafts(
       if (!ok) failed += 1;
     }),
   );
-  // 任意一条写失败都视为不可信：退出时的文案不能承诺「有恢复副本」
+  // 只由本次草稿写入结果决定：失败时不能承诺「有恢复副本」；
+  // 后续 flush 全部成功即可恢复 healthy，一次失败不应污染整个进程后续的判定。
   journalHealth = failed === 0 ? "healthy" : "degraded";
 }
 
