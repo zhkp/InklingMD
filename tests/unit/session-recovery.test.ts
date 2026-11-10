@@ -61,6 +61,9 @@ const SESSION = "/appdata/recovery/main/session.json";
 const DRAFTS = "/appdata/recovery/main/drafts";
 
 const files = new Map<string, string>();
+/** 文件 mtime（微秒）：模拟旧归档缺 archivedAt 时用磁盘时间判龄 */
+const fileMtimeUs = new Map<string, number>();
+let failDelete = false;
 
 function draftFile(path: string): string {
   const key = Buffer.from(path, "utf8")
@@ -101,6 +104,8 @@ function seedDraft(
 
 beforeEach(() => {
   files.clear();
+  fileMtimeUs.clear();
+  failDelete = false;
   readDocumentMock
     .mockReset()
     .mockResolvedValue({ content: "磁盘内容", stat: { mtimeUs: 5_000, size: 4 } });
@@ -122,9 +127,14 @@ beforeEach(() => {
       for (const key of files.keys()) {
         if (key.startsWith(prefix)) names.add(key.slice(prefix.length));
       }
-      return [...names].map((name) => ({ name, isDir: false }));
+      return [...names].map((name) => ({
+        name,
+        isDir: false,
+        mtimeUs: fileMtimeUs.get(`${prefix}${name}`),
+      }));
     },
     deletePath: async (path) => {
+      if (failDelete) throw new Error("EIO: 删除失败");
       files.delete(path);
     },
   });
@@ -656,5 +666,106 @@ describe("#365 TTL 清理", () => {
     expect(files.has(recentFile)).toBe(true);
     // 同样标了 handled 且超期，能留下只因 pinned
     expect(files.has(pinnedFile)).toBe(true);
+  });
+});
+
+describe("#409 旧 crashed 归档回收", () => {
+  const NOW = 10 * DRAFT_TTL_MS;
+  const OLD = NOW - DRAFT_TTL_MS - 1;
+
+  function crashed(name: string, data: Record<string, unknown> = {}): string {
+    const file = `/appdata/recovery/main/${name}`;
+    files.set(
+      file,
+      JSON.stringify({
+        version: 1,
+        sessionId: "s-archived",
+        windowLabel: "main",
+        startedAt: OLD,
+        archivedAt: OLD,
+        cleanExit: false,
+        draftPaths: [],
+        handledDraftIds: [],
+        fullyHandled: true,
+        ...data,
+      }),
+    );
+    return file;
+  }
+
+  it("fullyHandled 且超 7 天的归档被回收，返回值只统计草稿删除数", async () => {
+    const archive = crashed("crashed-old.json", {
+      sessionId: "s-handled",
+      draftPaths: ["/w/a.md"],
+      handledDraftIds: ["/w/a.md"],
+    });
+    const draft = seedDraft("/w/a.md", { updatedAt: OLD, sessionId: "s-handled" });
+
+    expect(await cleanupExpiredDrafts(NOW)).toBe(1);
+    expect(files.has(draft)).toBe(false);
+    expect(files.has(archive)).toBe(false);
+  });
+
+  it("fullyHandled=false 的归档即使超期也保留（已处理账本不能丢）", async () => {
+    const archive = crashed("crashed-pending.json", { fullyHandled: false });
+
+    await cleanupExpiredDrafts(NOW);
+
+    expect(files.has(archive)).toBe(true);
+  });
+
+  it("归档未满 7 天不回收", async () => {
+    const archive = crashed("crashed-recent.json", {
+      archivedAt: NOW - DRAFT_TTL_MS + 1_000,
+    });
+
+    await cleanupExpiredDrafts(NOW);
+
+    expect(files.has(archive)).toBe(true);
+  });
+
+  it("archivedAt 缺失时用文件 mtime 判龄（元数据透传的真实消费者）", async () => {
+    const archive = crashed("crashed-legacy.json", { archivedAt: 0 });
+    fileMtimeUs.set(archive, OLD * 1000); // 微秒 → 毫秒
+
+    await cleanupExpiredDrafts(NOW);
+
+    expect(files.has(archive)).toBe(false);
+  });
+
+  it("archivedAt 与 mtime 都缺失时保留，不把时间戳 0 误判成 7 天前", async () => {
+    const archive = crashed("crashed-unknown.json", { archivedAt: 0 });
+
+    await cleanupExpiredDrafts(NOW);
+
+    expect(files.has(archive)).toBe(true);
+  });
+
+  it("删除失败不抛错、归档保留到下次，且不静默吞错", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const archive = crashed("crashed-io.json");
+    failDelete = true;
+
+    try {
+      await expect(cleanupExpiredDrafts(NOW)).resolves.toBe(0);
+      expect(files.has(archive)).toBe(true);
+      expect(warn).toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("草稿清理与归档回收互不干扰：未处理的草稿与对应归档都保留", async () => {
+    const archive = crashed("crashed-unhandled.json", {
+      sessionId: "s-pending",
+      draftPaths: ["/w/b.md"],
+      handledDraftIds: [],
+      fullyHandled: false,
+    });
+    const draft = seedDraft("/w/b.md", { updatedAt: OLD, sessionId: "s-pending" });
+
+    expect(await cleanupExpiredDrafts(NOW)).toBe(0);
+    expect(files.has(draft)).toBe(true);
+    expect(files.has(archive)).toBe(true);
   });
 });
