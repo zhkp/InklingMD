@@ -11,7 +11,7 @@
 // ③ 可比且基线参考为 0：参考值列显示 `0`（与 ② 的 `—` 区分），变化率仍为 `—`（除零）；
 // ④ 可比且有非零参考值：照旧给出参考值与变化率（证明不是一刀切关掉归因对照）。
 
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -24,8 +24,21 @@ const OLD_FIXTURE = { version: 2, hash: "oldhash0002", lines: 1000, source: "gen
 
 let perf: PerfReportWorkspace;
 
-function writeRaw(): void {
-  const raw = {
+function writeRaw(
+  attributionCoverage?: {
+    rounds: number;
+    completeRounds: number;
+    partial: boolean;
+    metrics: Record<string, { observed: number; expected: number }>;
+  },
+  formulaCoverage?: {
+    expectedNodes: number;
+    measuredRounds: number;
+    expectedRounds: number;
+    unmeasured: boolean;
+  },
+): void {
+  const raw: Record<string, unknown> = {
     id: ID,
     scenario: "input-source",
     tier: "S",
@@ -53,6 +66,8 @@ function writeRaw(): void {
       probeMs: 10,
     },
   };
+  if (attributionCoverage) raw.attributionCoverage = attributionCoverage;
+  if (formulaCoverage) raw.formulaCoverage = formulaCoverage;
   writeFileSync(join(perf.rawDir, `${ID}.json`), JSON.stringify(raw, null, 2), "utf8");
 }
 
@@ -207,5 +222,155 @@ describe("归因表的可比性门禁（#379 评审 P1）", () => {
     expect(row[4]).toMatch(/%/);
     expect(attributionLine("statsMs")).not.toContain("不可比");
     expect(latestAttributionRow("statsMs").base).toBe(7.8);
+  });
+
+  it("部分缺采：归因表标 PARTIAL、latest.json 带 coverage、基线带 partial（#379 评审 R4）", () => {
+    // 2 轮里只有 1 轮采到 stats：均值本身看不出覆盖不足，必须三个出口都显式标注
+    writeBaseline(NOW_FIXTURE, FULL_METRICS);
+    writeRaw({
+      rounds: 2,
+      completeRounds: 2,
+      partial: false,
+      metrics: {
+        statsMs: { observed: 1, expected: 2 },
+        statsCount: { observed: 1, expected: 2 },
+        outlinePublishCount: { observed: 2, expected: 2 },
+      },
+    });
+    execFileSync(process.execPath, [REPORT, "--phase=final", "--update-baseline=1"], {
+      env: perf.env(),
+      encoding: "utf8",
+    });
+
+    const row = cells(attributionLine("statsMs"));
+    expect(row[5]).toBe("PARTIAL 1/2");
+    expect(cells(attributionLine("outlinePublishCount"))[5]).toBe("2/2");
+
+    const latest = JSON.parse(
+      readFileSync(join(perf.outDir, "latest.json"), "utf8"),
+    );
+    const result = (latest.results ?? []).find(
+      (r: { id: string }) => r.id === ID,
+    );
+    const statsRow = (result?.attribution ?? []).find(
+      (a: { metric: string }) => a.metric === "statsMs",
+    );
+    expect(statsRow.coverage).toEqual({ observed: 1, expected: 2 });
+
+    const baseline = JSON.parse(
+      readFileSync(
+        join(
+          perf.baselineDir,
+          "local",
+          "quick",
+          "headless",
+          "r2",
+          `${ID}.json`,
+        ),
+        "utf8",
+      ),
+    );
+    expect(baseline.metrics.statsMs).toMatchObject({
+      observedRounds: 1,
+      expectedRounds: 2,
+      partial: true,
+    });
+  });
+
+  it("公式节点未挂载：report.md 标 UNMEASURED 且 latest.json 带覆盖状态（#379 评审 R4）", () => {
+    writeBaseline(NOW_FIXTURE, FULL_METRICS);
+    writeRaw(undefined, {
+      expectedNodes: 42,
+      measuredRounds: 0,
+      expectedRounds: 2,
+      unmeasured: true,
+    });
+    runReport();
+
+    const report = readFileSync(join(perf.outDir, "report.md"), "utf8");
+    expect(report).toContain("### 公式测量未覆盖（UNMEASURED）");
+    expect(report).toContain("预期 42 个公式节点");
+    expect(report).toContain("0/2 轮拿到完整样本");
+
+    const latest = JSON.parse(
+      readFileSync(join(perf.outDir, "latest.json"), "utf8"),
+    );
+    const result = (latest.results ?? []).find(
+      (r: { id: string }) => r.id === ID,
+    );
+    expect(result.formulaCoverage).toEqual({
+      expectedNodes: 42,
+      measuredRounds: 0,
+      expectedRounds: 2,
+      unmeasured: true,
+    });
+  });
+
+  it("open 场景判红不落 raw 时：合成 UNMEASURED 行也标公式未覆盖，基线带覆盖状态", () => {
+    // 真实链路（验收 F2）：公式节点没挂载 → measured 轮断言失败 → 本场景不写
+    // raw → playwright 报告里该 spec 为 timedOut → report 合成 UNMEASURED 行。
+    // 这一行必须带公式未覆盖标注，且播种出的基线本身也要带覆盖状态。
+    writeBaseline(NOW_FIXTURE, FULL_METRICS);
+    writeRaw(undefined, {
+      expectedNodes: 76,
+      measuredRounds: 2,
+      expectedRounds: 2,
+      unmeasured: false,
+    });
+    mkdirSync(perf.outDir, { recursive: true });
+    writeFileSync(
+      join(perf.outDir, "pw-report.json"),
+      JSON.stringify({
+        suites: [
+          {
+            specs: [
+              {
+                title: ID,
+                tests: [{ results: [{ status: "passed" }] }],
+              },
+              {
+                title: "open-M-rich",
+                tests: [{ results: [{ status: "timedOut" }] }],
+              },
+            ],
+          },
+        ],
+      }),
+      "utf8",
+    );
+    // 有 UNMEASURED 场景时 report 按设计 exit 2（结论不完整 ≠ 没回归），
+    // 这里只验证产物，因此用 spawnSync 接收退出码而不是让 execFileSync 抛错。
+    const run = spawnSync(
+      process.execPath,
+      [REPORT, "--phase=final", "--update-baseline=1"],
+      { env: perf.env(), encoding: "utf8" },
+    );
+    expect(run.status, `report stderr=${run.stderr}`).toBe(2);
+
+    const report = readFileSync(join(perf.outDir, "report.md"), "utf8");
+    expect(report).toContain("### 公式测量未覆盖（UNMEASURED）");
+    expect(report).toContain("open-M-rich：场景未测量");
+
+    const latest = JSON.parse(
+      readFileSync(join(perf.outDir, "latest.json"), "utf8"),
+    );
+    const synthetic = (latest.results ?? []).find(
+      (r: { id: string }) => r.id === "open-M-rich",
+    );
+    expect(synthetic?.baselineState).toContain("UNMEASURED");
+    expect(synthetic?.formulaCoverage?.unmeasured).toBe(true);
+
+    const baseline = JSON.parse(
+      readFileSync(
+        join(perf.baselineDir, "local", "quick", "headless", "r2", `${ID}.json`),
+        "utf8",
+      ),
+    );
+    expect(baseline.formulaCoverage).toEqual({
+      expectedNodes: 76,
+      measuredRounds: 2,
+      expectedRounds: 2,
+      unmeasured: false,
+    });
   });
 });

@@ -11,6 +11,7 @@ import { PERF_DOC_PATH } from "../inject";
 import { bootWithFiles, openFileInTree } from "../helpers";
 import {
   armTiming,
+  countExpectedMathNodes,
   createAttributionAggregator,
   createSessionProbe,
   installObservers,
@@ -44,6 +45,10 @@ for (const tier of ctx.tiers) {
       test.skip(!shouldRun(id, ctx), "不在本次运行范围（复测过滤）");
 
       const fixture = fixtureFor(tier, kind);
+      // 预期公式节点数（#379 评审 R4）：从 markdown 源文数出「成对 $$ 块 +
+      // 行内 $...$」。>0 时 waitFormulaSettled 必须等到节点真的挂载，
+      // 否则调用瞬间 nodeViews=0 会被 `0 >= 0` 当成「没有公式、已完成」。
+      const expectedFormulaNodes = countExpectedMathNodes(fixture.content);
       const probe = createSessionProbe();
       const attribution = createAttributionAggregator();
       const ttiSamples: number[] = [];
@@ -77,6 +82,7 @@ for (const tier of ctx.tiers) {
         // KaTeX 动态导入可能在 TTI 之后才落地，若不等待就会把「还没渲染」记成「零成本」。
         const formula = await page.evaluate(waitFormulaSettled, {
           maxFrames: 1800,
+          expectedNodes: expectedFormulaNodes,
         });
         const observersAfterFormula = await page.evaluate(readObservers);
         const buckets = await page.evaluate(readPerfProbe);
@@ -99,18 +105,27 @@ for (const tier of ctx.tiers) {
               `${id}：KaTeX 未在等待窗口内渲染完全（${formula.rendered}+${formula.empty} 空/${formula.nodeViews}）`,
             ).toBeGreaterThanOrEqual(formula.nodeViews);
           }
-          // 含公式档位必须先确认「等到了完成条件」（#379 评审 P1）：帧预算耗尽时
-          // formula.at 只是超时时刻，拿它当 formulaReadyMs 等于把「还没渲染完」
-          // 记成「渲染耗时」，正好破坏 #376「先测量再决定」的证据边界。
-          // 测量失败就判红——本轮不落 raw，场景按「未测量」处理（exit 2）。
-          if (formula.nodeViews > 0) {
+          // 含公式档位（含 S-rich / custom）必须先确认节点真的挂载且渲染完全
+          // （#379 评审 R4）：帧预算耗尽时 formula.at 只是超时时刻，拿它当
+          // formulaReadyMs 等于把「还没渲染完」记成「渲染耗时」。测量失败就判红
+          // ——本轮不落 raw，场景按「未测量」处理（exit 2）。
+          if (expectedFormulaNodes > 0) {
             expect(
-              formula.complete,
-              `${id}：KaTeX 未在 ${formula.frames} 帧内渲染完全` +
-                `（${formula.rendered}+${formula.empty} 空/${formula.nodeViews}），` +
-                `公式归因按测量失败处理`,
-            ).toBe(true);
+              formula.nodeViews,
+              `${id}：预期 ${expectedFormulaNodes} 个公式节点，实际只挂载 ` +
+                `${formula.nodeViews} 个（等待 ${formula.frames} 帧），按 UNMEASURED 处理`,
+            ).toBeGreaterThanOrEqual(expectedFormulaNodes);
           }
+          expect(
+            formula.complete,
+            `${id}：KaTeX 未在 ${formula.frames} 帧内渲染完全` +
+              `（${formula.rendered}+${formula.empty} 空/${formula.nodeViews}），` +
+              `公式归因按测量失败处理`,
+          ).toBe(true);
+          expect(
+            formula.unmeasured,
+            `${id}：公式节点未挂载却被判为已完成（UNMEASURED）`,
+          ).toBe(false);
           // 标定负载：#236 与编辑器代码无关的固定工作量，用于把「机器慢」与「代码回归」分开
           await probe.measure(page);
           ttiSamples.push(endAt - startAt);
@@ -123,8 +138,9 @@ for (const tier of ctx.tiers) {
               : 0,
           );
           attribution.add(buckets);
-          // 走到这里说明上面「等到完成条件」的断言已通过，记录的是完整样本
-          if (formula.nodeViews > 0) {
+          // 走到这里说明上面「节点存在 + 等到完成条件」的断言已通过。
+          // 含公式档位一律写标量，S-rich / custom 不再被 `nodeViews > 0` 静默跳过。
+          if (expectedFormulaNodes > 0) {
             formulaReadyMs.push(formula.at - startAt);
             formulaNodeViews.push(formula.nodeViews);
             formulaRendered.push(formula.rendered);
@@ -174,6 +190,18 @@ for (const tier of ctx.tiers) {
           cls: avg(clsValues),
           heapDeltaMB: avg(heapDeltas),
         },
+        // 归因标量的覆盖状态（#379 评审 R4）：部分缺采必须在产物里可见
+        attributionCoverage: attribution.coverage(),
+        // 公式测量覆盖状态：预期节点数 / 实际记到完整样本的轮数。
+        // 判红时本 raw 根本不落盘，report 会给出 UNMEASURED 行；这里让
+        // 「有公式档位却没写 formulaReadyMs」也无法伪装成纯文本档。
+        formulaCoverage: {
+          expectedNodes: expectedFormulaNodes,
+          measuredRounds: formulaReadyMs.length,
+          expectedRounds: ctx.rounds,
+          unmeasured:
+            expectedFormulaNodes > 0 && formulaReadyMs.length < ctx.rounds,
+        },
       });
     });
   }
@@ -183,3 +211,5 @@ function avg(values: number[]): number {
   if (values.length === 0) return 0;
   return Math.round((values.reduce((s, v) => s + v, 0) / values.length) * 100) / 100;
 }
+
+

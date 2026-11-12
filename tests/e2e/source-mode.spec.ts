@@ -318,14 +318,17 @@ test.describe("源代码模式", () => {
     await page.keyboard.type("# 首帧标题");
     await expectOutlineDebounceStretched(page, outlineBaseline);
 
-    // 首帧采样：ProseMirror 重新可见后的第一个绘制帧里，大纲面板有哪几项。
-    // rAF 回调在绘制前执行，读到的就是这一帧真正会画出来的 DOM。
-    //
-    // 这里只锁「标题列表」：首帧的高亮索引在本场景里与 tracker 的旧值巧合一致
-    // （共享滚动容器跟着源码视口滚过），无法区分对错，因此高亮保值由
-    // tests/unit/outline-tracker.test.ts 的同步刷新用例确定性锁定。
+    // 首帧采样：ProseMirror 重新可见后的第一个绘制帧里，大纲面板有哪几项、
+    // 哪一项是活动项。rAF 回调在绘制前执行，读到的就是这一帧真正会画出来的 DOM。
+    // 除了列表，还要锁首帧高亮（#375 评审 R4）：光标在文档末尾，活动项必须是
+    // 新标题集的末尾两项之一，闪回文档开头的章节就要判红。
     await page.evaluate(() => {
-      const w = window as unknown as { __firstFrameOutline?: string[] | null };
+      const w = window as unknown as {
+        __firstFrameOutline?: {
+          texts: string[];
+          activeText: string | null;
+        } | null;
+      };
       w.__firstFrameOutline = null;
       const tick = () => {
         const holder = document.querySelector(".md-editor-wysiwyg");
@@ -336,9 +339,15 @@ test.describe("源代码模式", () => {
           getComputedStyle(holder).display !== "none" &&
           pm.getBoundingClientRect().height > 0;
         if (visible) {
-          w.__firstFrameOutline = Array.from(
-            document.querySelectorAll(".outline-panel .outline-item"),
-          ).map((el) => el.textContent ?? "");
+          w.__firstFrameOutline = {
+            texts: Array.from(
+              document.querySelectorAll(".outline-panel .outline-item"),
+            ).map((el) => el.textContent ?? ""),
+            activeText:
+              document
+                .querySelector(".outline-panel .outline-item-active")
+                ?.textContent ?? null,
+          };
           return;
         }
         requestAnimationFrame(tick);
@@ -355,8 +364,11 @@ test.describe("源代码模式", () => {
         async () =>
           page.evaluate(
             () =>
-              (window as unknown as { __firstFrameOutline?: string[] | null })
-                .__firstFrameOutline ?? null,
+              (
+                window as unknown as {
+                  __firstFrameOutline?: { texts: string[] } | null;
+                }
+              ).__firstFrameOutline ?? null,
           ),
         { timeout: 5_000 },
       )
@@ -364,16 +376,29 @@ test.describe("源代码模式", () => {
 
     const firstFrame = await page.evaluate(
       () =>
-        (window as unknown as { __firstFrameOutline?: string[] })
-          .__firstFrameOutline ?? [],
+        (window as unknown as {
+          __firstFrameOutline?: { texts: string[]; activeText: string | null };
+        }).__firstFrameOutline ?? { texts: [], activeText: null },
     );
     // 退出过渡必须同帧刷新大纲：首个可见帧就要有 4 项且含新标题，
     // 不能先画旧快照、等 150ms 防抖再补
     expect(
-      firstFrame.length,
-      `首帧大纲项：${JSON.stringify(firstFrame)}`,
+      firstFrame.texts.length,
+      `首帧大纲项：${JSON.stringify(firstFrame.texts)}`,
     ).toBe(4);
-    expect(firstFrame[3]).toContain("首帧标题");
+    expect(firstFrame.texts[3]).toContain("首帧标题");
+    // 首帧高亮不得闪回文档开头：光标/视口锚点在末尾，活动项必须是末尾两项
+    expect(
+      firstFrame.activeText,
+      `首个可见帧没有活动项，标题集=${JSON.stringify(firstFrame.texts)}`,
+    ).toBeTruthy();
+    expect(
+      [firstFrame.texts[2], firstFrame.texts[3]],
+      `首帧活动项「${firstFrame.activeText}」闪回了文档开头，标题集=${JSON.stringify(firstFrame.texts)}`,
+    ).toContain(firstFrame.activeText);
+
+    // 退出后滚动的高亮跟手由 SM11（长文档）覆盖：本用例的 outline-demo.md
+    // 太短、.editor-scroll 没有滚动空间，在这里做滚动断言只会得到恒真结果。
 
     // 越过被拉长的旧定时器：已卸载的源码防抖不得把退出前的快照写回来
     await page.waitForTimeout(1_400);
@@ -387,6 +412,73 @@ test.describe("源代码模式", () => {
             .__outlineTimerFires,
       ),
     ).toBe(0);
+  });
+
+  test("SM11 退出源码模式后滚动时大纲高亮持续跟手（#375 R4）", async ({ page }) => {
+    // 评审 R4 条件 2 的 E2E 证据：整文档替换后几何缓存必须无条件重建，
+    // 否则持续滚动期间高亮会冻结在退出时发布的那一项。用长文档保证
+    // .editor-scroll 真的有滚动空间（outline-demo.md 太短，测不出来）。
+    await openFile(page, "outline-demo.md");
+    const panel = page.locator(".outline-panel");
+    if (!(await panel.isVisible().catch(() => false))) {
+      await page.keyboard.press(`${MOD}+'`);
+      await expect(panel).toBeVisible({ timeout: 5_000 });
+    }
+    await page.keyboard.press(`${MOD}+Alt+KeyS`);
+    const source = page.getByTestId("source-mode-editor");
+    await expect(source.locator(".cm-content")).toBeVisible({ timeout: 5_000 });
+
+    const doc = [
+      "# 文档顶部",
+      "",
+      ...Array.from({ length: 30 }, (_, i) =>
+        [
+          `## 章节 ${i + 1}`,
+          "",
+          ...Array.from({ length: 8 }, (_, j) => `章节 ${i + 1} 正文 ${j + 1}`),
+          "",
+        ].join("\n"),
+      ),
+    ].join("\n");
+    await source.locator(".cm-content").click();
+    await page.keyboard.press(`${MOD}+KeyA`);
+    await page.keyboard.insertText(doc);
+    await expect(panel.locator(".outline-item")).toHaveCount(31, {
+      timeout: 10_000,
+    });
+
+    await page.keyboard.press(`${MOD}+Alt+KeyS`);
+    await expect(page.locator(".ProseMirror")).toBeVisible({ timeout: 5_000 });
+    await expect(panel.locator(".outline-item")).toHaveCount(31);
+
+    const active = panel.locator(".outline-item-active");
+    const scroller = page.locator(".editor-scroll");
+    // 无条件几何调度（200ms，不依赖 scroll 事件）落地后再开始滚动
+    await page.waitForTimeout(300);
+    await scroller.evaluate((el) => {
+      el.scrollTop = el.scrollHeight;
+    });
+    // 底部具体命中哪一节取决于视口偏移与末尾段落高度，不写死编号；
+    // 关键是高亮确实随滚动离开了首章（否则就是冻结在退出时发布的那一项）
+    await expect(active).toContainText("章节 ", { timeout: 5_000 });
+    await expect(active).not.toHaveText("文档顶部", { timeout: 5_000 });
+    await scroller.evaluate((el) => {
+      el.scrollTop = 0;
+    });
+    await expect(active).toContainText("文档顶部", { timeout: 5_000 });
+    // 连续来回滚动：每一次都要跟手（不是只校验最后一帧）。
+    // 若高亮在持续滚动期间冻结，第一个 down 断言就会挂在「文档顶部」上。
+    for (let i = 0; i < 6; i += 1) {
+      const down = i % 2 === 0;
+      await scroller.evaluate((el, toBottom) => {
+        el.scrollTop = toBottom ? el.scrollHeight : 0;
+      }, down);
+      await expect(active).toContainText(down ? "章节 " : "文档顶部", {
+        timeout: 5_000,
+      });
+      if (down) await expect(active).not.toHaveText("文档顶部");
+      await page.waitForTimeout(40);
+    }
   });
 
   test("SM9 源码模式滚动时活动标题按行号定位（含重复标题）", async ({ page }) => {

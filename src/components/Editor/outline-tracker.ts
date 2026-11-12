@@ -37,11 +37,23 @@ const GEO_REFRESH_MS = 200;
 interface ImmediateRefreshRequest {
   /** 已处理到的请求序号（单调递增，用来判定「这是新请求」） */
   seq: number;
-  /** 发起方给出的退出瞬间快照（活动标题按标题身份重映射，见 remapActiveIndex） */
+  /** 发起方给出的退出瞬间快照（身份重映射兜底，见 remapActiveIndex） */
   active: EditorOutlineSnapshot | null;
+  /**
+   * 源码视口顶部内容锚点（阅读位置）换算到新文档的 ProseMirror 位置。
+   * 这是**最新文档**的位置信息，优先于可能滞后一个防抖窗口的 store 快照。
+   */
+  anchorPos: number | null;
+  /** 源码光标（编辑位置）换算到新文档的 PM 位置；与 anchorPos 取较靠后者 */
+  caretPos: number | null;
 }
 
-const NO_REFRESH_REQUEST: ImmediateRefreshRequest = { seq: 0, active: null };
+const NO_REFRESH_REQUEST: ImmediateRefreshRequest = {
+  seq: 0,
+  active: null,
+  anchorPos: null,
+  caretPos: null,
+};
 
 /**
  * 标题文本归一化，仅用于「同一个标题」的比对（#375）。
@@ -61,17 +73,36 @@ function normalizeOutlineText(text: string): string {
     .trim();
 }
 
+/** 身份键：level + 归一化文本（大文档只归一化一次，避免 O(n²) 次正则） */
+const headingKey = (h: EditorOutlineHeading): string =>
+  `${h.level}\u0000${normalizeOutlineText(h.text)}`;
+
+/** 两个标题序列的最长公共前缀长度（用于「哪一个同身份项才是原来那一项」消歧） */
+function commonPrefix(a: readonly string[], b: readonly string[]): number {
+  let i = 0;
+  while (i < a.length && i < b.length && a[i] === b[i]) i += 1;
+  return i;
+}
+
 /**
- * 把「退出瞬间面板上的活动标题」映射到替换后的标题集（#375）。
+ * 把「退出瞬间面板上的活动标题」映射到替换后的标题集（#375 评审 R4）。
  *
- * 源码侧传进来的是它最后一次发布的快照，而那次发布被 200ms 防抖门控：
- * 用户若在这段窗口里在文档开头插入了标题，索引会整体位移，直接按索引取会错位。
- * 因此按「level + 归一化文本」重新定位，同名标题按在旧列表里的出现次序消歧
- * （重复标题是合法文档结构，SM9 就在测这个）。
+ * 旧实现按「同身份项在旧列表里的出现次序 ordinal」取新列表第 ordinal 个，
+ * 但用户在**活动项之前插入一个同身份标题**时，新列表多出一项、ordinal 不变，
+ * 会选中新插入的那一项（例：旧 [A,B] 高亮 B，新 [A,B,B] 应选 index 2，
+ * 旧实现给 1）。身份本身无法区分两个完全相同的标题，必须用上下文对齐。
  *
- * 返回 null 表示「无法从快照推出标题身份」（没有快照 / 快照没有活动项），
- * 由调用方按自己的兜底链处理；「标题被删或改名」不算无法推出——退回原索引
- * 并钳进新列表长度，这是最接近用户预期的一项。
+ * 因此对每个同身份候选 j，用「旧活动项之前的序列与新列表 j 之前的公共前缀」
+ * +「旧活动项之后的序列与新列表 j 之后的公共前缀」打分；平局取靠后的候选
+ * （插入发生在活动项之前时原项后移）。找不到任何同身份项（改名/删除）时退回
+ * 原索引并钳进新列表长度。
+ *
+ * **已知歧义**：若新旧列表只差一个同身份项、活动项又在末尾，「插在其前」与
+ * 「插在其后」在身份上完全对称，任何纯身份算法都无法区分；这里按评审复现
+ * （插入在前）取靠后。正常退出时 `markOutlineImmediateRefresh` 会带上
+ * `anchorPos`（光标可见时还有 `caretPos`），用最新文档的位置二分定位并优先
+ * 于本兜底；只有「连位置信息都没有」的异常路径（`snap` 缺失时两个位置都不传）
+ * 才退回身份重映射，歧义仅在那里出现。
  */
 function remapActiveIndex(
   next: readonly EditorOutlineHeading[],
@@ -83,29 +114,30 @@ function remapActiveIndex(
   const clamp = (i: number) => Math.min(Math.max(i, 0), next.length - 1);
   const target = active.headings[index];
   if (!target) return clamp(index);
-  const targetText = normalizeOutlineText(target.text);
-  // 目标标题在旧列表里是第几个同类项（同 level + 同归一化文本）
-  let ordinal = 0;
-  for (let i = 0; i < index; i += 1) {
-    const h = active.headings[i];
-    if (
-      h &&
-      h.level === target.level &&
-      normalizeOutlineText(h.text) === targetText
-    ) {
-      ordinal += 1;
+
+  const nextKeys = next.map(headingKey);
+  const oldKeys = active.headings.map(headingKey);
+  const targetKey = oldKeys[index];
+  const candidates: number[] = [];
+  for (let i = 0; i < nextKeys.length; i += 1) {
+    if (nextKeys[i] === targetKey) candidates.push(i);
+  }
+  if (candidates.length === 0) return clamp(index);
+
+  const before = oldKeys.slice(0, index);
+  const after = oldKeys.slice(index + 1);
+  let best = candidates[0];
+  let bestScore = -1;
+  for (const j of candidates) {
+    const score =
+      commonPrefix(before, nextKeys.slice(0, j)) +
+      commonPrefix(after, nextKeys.slice(j + 1));
+    if (score >= bestScore) {
+      bestScore = score;
+      best = j;
     }
   }
-  let seen = 0;
-  for (let i = 0; i < next.length; i += 1) {
-    const h = next[i];
-    if (h.level !== target.level || normalizeOutlineText(h.text) !== targetText) {
-      continue;
-    }
-    if (seen === ordinal) return i;
-    seen += 1;
-  }
-  return clamp(index);
+  return best;
 }
 
 /**
@@ -116,20 +148,30 @@ function remapActiveIndex(
  * （用户在源码里新增的标题要等防抖落地才出现）。带上此标记的替换在本帧内
  * 重算并发布，不额外开一个异步窗口。
  *
- * `active` 是退出瞬间面板上的快照。必须由调用方给出：tracker 自身在源码模式期间
- * 是静默的，它手里的索引停留在「进入源码模式那一刻」，直接沿用会让高亮闪回
- * 进入前的章节。
+ * `anchorPos`（视口锚点＝阅读位置）与 `caretPos`（源码光标＝编辑位置）都必须换算
+ * 到**新文档**的 PM 位置：它们来自最新源码，不受 store 快照滞后一个防抖窗口影响，
+ * 也能消歧「活动项前插入同身份标题」。首帧取两者二分结果中较靠后的章节（用户
+ * 最近接触的内容）；`active` 快照仅在两者都缺失时作身份重映射兜底。
  *
  * 只由「整文档替换」这类昂贵且用户可见的过渡使用——按键路径仍是防抖，
  * 否则每敲一个字都要遍历全文（#375 的性能前提）。
  */
 export const markOutlineImmediateRefresh = (
   tr: Transaction,
-  opts: { active?: EditorOutlineSnapshot | null } = {},
-): Transaction =>
-  tr.setMeta(key, {
+  opts: {
+    active?: EditorOutlineSnapshot | null;
+    anchorPos?: number | null;
+    caretPos?: number | null;
+  } = {},
+): Transaction => {
+  const finitePos = (p?: number | null): number | null =>
+    typeof p === "number" && Number.isFinite(p) ? p : null;
+  return tr.setMeta(key, {
     active: opts.active ?? null,
+    anchorPos: finitePos(opts.anchorPos),
+    caretPos: finitePos(opts.caretPos),
   } as Partial<ImmediateRefreshRequest>);
+};
 
 export const outlineTrackerPlugin = (
   onChange: (snapshot: EditorOutlineSnapshot) => void,
@@ -143,7 +185,12 @@ export const outlineTrackerPlugin = (
           | Partial<ImmediateRefreshRequest>
           | undefined;
         if (!meta) return value;
-        return { seq: value.seq + 1, active: meta.active ?? null };
+        return {
+          seq: value.seq + 1,
+          active: meta.active ?? null,
+          anchorPos: meta.anchorPos ?? null,
+          caretPos: meta.caretPos ?? null,
+        };
       },
     },
     view: (view) => {
@@ -222,12 +269,10 @@ export const outlineTrackerPlugin = (
         // 视口下方，视口上方块的文档内位置不变，缓存仍然准确；停歇后
         // 200ms（GEO_REFRESH_MS）内完成校正。
         //
-        // 整文档替换后的缓存属于替换前的 DOM：**整个滚动会话**都不采样也不
-        // 重建，等停歇路径的 refreshGeometryAndSample 一次性重建。
-        // 代价是退出后连续滚动时高亮停在退出时发布的那一项、不跟手；换来的是
-        // 「滚动帧零几何读取」（#212）——滚动帧里做 N 次 rect 会重演 p99 尖刺，
-        // 而退出滚动恢复动画只有 ~250ms，跟着动反而更晃。首帧正确性由退出时的
-        // 同步发布保证，不依赖几何。
+        // 整文档替换后的缓存属于替换前的 DOM：重建完成前不采样，避免用旧
+        // 几何算出错误高亮。重建由 scheduleGeometryRefresh 在 GEO_REFRESH_MS
+        // 内无条件触发（不依赖 scroll 事件），之后滚动采样正常跟手；重建本身
+        // 不在滚动帧内，守住 #212。
         if (geometryDirty) return;
         if (headingTops.length === 0) return;
         // 二分找最后一个 top <= scrollTop + offset 的标题（升序保证）
@@ -254,9 +299,36 @@ export const outlineTrackerPlugin = (
         onChange({ headings, activeIndex });
       };
 
+      /**
+       * 整文档替换后的**无条件**几何重建调度（#375 评审 R4）。
+       *
+       * 不能复用 `restTimer`：每个 scroll 事件都会 clear 并重排它，持续滚动时
+       * 永远不触发，高亮会冻结整个滚动会话。这条 timer 独立于 scroll 事件，
+       * 退出后最多 GEO_REFRESH_MS 必然重建一次，之后滚动采样就能正常跟手；
+       * 重建本身发生在宏任务里而不是滚动帧，仍守住 #212「滚动帧零几何读取」。
+       */
+      let geometryTimer: ReturnType<typeof setTimeout> | null = null;
+      const scheduleGeometryRefresh = () => {
+        if (geometryTimer !== null) return;
+        geometryTimer = setTimeout(() => {
+          geometryTimer = null;
+          refreshGeometryAndSample();
+        }, GEO_REFRESH_MS);
+      };
+
       /** 滚动停歇后的几何刷新：失效检测 + 批量重建 + 重新采样定位 */
       const refreshGeometryAndSample = () => {
-        if (stale) return; // doc 变更防抖窗口内，交由 update 的重建路径
+        // 无论谁触发的，几何一旦刷新就取消尚未触发的无条件调度，避免重复重建
+        if (geometryTimer !== null) {
+          clearTimeout(geometryTimer);
+          geometryTimer = null;
+        }
+        if (stale) {
+          // doc 变更防抖窗口内，通常由 150ms 重算回调重建；若那条路径没走到，
+          // 再排一次自己的调度兜底（不占用滚动帧）
+          scheduleGeometryRefresh();
+          return;
+        }
         if (!view.dom.isConnected || !scroller) return;
         if (
           geometryDirty ||
@@ -330,15 +402,31 @@ export const outlineTrackerPlugin = (
               const previousActive = activeIndex;
               headings = extractEditorOutline(nextView.state.doc);
               // 此刻 WYSIWYG 的选区与滚动还没恢复（退出过渡在 2 帧后才做锚点
-              // 恢复），按选区推导会把高亮闪回首标题。三级兜底：
-              //   ① 调用方给了快照 → 按标题身份重映射（位移/改名都能对准）；
-              //   ② 没给快照（tracker 被别的调用方复用）→ 用自己手里的索引；
-              //   ③ 仍为空（例如快照属于别的文件，activeIndex 为 null）→ 选区推导。
-              // ②只在「完全没快照」时生效：给了快照却仍沿用旧索引，正是
+              // 恢复），按当前 PM 选区推导会把高亮闪回首标题。四级兜底：
+              //   ① 视口锚点 + 源码光标换算到「新文档」的 PM 位置，二分定位后
+              //      取较靠后的章节（用户最近接触的内容；不受 store 快照滞后
+              //      一个防抖窗口影响，也能消歧同身份插入）；
+              //   ② 给了快照 → 按标题身份 + 上下文对齐重映射；
+              //   ③ 完全没给快照（tracker 被别的调用方复用）→ 用自己手里的索引；
+              //   ④ 仍为空（例如快照属于别的文件）→ 选区推导。
+              // ③只在「完全没快照」时生效：给了快照却仍沿用旧索引，正是
               // 让高亮闪回进入源码模式前章节的那条路径。
-              const preferred = request.active
-                ? remapActiveIndex(headings, request.active)
-                : previousActive;
+              const locate = (pos: number | null): number | null =>
+                typeof pos === "number" && pos >= 0
+                  ? findActiveHeadingIndex(headings, pos)
+                  : null;
+              const positioned = [
+                locate(request.anchorPos),
+                locate(request.caretPos),
+              ].filter((i): i is number => typeof i === "number");
+              const byPosition = positioned.length
+                ? Math.max(...positioned)
+                : null;
+              const preferred =
+                byPosition ??
+                (request.active
+                  ? remapActiveIndex(headings, request.active)
+                  : previousActive);
               activeIndex =
                 typeof preferred === "number" &&
                 preferred >= 0 &&
@@ -350,8 +438,10 @@ export const outlineTrackerPlugin = (
                     );
               // 几何缓存在这一帧不重建：退出帧已付全文解析 + 整文档替换，
               // 再叠加 N 次 getBoundingClientRect（425 标题实测 27ms）会把
-              // 首帧继续推后。交给替换后的停歇路径重建（见 sampleViewport）。
+              // 首帧继续推后。排一次与 scroll 事件无关的无条件重建——
+              // 否则「退出后没有 scroll / 持续滚动」会让高亮一直冻结。
               geometryDirty = true;
+              scheduleGeometryRefresh();
               stale = false;
               onChange({ headings, activeIndex });
               return;
@@ -400,6 +490,7 @@ export const outlineTrackerPlugin = (
           if (sampleTimer) clearTimeout(sampleTimer);
           if (extractTimer) clearTimeout(extractTimer);
           if (restTimer) clearTimeout(restTimer);
+          if (geometryTimer) clearTimeout(geometryTimer);
         },
       };
     },

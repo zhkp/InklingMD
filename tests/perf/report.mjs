@@ -275,11 +275,15 @@ function attributionRows(raw, baseline, incomparableReason) {
     const cur = raw.scalars?.[metric];
     if (typeof cur !== "number") continue;
     const base = baseline ? baselineValue(baseline, metric) : undefined;
+    // 覆盖状态（#379 评审 R4）：随 raw.attributionCoverage 落到归因表和
+    // latest.json，部分缺采不再以「普通完整标量」的面貌出现。
+    const coverage = raw.attributionCoverage?.metrics?.[metric] ?? null;
     rows.push({
       metric,
       base: typeof base === "number" ? base : null,
       cur,
       incomparable: incomparableReason ?? null,
+      coverage,
     });
   }
   return rows;
@@ -399,7 +403,23 @@ function buildStats(raw) {
   ]) {
     if (metric in (raw.scalars ?? {})) {
       const v = raw.scalars[metric];
-      metrics[metric] = { median: v, p95: null, max: null, n: null, scalar: true };
+      const cov = raw.attributionCoverage?.metrics?.[metric];
+      metrics[metric] = {
+        median: v,
+        p95: null,
+        max: null,
+        n: null,
+        scalar: true,
+        // 进基线的覆盖状态（#379 评审 R4）：播种时若只有部分轮采到，
+        // 基线自身就带 PARTIAL 标记，后续对照不会被当成完整参考值。
+        ...(cov
+          ? {
+              observedRounds: cov.observed,
+              expectedRounds: cov.expected,
+              partial: cov.observed < cov.expected,
+            }
+          : {}),
+      };
     }
   }
   return metrics;
@@ -818,6 +838,9 @@ function main() {
             rounds: source.rounds,
             fixture: source.fixture,
             metrics: withHistory(buildStats(source), previous, source),
+            // 公式测量覆盖状态进基线（#379 评审 R4）：播种时若公式节点
+            // 未挂载 / 完整样本不足，基线自身必须带 UNMEASURED 标记。
+            formulaCoverage: source.formulaCoverage ?? null,
             updatedAt: new Date().toISOString(),
           },
           null,
@@ -847,6 +870,10 @@ function main() {
         state.ok ? baseline : null,
         state.ok ? null : state.reason,
       ),
+      // 覆盖状态（#379 评审 R4）：归因标量的 observed/expected、公式节点预期数
+      // 与完整样本轮数都随 latest.json 落地，不把部分缺采写成普通完整标量。
+      attributionCoverage: raw.attributionCoverage ?? null,
+      formulaCoverage: raw.formulaCoverage ?? null,
       // 会话标定（#236）：不参与判定，只供「环境归因」披露使用（首轮 / 复测 / 确认轮三轮对账）
       sessionProbe: probe,
       // 该场景是否进入了确认轮（#294）：由 retest2.json 决定，不是「碰巧有第三轮数据」。
@@ -893,6 +920,20 @@ function main() {
           metrics: [],
           overMetrics: [],
           attribution: [],
+          // 字段集必须与正常场景完全一致；合成对象没有 raw，归因覆盖一律为 null。
+          // open 场景被判 UNMEASURED（超时/公式节点未挂载导致测试失败、raw 不落盘）
+          // 时，公式测量同样没拿到完整样本——显式标出来，避免 latest.json 里
+          // 「公式节点没挂载」与「场景超时」看起来完全一样。
+          attributionCoverage: null,
+          formulaCoverage:
+            parsed?.scenario === "open"
+              ? {
+                  expectedNodes: 0,
+                  measuredRounds: 0,
+                  expectedRounds: first.rounds ?? 0,
+                  unmeasured: true,
+                }
+              : null,
           sessionProbe: null,
           // 合成对象没进任何轮次，#294 的新字段一律置空（它不参与判定，也不该被披露成候选）。
           // 字段集必须与正常场景**完全一致**——否则 latest.json 里同一份 schema
@@ -1291,8 +1332,8 @@ function main() {
     lines.push("");
     lines.push("### 归因指标（进基线、不参与判定，issue #379）");
     lines.push("");
-    lines.push("| 场景 | 指标 | 基线参考 | 本次 | 变化 |");
-    lines.push("|---|---|---|---|---|");
+    lines.push("| 场景 | 指标 | 基线参考 | 本次 | 变化 | 覆盖 |");
+    lines.push("|---|---|---|---|---|---|");
     for (const row of attributionRowsAll) {
       // 不可比：不展示旧参考值，也不展示变化率（那会是伪对照），只标原因
       const baseCell = row.incomparable
@@ -1304,9 +1345,36 @@ function main() {
         row.base === 0
           ? "—"
           : `${(((row.cur - row.base) / row.base) * 100).toFixed(1)}%`;
+      // 部分缺采显式标注（#379 评审 R4）：n/m 轮采到，不让读者把「1/2」
+      // 的均值当成「2 轮都测过」。
+      const cov = row.coverage;
+      const coverageCell = cov
+        ? cov.observed < cov.expected
+          ? `PARTIAL ${cov.observed}/${cov.expected}`
+          : `${cov.observed}/${cov.expected}`
+        : "—";
       lines.push(
-        `| ${row.id} | ${row.metric} | ${baseCell} | ${round(row.cur)} | ${delta} |`,
+        `| ${row.id} | ${row.metric} | ${baseCell} | ${round(row.cur)} | ${delta} | ${coverageCell} |`,
       );
+    }
+  }
+  // 公式测量未覆盖（#379 评审 R4）：含公式档位若没拿到完整样本，显式标
+  // UNMEASURED，不让读者把「没有 formulaReadyMs」误读成「纯文本档」。
+  const formulaUnmeasured = results.filter(
+    (r) => r.formulaCoverage?.unmeasured,
+  );
+  if (formulaUnmeasured.length > 0) {
+    lines.push("");
+    lines.push("### 公式测量未覆盖（UNMEASURED）");
+    lines.push("");
+    for (const r of formulaUnmeasured) {
+      const c = r.formulaCoverage;
+      const detail =
+        c.expectedNodes > 0
+          ? `预期 ${c.expectedNodes} 个公式节点，` +
+            `只有 ${c.measuredRounds}/${c.expectedRounds} 轮拿到完整样本`
+          : `场景未测量（${r.baselineState}），公式节点数与完整样本轮数均不可用`;
+      lines.push(`- ${r.id}：${detail}`);
     }
   }
   lines.push("");

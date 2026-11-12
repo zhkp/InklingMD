@@ -294,10 +294,38 @@ export function useSourceModeTransition({
             const newDoc = parser(value);
             // 整文档替换挂「同帧刷新大纲」标记（#375）：否则面板在退出后的
             // 首个可见帧仍是源码模式退出前的快照，新增标题要等 tracker 的
-            // 150ms 防抖才出现。同时把面板此刻的快照带过去——源码侧已按最新
-            // 文档定位过，tracker 自己手里的索引还停在进入源码模式那一刻；
-            // 快照里的标题集可能比最新文档旧一个防抖窗口，tracker 会按标题
-            // 身份（level + 文本）重映射，不是直接吃索引。
+            // 150ms 防抖才出现。
+            //
+            // 首帧高亮用「源码视口锚点（阅读位置）+ 源码光标（编辑位置）」换算到
+            // **新文档**的 PM 位置（#375 评审 R4）：store 快照可能滞后一个防抖
+            // 窗口，且遇到「活动项前插入同身份标题」时光靠标题身份无法消歧。
+            // 两条护栏（R4 验收 F1/F6）：
+            //   · 没有卸载快照时**不传位置**——否则 offset 退化成 0 会算出文档
+            //     开头的 pos，把身份兜底永久屏蔽、首帧被钉在首章；
+            //   · 光标只在快照明确标记「光标在源码视口内」时参与：只滚动未编辑
+            //     的往返里 snap.cursor 是旧值，用它取 max 会把高亮留在旧章节。
+            // resolveAnchorProsePos 只读 view.state.doc，因此用 newDoc 造一个
+            // 轻量 view 即可，不必等 dispatch 后重开事务。
+            const docView = {
+              state: { doc: newDoc },
+            } as unknown as EditorView;
+            const anchorPos = snap
+              ? resolveAnchorProsePos(
+                  docView,
+                  value,
+                  snap.anchorOffset ?? snap.cursor,
+                  newDoc.content.size,
+                )
+              : null;
+            const caretPos =
+              snap && snap.cursorVisible
+                ? resolveAnchorProsePos(
+                    docView,
+                    value,
+                    snap.cursor,
+                    newDoc.content.size,
+                  )
+                : null;
             // 快照按 filePath 取（selectOutlineForFile）：切到别的文件时拿到
             // 空快照 → activeIndex 为 null，不会把旧文件的高亮串过来。
             let tr = markOutlineImmediateRefresh(
@@ -306,7 +334,11 @@ export function useSourceModeTransition({
                 view.state.doc.content.size,
                 newDoc.content,
               ),
-              { active: selectOutlineForFile(useOutline.getState(), filePath) },
+              {
+                active: selectOutlineForFile(useOutline.getState(), filePath),
+                anchorPos,
+                caretPos,
+              },
             );
             // 重置撤销历史（issue #27）：整文档替换后旧 PM undo 步骤指向
             // 切换前的快照，Ctrl+Z 会退回与当前 markdown 不一致的旧文档。

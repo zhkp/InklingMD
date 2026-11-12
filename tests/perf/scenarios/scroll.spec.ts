@@ -152,6 +152,7 @@ for (const tier of ctx.tiers) {
           cls: avg(clsValues),
           heapDeltaMB: avg(heapDeltas),
         },
+        attributionCoverage: attribution.coverage(),
       });
     });
   }

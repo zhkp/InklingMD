@@ -558,19 +558,25 @@ describe("outlineTrackerPlugin 整文档替换的同步刷新（#375 首帧）",
     // 退出帧不做几何重建（N 次 getBoundingClientRect 会把首帧继续推后）
     expect(nodeDOM).not.toHaveBeenCalled();
 
-    // ③ 被丢弃的旧防抖不得再回写替换前的标题集
+    // ③ 200ms 无条件几何调度落地（不需要 scroll 事件），一次性批量重建；
+    //    被丢弃的旧防抖不得回写替换前的标题集——每次发布都必须是 4 项新标题
     vi.advanceTimersByTime(300);
-    expect(onChange).toHaveBeenCalledTimes(1);
+    expect(nodeDOM).toHaveBeenCalledTimes(4); // 4 个标题，一次重建
+    for (const call of onChange.mock.calls) {
+      const snap = call[0] as { headings: { text: string }[] };
+      expect(snap.headings.map((h) => h.text)).toEqual([
+        "新增标题",
+        "一级标题",
+        "二级标题",
+        "三级标题",
+      ]);
+    }
 
-    // ④ 滚动帧仍不重建（#212：滚动帧零几何读取），只跳过采样
+    // ④ 重建完成后的滚动帧不再读取几何（#212），但采样可用、高亮能跟手
     harness.setScrollTop(650);
     harness.scroller.dispatchEvent(new Event("scroll"));
     (pendingFrame as ((time: number) => void) | null)?.(0);
-    expect(nodeDOM).not.toHaveBeenCalled();
-
-    // ⑤ 停歇 200ms 后由几何刷新一次性重建并重新定位
-    vi.advanceTimersByTime(200);
-    expect(nodeDOM).toHaveBeenCalledTimes(4); // 4 个标题，一次批量重建
+    expect(nodeDOM).toHaveBeenCalledTimes(4);
 
     pluginView?.destroy?.();
     vi.useRealTimers();
@@ -641,16 +647,26 @@ describe("outlineTrackerPlugin 整文档替换的同步刷新（#375 首帧）",
     return { harness, onChange, asView, pluginView, state };
   }
 
-  /** 整文档替换 + 可选快照，返回本次发布的大纲 */
+  /** 整文档替换 + 可选快照/锚点，返回本次发布的大纲 */
   function replaceWith(
     ctx: ReturnType<typeof setup>,
     titles: string[],
     active?: EditorOutlineSnapshot | null,
+    anchorPos?: number | null,
+    caretPos?: number | null,
   ) {
     const replaced = makeDoc(titles);
+    const opts: {
+      active?: EditorOutlineSnapshot | null;
+      anchorPos?: number | null;
+      caretPos?: number | null;
+    } = {};
+    if (active !== undefined) opts.active = active;
+    if (anchorPos !== undefined) opts.anchorPos = anchorPos;
+    if (caretPos !== undefined) opts.caretPos = caretPos;
     const tr = markOutlineImmediateRefresh(
       ctx.state.tr.replaceWith(0, ctx.state.doc.content.size, replaced.content),
-      active === undefined ? {} : { active },
+      opts,
     );
     const next = ctx.state.apply(tr);
     ctx.pluginView?.update?.(ctx.asView(next), ctx.state as never);
@@ -763,5 +779,183 @@ describe("outlineTrackerPlugin 整文档替换的同步刷新（#375 首帧）",
     vi.useRealTimers();
     vi.restoreAllMocks();
     ctx.harness.scroller.remove();
+  });
+
+  // ---- #375 评审 R4：同身份插入 / 锚点优先 / 几何无条件重建 ----
+
+  it("活动项前插入同身份标题：上下文对齐选中原项（不是新插入项）", () => {
+    // 旧实现按「旧列表里的 ordinal」取新列表同序号项：旧 [A,B] 高亮 B(1)，
+    // 新 [A,B,B] 会给 1（新插入的 B），原 B 已在 2。
+    const ctx = setup(["A", "B"]);
+    const exitHeadings = extractEditorOutline(ctx.state.doc);
+    const published = replaceWith(ctx, ["A", "B", "B"], {
+      headings: exitHeadings,
+      activeIndex: 1,
+    });
+    expect(published?.headings.map((h) => h.text)).toEqual(["A", "B", "B"]);
+    expect(published?.activeIndex).toBe(2);
+  });
+
+  it("同身份项插在活动项之后：仍选原项（不误做位移补偿）", () => {
+    const ctx = setup(["B", "A"]);
+    const exitHeadings = extractEditorOutline(ctx.state.doc);
+    const published = replaceWith(ctx, ["B", "A", "B"], {
+      headings: exitHeadings,
+      activeIndex: 0,
+    });
+    expect(published?.activeIndex).toBe(0);
+  });
+
+  it("同身份项插在活动项之后：有位置信息时按位置消除身份兜底的对称歧义", () => {
+    // 纯身份兜底对「插在前 / 插在后」无法区分（见 remapActiveIndex 注释）。
+    // 生产链路带的 anchorPos 指向原 B(index 1)，因此首帧必须选 1 而不是 2。
+    const ctx = setup(["A", "B"]);
+    const exitHeadings = extractEditorOutline(ctx.state.doc);
+    const newHeadings = extractEditorOutline(makeDoc(["A", "B", "B"]));
+    const anchorPos = newHeadings[1].pos + 1;
+    const published = replaceWith(
+      ctx,
+      ["A", "B", "B"],
+      { headings: exitHeadings, activeIndex: 1 },
+      anchorPos,
+    );
+    expect(published?.activeIndex).toBe(1);
+  });
+
+  it("锚点优先于滞后的 store 快照：按最新文档位置二分定位", () => {
+    const ctx = setup(["A", "B"]);
+    const exitHeadings = extractEditorOutline(ctx.state.doc);
+    const newHeadings = extractEditorOutline(makeDoc(["A", "B", "B"]));
+    const anchorPos = newHeadings[1].pos + 1; // 落在第一个 B 内
+    const published = replaceWith(
+      ctx,
+      ["A", "B", "B"],
+      { headings: exitHeadings, activeIndex: 1 },
+      anchorPos,
+    );
+    // 锚点明确指向第一个 B；仅靠身份兜底会选到 2，说明锚点确实被优先采用
+    expect(published?.activeIndex).toBe(1);
+  });
+
+  it("视口锚点与源码光标同时存在：取较靠后的章节（编辑/阅读位置）", () => {
+    const ctx = setup(["A", "B"]);
+    const exitHeadings = extractEditorOutline(ctx.state.doc);
+    const newHeadings = extractEditorOutline(makeDoc(["A", "B", "B"]));
+    const anchorPos = newHeadings[0].pos + 1; // 视口顶部：第 1 项
+    const caretPos = newHeadings[2].pos + 1; // 光标在文档末尾：第 3 项
+    const published = replaceWith(
+      ctx,
+      ["A", "B", "B"],
+      { headings: exitHeadings, activeIndex: 0 },
+      anchorPos,
+      caretPos,
+    );
+    // 用户刚在末尾编辑，首帧必须停在末尾而不是闪回视口顶部的第 1 项
+    expect(published?.activeIndex).toBe(2);
+  });
+
+  it("退出后没有 scroll 事件：200ms 内无条件重建几何（不依赖停歇 timer）", () => {
+    vi.useFakeTimers();
+    const harness = makeHarness();
+    const onChange = vi.fn();
+    const plugin = outlineTrackerPlugin(onChange);
+    const initial = EditorState.create({
+      schema,
+      doc: makeDoc(["一", "二", "三"]),
+      plugins: [plugin],
+    });
+    const nodeDOM = vi.fn(() => null);
+    const asView = (s: EditorState) =>
+      ({
+        dom: harness.editorDom,
+        state: s,
+        nodeDOM,
+      }) as unknown as EditorView;
+    const pluginView = plugin.spec.view?.(asView(initial));
+    onChange.mockClear();
+    const tr = markOutlineImmediateRefresh(
+      initial.tr.replaceWith(
+        0,
+        initial.doc.content.size,
+        makeDoc(["一", "二", "三", "四"]).content,
+      ),
+      { active: null, anchorPos: null },
+    );
+    const next = initial.apply(tr);
+    pluginView?.update?.(asView(next), initial as never);
+    expect(nodeDOM).not.toHaveBeenCalled();
+    // 关键：全程不派发任何 scroll 事件
+    vi.advanceTimersByTime(200);
+    expect(nodeDOM).toHaveBeenCalledTimes(4);
+
+    pluginView?.destroy?.();
+    vi.useRealTimers();
+    harness.scroller.remove();
+  });
+
+  it("退出后连续 60 帧滚动：几何重建后活动项持续跟手（不冻结整个滚动会话）", () => {
+    vi.useFakeTimers();
+    const harness = makeHarness();
+    const onChange = vi.fn();
+    const plugin = outlineTrackerPlugin(onChange);
+    const initial = EditorState.create({
+      schema,
+      doc: makeDoc(["一", "二", "三"]),
+      plugins: [plugin],
+    });
+    const positions: number[] = [];
+    initial.doc.descendants((node, pos) => {
+      if (node.type.name === "heading") positions.push(pos);
+      return true;
+    });
+    const asView = (s: EditorState) =>
+      ({
+        dom: harness.editorDom,
+        state: s,
+        nodeDOM: (pos: number) =>
+          harness.headingEls[positions.indexOf(pos)] ?? null,
+      }) as unknown as EditorView;
+    let frame: ((time: number) => void) | null = null;
+    vi.spyOn(window, "requestAnimationFrame").mockImplementation(((
+      cb: (time: number) => void,
+    ) => {
+      frame = cb;
+      return 17;
+    }) as unknown as typeof window.requestAnimationFrame);
+    const pluginView = plugin.spec.view?.(asView(initial));
+    onChange.mockClear();
+
+    const tr = markOutlineImmediateRefresh(
+      initial.tr.replaceWith(
+        0,
+        initial.doc.content.size,
+        makeDoc(["甲", "乙", "丙"]).content,
+      ),
+      { active: null, anchorPos: null },
+    );
+    pluginView?.update?.(asView(initial.apply(tr)), initial as never);
+    // 无条件调度落地：之后 headingTops 可用
+    vi.advanceTimersByTime(200);
+    onChange.mockClear();
+
+    const seen = new Set<number | null>();
+    for (let i = 0; i < 60; i += 1) {
+      harness.setScrollTop(Math.round((650 * (i + 1)) / 60));
+      harness.scroller.dispatchEvent(new Event("scroll"));
+      (frame as ((time: number) => void) | null)?.(0);
+      vi.advanceTimersByTime(16);
+      const last = onChange.mock.calls.at(-1)?.[0] as
+        | { activeIndex: number | null }
+        | undefined;
+      if (last?.activeIndex != null) seen.add(last.activeIndex);
+    }
+    // 持续滚动期间 restTimer 一直被重排，若没有独立调度则全程 0 次发布
+    expect(seen.size, `活动项集合=${[...seen].join(",")}`).toBeGreaterThan(1);
+    expect(seen.has(2)).toBe(true); // 滚到 650 命中第 3 个标题
+
+    pluginView?.destroy?.();
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    harness.scroller.remove();
   });
 });

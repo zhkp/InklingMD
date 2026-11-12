@@ -97,10 +97,13 @@ for (const tier of ctx.tiers) {
               "outlineSettle",
               "statsSettle",
             ]);
-            // 测量窗口是否真的走完：outlineSettle 只在防抖回调里打点，
-            // 有它 = 停笔后的重算确实跑过。没有它时「没有发布桶」既可能是
-            // 0 次发布、也可能是窗口没走完，不能当成 0 次进基线。
-            const windowCompleted = Boolean(buckets.outlineSettle);
+            // 测量窗口是否真的走完（#379 评审 R4）：本场景的两条停笔防抖
+            // （大纲 / 状态栏）都必须在窗口内落地。只看 outlineSettle 会让
+            // 「statsSettle 没采到」的轮仍以 complete=true 进计时均值，
+            // 产物里也看不出这是部分缺采。
+            const windowCompleted = Boolean(
+              buckets.outlineSettle && buckets.statsSettle,
+            );
 
             if (burst.allApplied && burst.inserted >= CHARS) {
               return { burst, observers, buckets, windowCompleted };
@@ -122,14 +125,15 @@ for (const tier of ctx.tiers) {
         const { burst, observers, buckets, windowCompleted } = measured;
 
         if (round >= ctx.warmups) {
-          // 测量窗口必须走完（#379 评审 P1）：缺少 outlineSettle 桶时「没有发布桶」
-          // 既可能是 0 次发布、也可能是防抖回调根本没跑，聚合器只能按未测量处理
-          // ——而「未测量」在产物里没有任何痕迹（归因表整行消失）。这里判红，
-          // 让「没测到」变成显式失败，而不是静默丢一行。
+          // 测量窗口必须走完（#379 评审 R4）：outlineSettle / statsSettle 缺任一
+          // 都说明停笔后的防抖回调没跑全，本轮归因按测量失败处理。判红而不是
+          // 静默丢行——「未测量」在产物里没有痕迹时会被误读成「零成本」。
           expect(
             windowCompleted,
-            `${id}：停笔后的防抖窗口未在超时前走完（缺 outlineSettle 桶），` +
-              `本轮大纲归因不可用，按测量失败处理`,
+            `${id}：停笔后的防抖窗口未在超时前走完` +
+              `（outlineSettle=${Boolean(buckets.outlineSettle)}, ` +
+              `statsSettle=${Boolean(buckets.statsSettle)}），` +
+              `本轮归因不可用，按测量失败处理`,
           ).toBe(true);
           await probe.measure(page);
           paintSamples.push(...burst.paint);
@@ -151,6 +155,7 @@ for (const tier of ctx.tiers) {
       expect(paintSamples.length).toBe(CHARS * ctx.rounds);
 
       const attributionScalars = attribution.scalars();
+      const attributionCoverage = attribution.coverage();
       writeRawFile({
         id,
         scenario: "input-source",
@@ -175,6 +180,9 @@ for (const tier of ctx.tiers) {
           cls: avg(clsValues),
           heapDeltaMB: avg(heapDeltas),
         },
+        // 归因标量的覆盖状态（#379 评审 R4）：raw → report.md（PARTIAL 标注）
+        // → latest.json 都带着 observed/expected，部分缺采不再伪装成完整标量
+        attributionCoverage,
       });
     });
   }

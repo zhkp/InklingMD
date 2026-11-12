@@ -241,6 +241,24 @@ export interface RawFile {
   samples: Record<string, number[]>;
   /** 标量指标（计数、占比等），直接比较 */
   scalars: Record<string, number | null>;
+  /**
+   * 归因标量的覆盖状态（#379 评审 R4）：每个标量记录了「多少轮真的采到」。
+   * 缺失时 report 按「无覆盖信息」处理；有 PARTIAL 时归因表会显式标注，
+   * 不把部分缺采写成普通完整标量。
+   */
+  attributionCoverage?: {
+    rounds: number;
+    completeRounds: number;
+    partial: boolean;
+    metrics: Record<string, { observed: number; expected: number }>;
+  };
+  /** 公式测量覆盖状态（#379 评审 R4）：预期节点数与完整样本轮数 */
+  formulaCoverage?: {
+    expectedNodes: number;
+    measuredRounds: number;
+    expectedRounds: number;
+    unmeasured: boolean;
+  };
 }
 
 /**

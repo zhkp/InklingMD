@@ -528,7 +528,15 @@ export async function waitForProbeBuckets(
  * TTI 的既有定义不因它改变：调用方在读完 TTI 观测值之后再调用，用于单独归因
  * 「KaTeX 模块加载 + 逐公式渲染」的 JS 尾部耗时（不覆盖 DOM 布局/绘制）。
  */
-export function waitFormulaSettled(opts: { maxFrames: number }): Promise<{
+export function waitFormulaSettled(opts: {
+  maxFrames: number;
+  /**
+   * fixture 预期公式节点数（#379 评审 R4）。>0 时，调用瞬间 NodeView 尚未挂载
+   * （nodeViews=0）不能算完成：否则 `0 >= 0` 会让 open 场景以为「没有公式」，
+   * 直接沿用 #376 的测量结论。纯文本档传 0 仍可合法完成。
+   */
+  expectedNodes?: number;
+}): Promise<{
   at: number;
   nodeViews: number;
   rendered: number;
@@ -536,13 +544,22 @@ export function waitFormulaSettled(opts: { maxFrames: number }): Promise<{
   frames: number;
   /** 是否真的等到了完成条件；false = 帧预算耗尽（超时） */
   complete: boolean;
+  /** 预期有公式但节点始终未挂载 → 未测量，不是「渲染耗时」 */
+  unmeasured: boolean;
 }> {
-  const nodeViews = document.querySelectorAll(
-    "[data-math-inline], [data-math-display]",
-  ).length;
-  const empty = document.querySelectorAll(
-    '[data-math-inline][data-value=""], [data-math-display][data-value=""]',
-  ).length;
+  /** 逐帧重读 DOM：节点数/KaTeX 输出/空公式都可能在首次采样之后才出现 */
+  const readDom = () => ({
+    nodeViews: document.querySelectorAll(
+      "[data-math-inline], [data-math-display]",
+    ).length,
+    empty: document.querySelectorAll(
+      '[data-math-inline][data-value=""], [data-math-display][data-value=""]',
+    ).length,
+    rendered: document.querySelectorAll(
+      "[data-math-inline] .katex, [data-math-display] .katex",
+    ).length,
+  });
+  const expected = Math.max(0, Math.floor(opts.expectedNodes ?? 0));
   let frames = 0;
   return new Promise<{
     at: number;
@@ -551,23 +568,26 @@ export function waitFormulaSettled(opts: { maxFrames: number }): Promise<{
     empty: number;
     frames: number;
     complete: boolean;
+    unmeasured: boolean;
   }>((resolve) => {
     const settle = (): void => {
-      const rendered = document.querySelectorAll(
-        "[data-math-inline] .katex, [data-math-display] .katex",
-      ).length;
-      const complete = rendered + empty >= nodeViews;
+      const dom = readDom();
+      // 纯文本档不要求节点数；含公式档必须等到预期节点真的挂载
+      const nodesReady = expected === 0 || dom.nodeViews >= expected;
+      const complete =
+        nodesReady &&
+        (expected === 0 || dom.nodeViews > 0) &&
+        dom.rendered + dom.empty >= dom.nodeViews;
       // 超时与完成必须区分（#379 评审 P1）：帧预算耗尽时 `at` 只是超时时刻，
-      // 拿它当 formulaReadyMs 会把「还没渲染完」记成「渲染耗时」。调用方据此
-      // 判定测量失败，不写不完整样本。
+      // 拿它当 formulaReadyMs 会把「还没渲染完」记成「渲染耗时」。
       if (complete || frames >= opts.maxFrames) {
         resolve({
           at: performance.now(),
-          nodeViews,
-          rendered,
-          empty,
+          ...dom,
           frames,
           complete,
+          unmeasured:
+            !complete && expected > 0 && dom.nodeViews < expected,
         });
         return;
       }
@@ -576,6 +596,51 @@ export function waitFormulaSettled(opts: { maxFrames: number }): Promise<{
     };
     requestAnimationFrame(settle);
   });
+}
+
+/**
+ * 从 markdown 源文数出预期公式节点数（#379 评审 R4 / 验收 F5）。
+ *
+ * 编辑器把每条行内 `$...$` 和每个块级 `$$...$$` 各挂成一个
+ * `[data-math-inline]` / `[data-math-display]` NodeView。计数必须跳过
+ * 围栏代码块、行内代码与转义 `\$`，否则 custom 档（直接读用户文档）会把
+ * 普通文本里的 `$` 当成公式，导致 expected 偏大、场景被假判 UNMEASURED。
+ * 块级按「成对标记」计一个节点；同行 `$$...$$` 也计一个。
+ */
+export function countExpectedMathNodes(markdown: string): number {
+  let inFence = false;
+  let inBlockMath = false;
+  let count = 0;
+  for (const line of markdown.split("\n")) {
+    const trimmed = line.trim();
+    if (/^(```|~~~)/.test(trimmed)) {
+      inFence = !inFence;
+      continue;
+    }
+    if (inFence) continue;
+    // 块级 $$ 允许「闭合标记与内容同行」（`a$$`）：不能让 inBlockMath 永真
+    if (trimmed === "$$" || (inBlockMath && trimmed.endsWith("$$"))) {
+      if (trimmed === "$$" && !inBlockMath) count += 1;
+      inBlockMath = !inBlockMath;
+      continue;
+    }
+    if (inBlockMath) continue;
+    // 4 空格 / tab 缩进的 CommonMark 代码块同样不是公式
+    if (/^(?: {4}|\t)/.test(line)) continue;
+    const unescaped = line
+      .replace(/\\\$/g, "") // 转义的 $ 不是公式
+      .replace(/(`+)[^`\n]*?\1/g, ""); // 单/多反引号行内代码里的 $ 不是公式
+    // 表格单元格之间不能跨 `|` 配对（`$x | y$` 不是一条公式）
+    for (const cell of unescaped.split("|")) {
+      const sameLineBlocks = cell.match(/\$\$[^$\n]+?\$\$/g) ?? [];
+      count += sameLineBlocks.length;
+      const rest = cell.replace(/\$\$[^$\n]+?\$\$/g, "");
+      const inline =
+        rest.match(/(?<!\$)\$(?!\$)[^$\n]+?(?<!\$)\$(?!\$)/g) ?? [];
+      count += inline.length;
+    }
+  }
+  return count;
 }
 
 /**
@@ -666,7 +731,9 @@ export function createAttributionAggregator(
           out[`${name}Count`] = round2(sum / completeRounds.length);
           continue;
         }
-        const entries = rounds
+        // 计时桶同样只统计窗口走完的轮（#379 评审 R4）：不完整轮里的桶是
+        // 「测到一半」的样本，混进均值会把未测量写成普通完整标量。
+        const entries = completeRounds
           .map((r) => r.buckets[name])
           .filter((b): b is { count: number; totalMs: number; maxMs: number } =>
             Boolean(b),
@@ -680,6 +747,47 @@ export function createAttributionAggregator(
         out[`${name}Count`] = round2(avg((b) => b.count));
       }
       return out;
+    },
+    /**
+     * 归因标量的覆盖状态（#379 评审 R4）。
+     *
+     * `scalars()` 只输出数值，读者无从分辨「2 轮里只有 1 轮采到 statsSettle」
+     * 与「2 轮都采到」。`expected` 是**总轮数**而不是完整轮数：窗口没走完的
+     * 轮次本身就是缺采，若把它们从分母里也剔掉，归因表会把「1/2 轮测得」
+     * 显示成满覆盖。场景把结果写进 raw，report 的覆盖列据 observed/expected
+     * 显示 `PARTIAL n/m`，latest.json 与 baseline 也带这份状态。
+     */
+    coverage(): {
+      rounds: number;
+      completeRounds: number;
+      partial: boolean;
+      metrics: Record<string, { observed: number; expected: number }>;
+    } {
+      const metrics: Record<string, { observed: number; expected: number }> = {};
+      const complete = rounds.filter((r) => r.complete);
+      const expectedRounds = rounds.length;
+      for (const name of ATTRIBUTION_BUCKETS) {
+        const declared =
+          COUNT_ONLY_BUCKETS.has(name) && declaredCountOnly.has(name);
+        // 已声明的只计次探针：「没有桶」= 本轮 0 次事件，是有效测量，
+        // 覆盖数必须记成完整轮数，否则报告会把「0 次发布」误标 PARTIAL。
+        const observed = declared
+          ? complete.length
+          : complete.filter((r) => r.buckets[name]).length;
+        if (observed === 0 && !declared) continue;
+        const keys = COUNT_ONLY_BUCKETS.has(name)
+          ? [`${name}Count`]
+          : [`${name}Ms`, `${name}MaxMs`, `${name}Count`];
+        for (const k of keys) {
+          metrics[k] = { observed, expected: expectedRounds };
+        }
+      }
+      return {
+        rounds: expectedRounds,
+        completeRounds: complete.length,
+        partial: complete.length < rounds.length,
+        metrics,
+      };
     },
   };
 }

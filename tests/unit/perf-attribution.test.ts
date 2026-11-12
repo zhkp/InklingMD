@@ -72,7 +72,7 @@ describe("生产侧归因探针（#379）", () => {
 });
 
 describe("归因标量聚合（#379）", () => {
-  it("多轮取均值，缺失的桶不输出（不伪造 0）", () => {
+  it("多轮取均值，缺失的桶不输出（不伪造 0），覆盖状态暴露部分缺采", () => {
     const agg = createAttributionAggregator();
     agg.add({
       stats: { count: 2, totalMs: 10, maxMs: 6 },
@@ -90,6 +90,59 @@ describe("归因标量聚合（#379）", () => {
       katexRenderMaxMs: 15,
       katexRenderCount: 4,
     });
+    // 两轮都完整，但 katexRender 只在 1 轮采到：均值 40 不再是「普通完整标量」，
+    // coverage 明确给出 1/2（#379 评审 R4）
+    const cov = agg.coverage();
+    expect(cov.rounds).toBe(2);
+    expect(cov.completeRounds).toBe(2);
+    expect(cov.partial).toBe(false);
+    expect(cov.metrics.statsMs).toEqual({ observed: 2, expected: 2 });
+    expect(cov.metrics.katexRenderMs).toEqual({ observed: 1, expected: 2 });
+  });
+
+  it("测量窗口没走完的轮次，其计时桶不进入均值（#379 评审 R4）", () => {
+    const agg = createAttributionAggregator();
+    agg.add(
+      { stats: { count: 1, totalMs: 10, maxMs: 10 } },
+      { complete: true },
+    );
+    agg.add(
+      { stats: { count: 1, totalMs: 90, maxMs: 90 } },
+      { complete: false },
+    );
+    // 旧实现会给出 statsMs=50：把「测到一半」的 90ms 混进均值
+    expect(agg.scalars()).toEqual({
+      statsMs: 10,
+      statsMaxMs: 10,
+      statsCount: 1,
+    });
+    expect(agg.coverage()).toMatchObject({
+      rounds: 2,
+      completeRounds: 1,
+      partial: true,
+    });
+    // expected 必须是**总轮数**：不完整轮本身是缺采，从分母剔除会让
+    // 归因表把「1/2 轮测得」显示成满覆盖（R4 验收 F3）
+    expect(agg.coverage().metrics.statsMs).toEqual({
+      observed: 1,
+      expected: 2,
+    });
+  });
+
+  it("3 轮中缺 1 个 statsSettle：覆盖状态可区分 2/3 与 3/3（#379 评审 R4）", () => {
+    const agg = createAttributionAggregator();
+    const full = {
+      outlineSettle: { count: 1, totalMs: 200, maxMs: 200 },
+      statsSettle: { count: 1, totalMs: 300, maxMs: 300 },
+    };
+    agg.add(full);
+    agg.add({ outlineSettle: full.outlineSettle }); // statsSettle 缺桶
+    agg.add(full);
+    const cov = agg.coverage();
+    expect(cov.metrics.statsSettleMs).toEqual({ observed: 2, expected: 3 });
+    expect(cov.metrics.outlineSettleMs).toEqual({ observed: 3, expected: 3 });
+    // 均值只用真正采到的 2 轮，不把缺桶轮按 0ms 混入
+    expect(agg.scalars().statsSettleMs).toBe(300);
   });
 
   it("一轮都没采到返回空对象", () => {
@@ -137,6 +190,20 @@ describe("归因标量聚合（#379）", () => {
     agg.add({});
     agg.add({});
     expect(agg.scalars()).toEqual({ outlinePublishCount: 0 });
+  });
+
+  it("已声明只计次探针全零时覆盖记为满（0 次事件 ≠ 部分缺采）", () => {
+    // 真实场景：input-source 每轮都装了 outlinePublish 探针、60 次输入不改
+    // 大纲结构，所以两轮都没有桶。coverage 若按「有桶轮数」记成 0/2，
+    // 报告会把「0 次发布」误标成 PARTIAL 0/2。
+    const agg = createAttributionAggregator({ countOnly: ["outlinePublish"] });
+    agg.add({});
+    agg.add({});
+    expect(agg.scalars()).toEqual({ outlinePublishCount: 0 });
+    expect(agg.coverage().metrics.outlinePublishCount).toEqual({
+      observed: 2,
+      expected: 2,
+    });
   });
 
   it("未声明 countOnly 的场景不伪造 0（没装探针 = 未测量）", () => {
