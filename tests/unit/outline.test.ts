@@ -7,6 +7,7 @@ import {
   parseOutline,
   extractMarkdownOutline,
   findActiveHeadingIndex,
+  isSameMarkdownOutline,
   type EditorOutlineHeading,
 } from "../../src/lib/outline";
 
@@ -194,5 +195,57 @@ describe("findActiveHeadingIndex", () => {
     expect(findActiveHeadingIndex(hs, 50)).toBeNull();
     expect(findActiveHeadingIndex(hs, 100)).toBe(0);
     expect(findActiveHeadingIndex(hs, 200)).toBe(0);
+  });
+});
+
+describe("isSameMarkdownOutline（#375 源码模式发布去重）", () => {
+  const md = "# 章节 1\n\n正文。\n\n## 小节 1.1\n\n内容。\n";
+
+  it("重新解析但结构未变时判定相同", () => {
+    expect(
+      isSameMarkdownOutline(
+        extractMarkdownOutline(md),
+        extractMarkdownOutline(md),
+      ),
+    ).toBe(true);
+  });
+
+  it("仅修改标题后的正文：标题集合不变", () => {
+    const edited = `${md}新增正文段落。\n`;
+    expect(
+      isSameMarkdownOutline(
+        extractMarkdownOutline(md),
+        extractMarkdownOutline(edited),
+      ),
+    ).toBe(true);
+  });
+
+  it("标题文本、层级或数量变化时判定不同", () => {
+    const base = extractMarkdownOutline(md);
+    expect(
+      isSameMarkdownOutline(base, extractMarkdownOutline(md.replace("小节 1.1", "小节 1.2"))),
+    ).toBe(false);
+    expect(
+      isSameMarkdownOutline(base, extractMarkdownOutline(md.replace("## 小节 1.1", "### 小节 1.1"))),
+    ).toBe(false);
+    expect(
+      isSameMarkdownOutline(base, extractMarkdownOutline(`${md}\n# 章节 2\n`)),
+    ).toBe(false);
+  });
+
+  it("在标题上方插入内容导致行号变化时判定不同", () => {
+    const shifted = `前言段落。\n\n${md}`;
+    expect(
+      isSameMarkdownOutline(
+        extractMarkdownOutline(md),
+        extractMarkdownOutline(shifted),
+      ),
+    ).toBe(false);
+  });
+
+  it("空大纲相同、与有标题不同", () => {
+    const empty = extractMarkdownOutline("纯文本");
+    expect(isSameMarkdownOutline(empty, extractMarkdownOutline("另一段纯文本"))).toBe(true);
+    expect(isSameMarkdownOutline(empty, extractMarkdownOutline(md))).toBe(false);
   });
 });

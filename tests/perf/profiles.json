@@ -15,6 +15,6 @@
     "full": 3,
     "xl": 3
   },
-  "scenarios": ["open", "input", "scroll", "search", "tab-switch", "save"],
+  "scenarios": ["open", "input", "input-source", "scroll", "search", "tab-switch", "save"],
   "plainScenarios": ["open", "scroll"]
 }
