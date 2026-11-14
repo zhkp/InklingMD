@@ -165,4 +165,43 @@ describe("theme store missing bundled-source warning count", () => {
     );
     expect(useTheme.getState().scanIssues).toHaveLength(3);
   });
+
+  it("preserves mixed supplement results and newly discovered missing paths after rescan", async () => {
+    const successfulCopy: CopyPlanItem = {
+      slug: "good-theme",
+      from: "/resources/themes/good.css",
+      to: "/app/themes/good.css",
+      reason: "运行时缺失",
+    };
+    const failedCopy: CopyPlanItem = {
+      slug: "blocked-theme",
+      from: "/resources/themes/blocked.css",
+      to: "/app/themes/blocked.css",
+      reason: "运行时缺失",
+    };
+    const existingMissing = missingSourceIssue("a.css", "alpha");
+    const newlyMissing = missingSourceIssue("b.css", "beta");
+    copyThemePathMock
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error("permission denied"));
+    buildThemeCatalogMock
+      .mockResolvedValueOnce(catalogResult([existingMissing], [successfulCopy, failedCopy]))
+      .mockResolvedValueOnce(catalogResult([existingMissing, newlyMissing]));
+
+    await useTheme.getState().syncThemes();
+
+    expect(buildThemeCatalogMock).toHaveBeenCalledTimes(2);
+    expect(useTheme.getState().scanIssues).toContain(
+      "预装主题补齐失败（blocked-theme）：permission denied",
+    );
+    expect(useTheme.getState().scanIssues).toContain(
+      "预装主题已按源副本补齐 1 项（N13：用户改动只落 user:*）",
+    );
+    expect(useTheme.getState().scanIssues).toContain(newlyMissing.issue);
+    expect(showMessageMock).toHaveBeenCalledWith(
+      "预装主题不可用：源副本缺少或无法读取 2 项",
+      { title: "预装主题不可用", kind: "warning" },
+    );
+    expect(useTheme.getState().scanIssues).toHaveLength(5);
+  });
 });
