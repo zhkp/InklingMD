@@ -5,7 +5,7 @@
  * Usage: node scripts/check-bundled-theme-artifact.mjs <extracted-package-root> <source-manifest>
  * The workflow extracts each release artifact independently before invoking this script.
  */
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { lstatSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 const [packageRootArg, expectedManifestArg] = process.argv.slice(2);
@@ -100,12 +100,30 @@ function safeRelative(value, label) {
   return segments.join(sep);
 }
 
+function findSymlinkComponent(root, relativePath) {
+  let current = root;
+  for (const segment of relativePath.split(sep)) {
+    current = join(current, segment);
+    try {
+      if (lstatSync(current).isSymbolicLink()) {
+        return relative(root, current).split(sep).join("/");
+      }
+    } catch {
+      // Leave missing or unreadable paths to the existing stat-based diagnostics.
+      return undefined;
+    }
+  }
+  return undefined;
+}
+
 function listCssFiles(root) {
   const files = [];
   const visit = (dir) => {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
-      if (entry.isSymbolicLink()) continue;
       const path = join(dir, entry.name);
+      if (entry.isSymbolicLink()) {
+        throw new Error(`主题目录包含符号链接：${relative(root, path).split(sep).join("/")}`);
+      }
       if (entry.isDirectory()) visit(path);
       else if (entry.isFile() && entry.name.toLowerCase().endsWith(".css")) {
         files.push(relative(root, path).split(sep).join("/"));
@@ -164,8 +182,11 @@ if (expectedManifest && actualThemesRoot) {
     if (cssRel) {
       expectedCss.add(cssRel.split(sep).join("/"));
       const target = resolve(actualThemesRoot, cssRel);
+      const symlink = findSymlinkComponent(actualThemesRoot, cssRel);
       const inside = relative(actualThemesRoot, target);
-      if (inside === ".." || inside.startsWith(`..${sep}`) || isAbsolute(inside)) {
+      if (symlink) {
+        fail(`${entry.slug}.css 路径包含符号链接：${symlink}`);
+      } else if (inside === ".." || inside.startsWith(`..${sep}`) || isAbsolute(inside)) {
         fail(`${entry.slug}.css 越出 themes 目录：${entry.css}`);
       } else {
         try {
@@ -180,8 +201,11 @@ if (expectedManifest && actualThemesRoot) {
       if (dirRel) {
         resourceDirs.push(dirRel.split(sep).join("/"));
         const target = resolve(actualThemesRoot, dirRel);
+        const symlink = findSymlinkComponent(actualThemesRoot, dirRel);
         const inside = relative(actualThemesRoot, target);
-        if (inside === ".." || inside.startsWith(`..${sep}`) || isAbsolute(inside)) {
+        if (symlink) {
+          fail(`${entry.slug}.dir 路径包含符号链接：${symlink}`);
+        } else if (inside === ".." || inside.startsWith(`..${sep}`) || isAbsolute(inside)) {
           fail(`${entry.slug}.dir 越出 themes 目录：${entry.dir}`);
         } else {
           try {

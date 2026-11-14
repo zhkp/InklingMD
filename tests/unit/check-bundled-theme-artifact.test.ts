@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -33,6 +33,23 @@ function createPackage(name: string, manifest: unknown = SOURCE_MANIFEST): strin
 
 function run(root: string) {
   return spawnSync(process.execPath, [SCRIPT, root, SOURCE], { encoding: "utf8" });
+}
+
+function createSymlinkOrSkip(
+  target: string,
+  path: string,
+  type: "dir" | "file" | "junction",
+  context: { skip: (reason?: string) => never },
+): void {
+  try {
+    symlinkSync(target, path, type);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (process.platform === "win32" && ["EPERM", "EACCES", "UNKNOWN"].includes(code ?? "")) {
+      context.skip("当前 Windows runner 不允许创建符号链接");
+    }
+    throw error;
+  }
 }
 
 describe("check-bundled-theme-artifact", () => {
@@ -107,5 +124,36 @@ describe("check-bundled-theme-artifact", () => {
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("slug 重复：alpha");
     expect(result.stderr).toContain("必须是包内安全相对路径");
+  });
+
+  it("rejects a manifest-declared resource directory that is a symlink outside themes", (context) => {
+    const root = createPackage("symlinked-resource-dir");
+    const themes = join(root, "resources", "themes");
+    const outside = join(TEMP, "outside-theme-resources");
+    rmSync(join(themes, "alpha"), { recursive: true, force: true });
+    mkdirSync(outside, { recursive: true });
+    writeFileSync(join(outside, "untracked.css"), "body { color: red; }");
+    createSymlinkOrSkip(
+      outside,
+      join(themes, "alpha"),
+      process.platform === "win32" ? "junction" : "dir",
+      context,
+    );
+
+    const result = run(root);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("符号链接");
+    expect(result.stderr).toContain("alpha");
+  });
+
+  it("rejects an unmanifested CSS file that is a symlink", (context) => {
+    const root = createPackage("symlinked-extra-css");
+    const themes = join(root, "resources", "themes");
+    createSymlinkOrSkip(join(themes, "alpha.css"), join(themes, "evil.css"), "file", context);
+
+    const result = run(root);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("符号链接");
+    expect(result.stderr).toContain("evil.css");
   });
 });
