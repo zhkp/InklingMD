@@ -15,6 +15,9 @@ interface StubOptions {
   skipped?: string[];
   failRead?: string[];
   dirs?: Record<string, boolean>;
+  runtimeRootWasPresent?: boolean;
+  bundledRootExists?: boolean;
+  bundledResourcesExpected?: boolean;
 }
 
 function stubIo(opts: StubOptions): CatalogIo {
@@ -22,6 +25,8 @@ function stubIo(opts: StubOptions): CatalogIo {
   return {
     themesRoot: THEMES,
     bundledRoot: BUNDLED,
+    runtimeRootWasPresent: opts.runtimeRootWasPresent,
+    bundledResourcesExpected: opts.bundledResourcesExpected,
     manifestRaw: opts.manifest,
     join,
     scanDir: async (dir: string) => {
@@ -40,7 +45,10 @@ function stubIo(opts: StubOptions): CatalogIo {
         const name = rel.split("/").pop()!;
         if (isDir && !entries.has(name)) entries.set(name, { name, path: join(base, name), is_dir: true, size: 0 });
       }
-      return { entries: [...entries.values()], skipped: opts.skipped ?? [] };
+      const exists = dir === THEMES
+        ? true
+        : opts.bundledRootExists ?? Object.keys(opts.bundledFiles ?? {}).some((path) => path.startsWith(`${base}/`));
+      return { entries: [...entries.values()], skipped: opts.skipped ?? [], exists };
     },
     readFile: async (abs: string) => {
       if (opts.failRead?.includes(abs)) throw new Error("读取失败");
@@ -177,6 +185,41 @@ describe("#307 N13 幂等补齐计划", () => {
       stubIo({ files: {}, bundledFiles, manifest }),
     );
     expect(copyPlan.some((c) => c.from === `${BUNDLED}/vue` && c.to === `${THEMES}/vue`)).toBe(true);
+  });
+});
+
+describe("#403 预装源状态判定", () => {
+  it("全新用户的运行时目录与预装源目录都不存在时不误报", async () => {
+    const { issues } = await buildThemeCatalog(
+      stubIo({ files: {}, runtimeRootWasPresent: false, bundledRootExists: false }),
+    );
+    expect(issues).toEqual([]);
+  });
+
+  it("桌面便携包首次启动即使用户目录尚未创建，缺少源目录仍提示", async () => {
+    const { issues } = await buildThemeCatalog(
+      stubIo({ files: {}, runtimeRootWasPresent: false, bundledRootExists: false, bundledResourcesExpected: true }),
+    );
+    expect(issues.join("\n")).toContain("预装主题不可用：预装主题源目录整体缺失");
+  });
+
+  it("既有运行时主题目录对应的预装源目录整体缺失时登记可见 issue", async () => {
+    const { issues } = await buildThemeCatalog(
+      stubIo({ files: {}, runtimeRootWasPresent: true, bundledRootExists: false }),
+    );
+    expect(issues.join("\n")).toContain("预装主题不可用：预装主题源目录整体缺失");
+  });
+
+  it("源目录存在但清单缺失或损坏时登记预装主题不可用", async () => {
+    const missing = await buildThemeCatalog(
+      stubIo({ files: {}, bundledFiles: { [`${BUNDLED}/vue.css`]: "h1{}" }, bundledRootExists: true }),
+    );
+    expect(missing.issues.join("\n")).toContain("源目录存在，但 manifest.json 缺失");
+
+    const invalid = await buildThemeCatalog(
+      stubIo({ files: {}, bundledFiles: {}, bundledRootExists: true, manifest: { v: 1 } }),
+    );
+    expect(invalid.issues.join("\n")).toContain("预装主题不可用：源 manifest.json 无效");
   });
 });
 
