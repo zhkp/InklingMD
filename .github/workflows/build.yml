@@ -150,6 +150,8 @@ jobs:
           $portableDir = "src-tauri/target/release/portable-build"
           New-Item -ItemType Directory -Path $portableDir -Force | Out-Null
           Copy-Item src-tauri/target/release/InklingMD.exe "$portableDir/InklingMD.exe"
+          # 便携版 resource_dir() 指向 exe 同目录，主题源副本必须位于 themes/。
+          Copy-Item -Path "src-tauri/resources/themes" -Destination "$portableDir/themes" -Recurse
           # 便携模式标记文件：存在则启用绿色模式，数据写入同目录 data 文件夹
           Set-Content -Path "$portableDir/portable.txt" -Value "This marker file enables portable mode. Keep it next to InklingMD.exe. App data will be stored in the 'data' folder beside the exe."
           Compress-Archive -Path "$portableDir/*" -DestinationPath "src-tauri/target/release/InklingMD-${version}-portable.zip" -Force
