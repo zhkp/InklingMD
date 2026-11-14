@@ -145,7 +145,10 @@ export function SourceModeEditor({
     // 现场读为 0；与高度不同它非单调，不能用峰值，只能缓存「最后可信读数」。
     // 用户若真的滚回顶部，缓存同样是 0，回退不产生错误恢复。
     let cachedScrollTop = 0;
-    let cursorVisibleCache = true;
+    // 未拿到任何可信几何之前不能假定「光标可见」：否则 cleanup 在容器脱链后
+    // 重算时会用现场 scrollTop=0 把陈旧光标当成可见，重新打开 caretPos 门控
+    // （#375 评审 R5-5）。
+    let cursorVisibleCache = false;
     const refreshCursorVisible = (v: EditorView) => {
       const el = v.scrollDOM;
       // 只有现场布局可信（>1）才参与峰值缓存：挂载首帧布局未完成、或过渡期
@@ -159,7 +162,13 @@ export function SourceModeEditor({
       if (cachedClientHeight <= 1) return;
       const head = v.state.selection.main.head;
       const block = v.lineBlockAt(Math.min(head, v.state.doc.length));
-      const st = el.scrollTop;
+      // 与 cleanup 写快照时同一套读数口径（#174）：脱链/塌缩时 el.scrollTop
+      // 会读成 0，必须回退最后一次可信缓存，否则「视口已滚离光标」会被
+      // 误判成「光标仍在视口内」。
+      const st = readDetachSafeScrollMetrics(el, {
+        scrollTop: cachedScrollTop,
+        scrollHeight: cachedScrollHeight,
+      }).scrollTop;
       cursorVisibleCache =
         block.bottom >= st - 1 && block.top <= st + cachedClientHeight + 1;
     };
@@ -360,7 +369,9 @@ export function SourceModeEditor({
       unregisterSourceModeSearch(filePath);
       view.scrollDOM.removeEventListener("scroll", handleScroll);
       {
-        // 脱链后 clientHeight/scrollHeight/scrollTop 读 0：刷新是幂等的，仅更新缓存
+        // 脱链后 clientHeight/scrollHeight/scrollTop 读 0：refresh 现在用
+        // readDetachSafeScrollMetrics 的缓存读数重算可见性（与下面写快照的
+        // scrollTop 同源），不再拿脱链容器的现场 0 值判「光标可见」。
         refreshCursorVisible(view);
         const head = view.state.selection.main.head;
         // issue #174：scrollTop/anchorOffset 此前是现场读，cleanup 若在容器已

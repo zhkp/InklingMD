@@ -598,50 +598,9 @@ export function waitFormulaSettled(opts: {
   });
 }
 
-/**
- * 从 markdown 源文数出预期公式节点数（#379 评审 R4 / 验收 F5）。
- *
- * 编辑器把每条行内 `$...$` 和每个块级 `$$...$$` 各挂成一个
- * `[data-math-inline]` / `[data-math-display]` NodeView。计数必须跳过
- * 围栏代码块、行内代码与转义 `\$`，否则 custom 档（直接读用户文档）会把
- * 普通文本里的 `$` 当成公式，导致 expected 偏大、场景被假判 UNMEASURED。
- * 块级按「成对标记」计一个节点；同行 `$$...$$` 也计一个。
- */
-export function countExpectedMathNodes(markdown: string): number {
-  let inFence = false;
-  let inBlockMath = false;
-  let count = 0;
-  for (const line of markdown.split("\n")) {
-    const trimmed = line.trim();
-    if (/^(```|~~~)/.test(trimmed)) {
-      inFence = !inFence;
-      continue;
-    }
-    if (inFence) continue;
-    // 块级 $$ 允许「闭合标记与内容同行」（`a$$`）：不能让 inBlockMath 永真
-    if (trimmed === "$$" || (inBlockMath && trimmed.endsWith("$$"))) {
-      if (trimmed === "$$" && !inBlockMath) count += 1;
-      inBlockMath = !inBlockMath;
-      continue;
-    }
-    if (inBlockMath) continue;
-    // 4 空格 / tab 缩进的 CommonMark 代码块同样不是公式
-    if (/^(?: {4}|\t)/.test(line)) continue;
-    const unescaped = line
-      .replace(/\\\$/g, "") // 转义的 $ 不是公式
-      .replace(/(`+)[^`\n]*?\1/g, ""); // 单/多反引号行内代码里的 $ 不是公式
-    // 表格单元格之间不能跨 `|` 配对（`$x | y$` 不是一条公式）
-    for (const cell of unescaped.split("|")) {
-      const sameLineBlocks = cell.match(/\$\$[^$\n]+?\$\$/g) ?? [];
-      count += sameLineBlocks.length;
-      const rest = cell.replace(/\$\$[^$\n]+?\$\$/g, "");
-      const inline =
-        rest.match(/(?<!\$)\$(?!\$)[^$\n]+?(?<!\$)\$(?!\$)/g) ?? [];
-      count += inline.length;
-    }
-  }
-  return count;
-}
+// 公式节点预期计数已迁到 `./math-nodes.ts`（#375 评审 R5-2）：它需要用
+// remark-math 管线解析 mdast，属于 Node 侧依赖；本文件里的函数都要能被
+// page.evaluate 序列化到浏览器，不能带 Node import。
 
 /**
  * 归因桶的轮次聚合（Node 侧，issue #379）。
@@ -767,14 +726,23 @@ export function createAttributionAggregator(
       const complete = rounds.filter((r) => r.complete);
       const expectedRounds = rounds.length;
       for (const name of ATTRIBUTION_BUCKETS) {
-        const declared =
-          COUNT_ONLY_BUCKETS.has(name) && declaredCountOnly.has(name);
-        // 已声明的只计次探针：「没有桶」= 本轮 0 次事件，是有效测量，
-        // 覆盖数必须记成完整轮数，否则报告会把「0 次发布」误标 PARTIAL。
-        const observed = declared
+        /**
+         * 强制不变量（#375 评审 R5-4）：`observed` 必须等于 `scalars()` 里
+         * 该标量的实际分母，否则同一个数字会同时被声明成「3 轮均值」和
+         * 「1 轮测得」。
+         *   · 只计次桶：只要会产出标量，分母就是全部完整轮（缺桶按 0 次
+         *     计入均值），无论是否声明 countOnly；
+         *   · 计时桶：分母是有桶的完整轮（缺桶无法伪造 0ms）。
+         * `expected` 始终是总轮数，两者之差即 PARTIAL 的来源。
+         */
+        const countOnly = COUNT_ONLY_BUCKETS.has(name);
+        const declared = countOnly && declaredCountOnly.has(name);
+        const seen = complete.some((r) => r.buckets[name]);
+        if (!seen && !declared) continue;
+        const observed = countOnly
           ? complete.length
           : complete.filter((r) => r.buckets[name]).length;
-        if (observed === 0 && !declared) continue;
+        if (observed === 0) continue;
         const keys = COUNT_ONLY_BUCKETS.has(name)
           ? [`${name}Count`]
           : [`${name}Ms`, `${name}MaxMs`, `${name}Count`];

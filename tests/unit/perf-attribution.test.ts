@@ -100,6 +100,32 @@ describe("归因标量聚合（#379）", () => {
     expect(cov.metrics.katexRenderMs).toEqual({ observed: 1, expected: 2 });
   });
 
+  it("scalars() 分母与 coverage().observed 恒等，含未声明 countOnly 的混合轮（#375 评审 R5-4）", () => {
+    const agg = createAttributionAggregator();
+    agg.add({
+      stats: { count: 2, totalMs: 10, maxMs: 6 },
+      outlinePublish: { count: 4, totalMs: 0, maxMs: 0 },
+    });
+    agg.add({ stats: { count: 4, totalMs: 30, maxMs: 12 } });
+    agg.add({ stats: { count: 6, totalMs: 50, maxMs: 20 } });
+
+    const scalars = agg.scalars();
+    const cov = agg.coverage();
+    // 只计次桶：`scalars()` 按全部 3 轮平均（缺桶按 0 次），
+    // `coverage()` 的 observed 必须同样是 3，不能记成「1 轮测得」。
+    expect(scalars.outlinePublishCount).toBe(1.33);
+    expect(cov.metrics.outlinePublishCount).toEqual({
+      observed: 3,
+      expected: 3,
+    });
+    expect(scalars.statsMs).toBe(30);
+    expect(cov.metrics.statsMs).toEqual({ observed: 3, expected: 3 });
+    // 每个产出标量都有覆盖条目
+    for (const k of Object.keys(scalars)) {
+      expect(cov.metrics[k], `缺覆盖条目：${k}`).toBeTruthy();
+    }
+  });
+
   it("测量窗口没走完的轮次，其计时桶不进入均值（#379 评审 R4）", () => {
     const agg = createAttributionAggregator();
     agg.add(

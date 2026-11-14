@@ -1358,6 +1358,30 @@ function main() {
       );
     }
   }
+  // 消费 coverage().partial（#375 评审 R5-4）：逐指标 PARTIAL 之外，还要在
+  // 场景级披露「有测量窗口没走完的轮」，否则读者只看表格会以为每轮都完整。
+  //
+  // 必须放在归因表分支**之外**：若某场景所有轮次都没走完，
+  // `scalars()` 与归因行会全空（整表跳过），而「0/N 轮完整」恰恰是最该
+  // 披露的最坏情形——放进表内会让它彻底静默（终审 F1）。
+  {
+    const partialScenarios = results.filter(
+      (r) => r.attributionCoverage?.partial,
+    );
+    if (partialScenarios.length > 0) {
+      lines.push("");
+      lines.push(
+        `> 有 ${partialScenarios.length} 个场景存在未走完的测量轮（PARTIAL）：` +
+          partialScenarios
+            .map(
+              (r) =>
+                `${r.id} ${r.attributionCoverage.completeRounds}/${r.attributionCoverage.rounds} 轮完整`,
+            )
+            .join("、") +
+          "。这些轮的计时/计次标量已被聚合器剔除。",
+      );
+    }
+  }
   // 公式测量未覆盖（#379 评审 R4）：含公式档位若没拿到完整样本，显式标
   // UNMEASURED，不让读者把「没有 formulaReadyMs」误读成「纯文本档」。
   const formulaUnmeasured = results.filter(

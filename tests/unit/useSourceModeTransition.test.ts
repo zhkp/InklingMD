@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { renderHook } from "@testing-library/react";
 import { useSourceModeTransition } from "../../src/components/Editor/useSourceModeTransition";
 import { editorViewCtx, parserCtx } from "@milkdown/kit/core";
+import { Schema } from "@milkdown/kit/prose/model";
 import { markdownOffsetToProsePos } from "../../src/lib/source-mode-cursor";
 import { useWorkspace } from "../../src/store/workspace";
 import {
@@ -688,6 +689,39 @@ describe("useSourceModeTransition", () => {
 
   // ---- #375 评审 R4 验收 F1/F6：首帧位置信息的两条护栏 ----
 
+  /**
+   * 真实 PM doc（#375 评审 R5-3）：`resolveAnchorProsePos` 依赖
+   * `doc.textBetween(0, pos, "\n", "\n")` 做候选行文本匹配 + 二分，
+   * 用假 doc 会让它必然走 fallback，精确换算路径一次都跑不到。
+   */
+  const anchorSchema = new Schema({
+    nodes: {
+      doc: { content: "block+" },
+      heading: {
+        content: "inline*",
+        group: "block",
+        attrs: { level: { default: 1 } },
+      },
+      paragraph: { content: "inline*", group: "block" },
+      text: { group: "inline" },
+    },
+  });
+  const EXIT_VALUE = "# 标题\n\n正文锚点行\n\n## 第二节";
+  const makeAnchorDoc = (value: string) =>
+    anchorSchema.node(
+      "doc",
+      null,
+      value.split("\n").map((line) => {
+        if (line.trim() === "") return anchorSchema.node("paragraph", null, []);
+        if (line.startsWith("#")) {
+          return anchorSchema.node("heading", { level: 1 }, [
+            anchorSchema.text(line.replace(/^#+\s*/, "")),
+          ]);
+        }
+        return anchorSchema.node("paragraph", null, [anchorSchema.text(line)]);
+      }),
+    );
+
   /** 最小退出事务 harness，只取 setMeta 的大纲负载 */
   function exitMetaFor(
     filePath: string,
@@ -697,8 +731,10 @@ describe("useSourceModeTransition", () => {
       anchorOffset?: number;
       cursorVisible?: boolean;
     } | null,
+    opts: { value?: string } = {},
   ) {
-    const value = "# A\n\npara\n\n## B";
+    const value = opts.value ?? EXIT_VALUE;
+    const parsedDoc = makeAnchorDoc(value);
     const mockTr = {
       replaceWith: vi.fn().mockReturnThis(),
       setSelection: vi.fn().mockReturnThis(),
@@ -735,7 +771,7 @@ describe("useSourceModeTransition", () => {
           get: (key: unknown) => {
             if (key === editorViewCtx) return mockView;
             if (key === parserCtx) {
-              return (v: string) => ({ content: { size: v.length } });
+              return (v: string) => (v === value ? parsedDoc : makeAnchorDoc(v));
             }
             return null;
           },
@@ -774,11 +810,20 @@ describe("useSourceModeTransition", () => {
         "inkling-outline-tracker",
       ),
     );
-    return call?.[1] as {
-      active: unknown;
-      anchorPos: number | null;
-      caretPos: number | null;
-    } | undefined;
+    return {
+      meta: call?.[1] as
+        | {
+            active: unknown;
+            anchorPos: number | null;
+            caretPos: number | null;
+          }
+        | undefined,
+      value,
+      docSize: parsedDoc.content.size,
+      textBefore(pos: number): string {
+        return parsedDoc.textBetween(0, pos, "\n", "\n");
+      },
+    };
   }
 
   it("光标在源码视口内时才传 caretPos（只滚动未编辑不能用陈旧光标）", () => {
@@ -788,8 +833,8 @@ describe("useSourceModeTransition", () => {
       anchorOffset: 3,
       cursorVisible: true,
     });
-    expect(visible?.anchorPos).toEqual(expect.any(Number));
-    expect(visible?.caretPos).toEqual(expect.any(Number));
+    expect(visible.meta?.anchorPos).toEqual(expect.any(Number));
+    expect(visible.meta?.caretPos).toEqual(expect.any(Number));
 
     const hidden = exitMetaFor("/tmp/r4-caret-hidden.md", {
       cursor: 18,
@@ -797,14 +842,89 @@ describe("useSourceModeTransition", () => {
       anchorOffset: 3,
       cursorVisible: false,
     });
-    expect(hidden?.anchorPos).toEqual(expect.any(Number));
-    expect(hidden?.caretPos).toBeNull();
+    expect(hidden.meta?.anchorPos).toEqual(expect.any(Number));
+    // 与 source-mode-editor-initial-scroll.test.tsx 的脱链卸载用例构成完整链：
+    // 那里断言卸载快照 cursorVisible===false，这里断言下游 caretPos 保持 null，
+    // 陈旧光标不会经 Math.max(anchorPos, caretPos) 钉住首帧高亮。
+    expect(hidden.meta?.caretPos).toBeNull();
   });
 
   it("没有卸载快照时两个位置都不传（让身份兜底生效，不钉在首章）", () => {
-    const meta = exitMetaFor("/tmp/r4-no-snap.md", null);
+    const { meta } = exitMetaFor("/tmp/r4-no-snap.md", null);
     expect(meta?.anchorPos).toBeNull();
     expect(meta?.caretPos).toBeNull();
     expect(meta?.active).toEqual({ headings: [], activeIndex: null });
+  });
+
+  // ---- #375 评审 R5-3：精确换算必须真的执行，且退化路径可验证 ----
+
+  it("精确换算命中锚点行：二分定位到该行首字，不是权重比例 fallback（反向锁）", () => {
+    const anchorOffset = EXIT_VALUE.indexOf("正文锚点行");
+    const { meta, value, docSize, textBefore } = exitMetaFor(
+      "/tmp/r5-precise.md",
+      { cursor: 0, scrollTop: 0, anchorOffset, cursorVisible: false },
+    );
+    const fallback = markdownOffsetToProsePos(docSize, value, anchorOffset);
+    expect(meta?.anchorPos).toEqual(expect.any(Number));
+    // 反向锁：把 resolveAnchorProsePos 改成恒 fallback 时这条必须红
+    expect(
+      meta?.anchorPos,
+      "精确换算没有命中正文锚点行，退化成了权重比例 fallback",
+    ).not.toBe(fallback);
+    // 精确结果必须让「正文锚点行」的首字刚好进入 textBetween(0, pos)
+    const pos = meta?.anchorPos as number;
+    expect(pos).toBeGreaterThan(0);
+    expect(pos).toBeLessThan(docSize);
+    const prefix = textBefore(pos);
+    expect(prefix.endsWith("正"), `prefix=${JSON.stringify(prefix)}`).toBe(true);
+    expect(textBefore(pos - 1).endsWith("正")).toBe(false);
+  });
+
+  it("纯标记行（分隔线/空引用/表格分隔）匹配不到时退回权重比例 fallback", () => {
+    // markdownNormLine 对这些行都返回 []，候选行收集为空 → 精确换算必须
+    // 走 fallback，且不能抛异常或给出文档外位置。
+    const value = [
+      "---",
+      "***",
+      "___",
+      "> ",
+      "| --- | --- |",
+      "",
+      "---",
+      "***",
+      "___",
+      "---",
+      "***",
+      "---",
+    ].join("\n");
+    const anchorOffset = value.indexOf("> ");
+    const { meta, docSize, textBefore } = exitMetaFor(
+      "/tmp/r5-fallback.md",
+      { cursor: 0, scrollTop: 0, anchorOffset, cursorVisible: false },
+      { value },
+    );
+    const fallback = markdownOffsetToProsePos(docSize, value, anchorOffset);
+    expect(meta?.anchorPos).toBe(fallback);
+    expect(meta?.anchorPos).toBeGreaterThanOrEqual(0);
+    expect(meta?.anchorPos).toBeLessThanOrEqual(docSize);
+    expect(() => textBefore(meta?.anchorPos as number)).not.toThrow();
+  });
+
+  it("锚点偏移超界与空文档都不抛，位置仍钳在文档内", () => {
+    const over = exitMetaFor("/tmp/r5-over.md", {
+      cursor: 0,
+      scrollTop: 0,
+      anchorOffset: 10_000,
+      cursorVisible: false,
+    });
+    expect(over.meta?.anchorPos).toBeGreaterThanOrEqual(0);
+    expect(over.meta?.anchorPos).toBeLessThanOrEqual(over.docSize);
+    const empty = exitMetaFor(
+      "/tmp/r5-empty.md",
+      { cursor: 0, scrollTop: 0, anchorOffset: 0, cursorVisible: false },
+      { value: "" },
+    );
+    expect(empty.meta?.anchorPos).toBeGreaterThanOrEqual(0);
+    expect(empty.meta?.anchorPos).toBeLessThanOrEqual(empty.docSize);
   });
 });

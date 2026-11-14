@@ -97,12 +97,14 @@ function commonPrefix(a: readonly string[], b: readonly string[]): number {
  * （插入发生在活动项之前时原项后移）。找不到任何同身份项（改名/删除）时退回
  * 原索引并钳进新列表长度。
  *
- * **已知歧义**：若新旧列表只差一个同身份项、活动项又在末尾，「插在其前」与
- * 「插在其后」在身份上完全对称，任何纯身份算法都无法区分；这里按评审复现
- * （插入在前）取靠后。正常退出时 `markOutlineImmediateRefresh` 会带上
- * `anchorPos`（光标可见时还有 `caretPos`），用最新文档的位置二分定位并优先
- * 于本兜底；只有「连位置信息都没有」的异常路径（`snap` 缺失时两个位置都不传）
- * 才退回身份重映射，歧义仅在那里出现。
+ * **插入歧义的处理**：同身份项增多说明发生了插入。若活动项**后面还有别的
+ * 标题**，后缀对齐会被插入项冒充（例：旧 `[B,A]` 高亮 B，新 `[B,B,A]`，
+ * 第 2 个 B 的后面正好是 A，打分会误选它），纯身份无法区分「插在前」与
+ * 「插在后」——此时保守保持原索引，交给 2 帧后的选区恢复纠正。仅当活动项
+ * 在**末尾**（没有后缀可污染）时才按后缀对齐并平局取靠后（插入在前时原项
+ * 后移）。正常退出时 `markOutlineImmediateRefresh` 带上 `anchorPos`（光标
+ * 可见时还有 `caretPos`），用最新文档的位置二分定位并优先于本兜底；
+ * `snap` 缺失导致两个位置都不传时才走这条保守路径。
  */
 function remapActiveIndex(
   next: readonly EditorOutlineHeading[],
@@ -126,6 +128,13 @@ function remapActiveIndex(
 
   const before = oldKeys.slice(0, index);
   const after = oldKeys.slice(index + 1);
+  // 同身份项变多（有插入）且活动项后面还有标题时，后缀对齐会被插入项冒充：
+  // 旧 [B,A] 高亮 B、新 [B,B,A] 中第 2 个 B 的后缀恰好是 A，打分会误选它。
+  // 这种对称歧义（#375 评审 R5-1）无法靠身份消解，保守保持原索引。
+  const oldSameCount = oldKeys.filter((k) => k === targetKey).length;
+  if (candidates.length > oldSameCount && after.length > 0) {
+    return clamp(index);
+  }
   let best = candidates[0];
   let bestScore = -1;
   for (const j of candidates) {

@@ -6,10 +6,8 @@
 // 这里锁死：超时必须被标成 complete=false，完成才标 true。
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import {
-  countExpectedMathNodes,
-  waitFormulaSettled,
-} from "../perf/metrics.js";
+import { countExpectedMathNodes } from "../perf/math-nodes.js";
+import { waitFormulaSettled } from "../perf/metrics.js";
 
 /** 造一个公式节点；rendered=true 时附带 KaTeX 输出 */
 function formulaNode(rendered: boolean, empty = false): HTMLElement {
@@ -129,12 +127,12 @@ describe("waitFormulaSettled 完成条件（#379 评审 P1）", () => {
 // #379 评审 R4 / 验收 F5：custom 档直接读用户文档，预期节点数不能把
 // 代码/转义里的 `$` 误当公式，也不能漏掉同行 $$...$$。
 describe("countExpectedMathNodes（公式前提计数）", () => {
-  it("生成档位：行内 + 成对块级各计一个", () => {
+  it("生成档位：行内 + 成对块级各计一个", async () => {
     const md = "行内公式 $E = mc^2$ 与块级公式：\n$$\n\\int_0^1 x^2 dx\n$$\n";
-    expect(countExpectedMathNodes(md)).toBe(2);
+    expect(await countExpectedMathNodes(md)).toBe(2);
   });
 
-  it("围栏代码块、行内代码与转义 $ 都不误数（custom 档）", () => {
+  it("围栏代码块、行内代码与转义 $ 都不误数（custom 档）", async () => {
     const md = [
       "```js",
       "const a = `$x$`;",
@@ -142,24 +140,36 @@ describe("countExpectedMathNodes（公式前提计数）", () => {
       "",
       "价格 \\$5 与 \\$9，另有 `$$not math$$`",
     ].join("\n");
-    expect(countExpectedMathNodes(md)).toBe(0);
+    expect(await countExpectedMathNodes(md)).toBe(0);
   });
 
-  it("同行 $$...$$ 计一个节点，块级内部不再重复计数", () => {
-    expect(countExpectedMathNodes("$$a+b$$")).toBe(1);
-    expect(countExpectedMathNodes("$$\n$x$\n$$\n")).toBe(1);
+  it("同行 $$...$$ 计一个节点，块级内部不再重复计数", async () => {
+    expect(await countExpectedMathNodes("$$a+b$$")).toBe(1);
+    expect(await countExpectedMathNodes("$$\n$x$\n$$\n")).toBe(1);
   });
 
-  it("纯文本档返回 0（等待逻辑据此合法完成）", () => {
-    expect(countExpectedMathNodes("普通段落，没有公式")).toBe(0);
+  it("纯文本档返回 0（等待逻辑据此合法完成）", async () => {
+    expect(await countExpectedMathNodes("普通段落，没有公式")).toBe(0);
   });
 
-  it("缩进代码块 / 多反引号 / 表格跨格 $ / 块级闭合同行都不误数（custom 档）", () => {
-    expect(countExpectedMathNodes("    const a = $5 + $9;")).toBe(0);
-    expect(countExpectedMathNodes("``$x$``")).toBe(0);
-    expect(countExpectedMathNodes("| $x | y$ |")).toBe(0);
-    expect(countExpectedMathNodes("$$\na$$")).toBe(1);
-    // 闭合标记后仍有正常行内公式，不能被 inBlockMath 吞掉
-    expect(countExpectedMathNodes("$$\na$$\n后文 $E=mc^2$")).toBe(2);
+  it("缩进代码块 / 多反引号 / tab / 缩进围栏都不误数（custom 档）", async () => {
+    expect(await countExpectedMathNodes("    const a = $5 + $9;")).toBe(0);
+    expect(await countExpectedMathNodes("``$x$``")).toBe(0);
+    expect(await countExpectedMathNodes("\tconst a = $5 + $9;")).toBe(0);
+    expect(await countExpectedMathNodes("    $$\n    $x$\n    $$")).toBe(0);
+    expect(await countExpectedMathNodes("  ```\n  $x$\n  ```")).toBe(0);
+  });
+
+  it("块级边界与 remark-math 完全对账（#375 评审 R5-2）", async () => {
+    // 旧手写状态机把独立闭合 $$ 误当开启 → 少算；用真实管线后是 2
+    expect(await countExpectedMathNodes("$$a\n$$\n后文 $E=mc^2$")).toBe(2);
+    // 闭合标记与内容同行时，后续文字仍在块公式内 → 只有 1 个 math
+    expect(await countExpectedMathNodes("$$\na$$\n后文 $E=mc^2$")).toBe(1);
+    expect(await countExpectedMathNodes("$$\na$$")).toBe(1);
+    // 表格跨单元格的 $ 在 remark 里是同一段落里的 inlineMath
+    expect(await countExpectedMathNodes("| $x | y$ |")).toBe(1);
+    // $$meta（块公式 meta 串）与缩进 $$ 都不是两个节点
+    expect(await countExpectedMathNodes("$$meta\na\n$$")).toBe(1);
+    expect(await countExpectedMathNodes("$$\n\\int_0^1 x^2 dx = 1\n$$")).toBe(1);
   });
 });

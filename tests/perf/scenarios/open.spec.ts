@@ -9,9 +9,9 @@
 import { expect, test } from "@playwright/test";
 import { PERF_DOC_PATH } from "../inject";
 import { bootWithFiles, openFileInTree } from "../helpers";
+import { countExpectedMathNodes, mathNodeBreakdown } from "../math-nodes";
 import {
   armTiming,
-  countExpectedMathNodes,
   createAttributionAggregator,
   createSessionProbe,
   installObservers,
@@ -48,7 +48,16 @@ for (const tier of ctx.tiers) {
       // 预期公式节点数（#379 评审 R4）：从 markdown 源文数出「成对 $$ 块 +
       // 行内 $...$」。>0 时 waitFormulaSettled 必须等到节点真的挂载，
       // 否则调用瞬间 nodeViews=0 会被 `0 >= 0` 当成「没有公式、已完成」。
-      const expectedFormulaNodes = countExpectedMathNodes(fixture.content);
+      const expectedFormulaNodes = await countExpectedMathNodes(
+        fixture.content,
+      );
+      // 计数口径自洽（#375 评审 R5-2）：预期值必须等于 remark-math 的
+      // 块级 + 行内节点之和；这能在启动阶段就抓到「计数实现被改成另一套口径」。
+      const breakdown = await mathNodeBreakdown(fixture.content);
+      expect(
+        expectedFormulaNodes,
+        `${id}：expectedFormulaNodes 与 remark-math 节点拆分不自洽`,
+      ).toBe(breakdown.math + breakdown.inlineMath);
       const probe = createSessionProbe();
       const attribution = createAttributionAggregator();
       const ttiSamples: number[] = [];
@@ -110,11 +119,39 @@ for (const tier of ctx.tiers) {
           // formulaReadyMs 等于把「还没渲染完」记成「渲染耗时」。测量失败就判红
           // ——本轮不落 raw，场景按「未测量」处理（exit 2）。
           if (expectedFormulaNodes > 0) {
+            // custom 档直接读用户文档（#375 终审 F3）：预期值来自「只挂了
+            // remark-math」的解析管线，而编辑器还挂 GFM 表格与 frontmatter，
+            // 这两处会把 `$` 吃掉（表格跨单元格、frontmatter 内的 `$`）。
+            // 因此 custom 只做下界断言——「有公式标记就必须真的挂载出节点」，
+            // 不要求数量精确相等，避免用户文档被假判 UNMEASURED。
+            const strictCount = kind !== "custom";
+            const lowerBound = strictCount ? expectedFormulaNodes : 1;
             expect(
               formula.nodeViews,
               `${id}：预期 ${expectedFormulaNodes} 个公式节点，实际只挂载 ` +
                 `${formula.nodeViews} 个（等待 ${formula.frames} 帧），按 UNMEASURED 处理`,
-            ).toBeGreaterThanOrEqual(expectedFormulaNodes);
+            ).toBeGreaterThanOrEqual(lowerBound);
+            // 上界校验（#375 评审 R5-2）：重新从页面里数一遍实际 NodeView。
+            // 生成档位必须与预期精确相等（计数低估=漏算，高估=假 UNMEASURED）；
+            // custom 只要求已挂载（口径差异见上）。
+            const actualFormulaNodes = await page.evaluate(
+              () =>
+                document.querySelectorAll(
+                  "[data-math-inline], [data-math-display]",
+                ).length,
+            );
+            if (strictCount) {
+              expect(
+                expectedFormulaNodes,
+                `${id}：公式节点预期 ${expectedFormulaNodes} 与编辑器实际挂载 ` +
+                  `${actualFormulaNodes} 不一致，计数口径与 remark-math 分叉`,
+              ).toBe(actualFormulaNodes);
+            } else {
+              expect(
+                actualFormulaNodes,
+                `${id}：custom 文档有公式标记，但编辑器一个公式 NodeView 都没挂载`,
+              ).toBeGreaterThan(0);
+            }
           }
           expect(
             formula.complete,
@@ -122,10 +159,15 @@ for (const tier of ctx.tiers) {
               `（${formula.rendered}+${formula.empty} 空/${formula.nodeViews}），` +
               `公式归因按测量失败处理`,
           ).toBe(true);
-          expect(
-            formula.unmeasured,
-            `${id}：公式节点未挂载却被判为已完成（UNMEASURED）`,
-          ).toBe(false);
+          // custom 档允许「口径多算」：此时 unmeasured 可能为 true，
+          // 但那是计数口径差异而非渲染未完成，按「公式归因未测量」披露，
+          // 不把整个场景判红（生成档位仍严格要求 false）。
+          if (kind !== "custom") {
+            expect(
+              formula.unmeasured,
+              `${id}：公式节点未挂载却被判为已完成（UNMEASURED）`,
+            ).toBe(false);
+          }
           // 标定负载：#236 与编辑器代码无关的固定工作量，用于把「机器慢」与「代码回归」分开
           await probe.measure(page);
           ttiSamples.push(endAt - startAt);
@@ -138,9 +180,10 @@ for (const tier of ctx.tiers) {
               : 0,
           );
           attribution.add(buckets);
-          // 走到这里说明上面「节点存在 + 等到完成条件」的断言已通过。
-          // 含公式档位一律写标量，S-rich / custom 不再被 `nodeViews > 0` 静默跳过。
-          if (expectedFormulaNodes > 0) {
+          // 含公式档位写标量，S-rich / custom 不再被 `nodeViews > 0` 静默跳过。
+          // 唯一例外是 custom 档的口径多算（unmeasured=true）：那一轮没拿到
+          // 完整公式样本，不写标量，由 formulaCoverage.unmeasured 披露。
+          if (expectedFormulaNodes > 0 && !formula.unmeasured) {
             formulaReadyMs.push(formula.at - startAt);
             formulaNodeViews.push(formula.nodeViews);
             formulaRendered.push(formula.rendered);
@@ -211,5 +254,3 @@ function avg(values: number[]): number {
   if (values.length === 0) return 0;
   return Math.round((values.reduce((s, v) => s + v, 0) / values.length) * 100) / 100;
 }
-
-

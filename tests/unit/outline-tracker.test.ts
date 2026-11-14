@@ -796,6 +796,19 @@ describe("outlineTrackerPlugin 整文档替换的同步刷新（#375 首帧）",
     expect(published?.activeIndex).toBe(2);
   });
 
+  it("活动项后插入同身份标题且没有位置信息：保守保持原索引（#375 评审 R5-1）", () => {
+    // 旧 [B,A] 高亮 B(0)，新 [B,B,A]：第 2 个 B 的后缀恰好是 A，
+    // 纯后缀打分会误选新插入项 1。原 B 仍在 0。
+    const ctx = setup(["B", "A"]);
+    const exitHeadings = extractEditorOutline(ctx.state.doc);
+    const published = replaceWith(ctx, ["B", "B", "A"], {
+      headings: exitHeadings,
+      activeIndex: 0,
+    });
+    expect(published?.headings.map((h) => h.text)).toEqual(["B", "B", "A"]);
+    expect(published?.activeIndex).toBe(0);
+  });
+
   it("同身份项插在活动项之后：仍选原项（不误做位移补偿）", () => {
     const ctx = setup(["B", "A"]);
     const exitHeadings = extractEditorOutline(ctx.state.doc);

@@ -37,6 +37,7 @@ function writeRaw(
     expectedRounds: number;
     unmeasured: boolean;
   },
+  opts: { omitAttributionScalars?: boolean } = {},
 ): void {
   const raw: Record<string, unknown> = {
     id: ID,
@@ -68,6 +69,14 @@ function writeRaw(
   };
   if (attributionCoverage) raw.attributionCoverage = attributionCoverage;
   if (formulaCoverage) raw.formulaCoverage = formulaCoverage;
+  if (opts.omitAttributionScalars) {
+    // 模拟「所有轮次都没走完」：聚合器一个归因标量都产不出来，
+    // 归因表整段为空（此时披露行不能被表的存在性门禁吞掉）
+    const scalars = raw.scalars as Record<string, unknown>;
+    delete scalars.statsMs;
+    delete scalars.statsCount;
+    delete scalars.outlinePublishCount;
+  }
   writeFileSync(join(perf.rawDir, `${ID}.json`), JSON.stringify(raw, null, 2), "utf8");
 }
 
@@ -275,6 +284,43 @@ describe("归因表的可比性门禁（#379 评审 P1）", () => {
       expectedRounds: 2,
       partial: true,
     });
+  });
+
+  it("场景有未完成轮：报告显式披露 PARTIAL 场景与完整轮数（#375 评审 R5-4）", () => {
+    // coverage().partial 是顶层字段，必须被消费；只靠逐指标 PARTIAL 列会让
+    // 「有测量窗口没走完」这件事在场景级不可见。
+    writeBaseline(NOW_FIXTURE, FULL_METRICS);
+    writeRaw({
+      rounds: 3,
+      completeRounds: 2,
+      partial: true,
+      metrics: {
+        statsMs: { observed: 2, expected: 3 },
+        statsCount: { observed: 2, expected: 3 },
+        outlinePublishCount: { observed: 2, expected: 3 },
+      },
+    });
+    runReport();
+    const report = readFileSync(join(perf.outDir, "report.md"), "utf8");
+    expect(report).toContain("有 1 个场景存在未走完的测量轮（PARTIAL）");
+    expect(report).toContain(`${ID} 2/3 轮完整`);
+  });
+
+  it("所有轮次都没走完（0/N）：归因表为空时仍必须披露 PARTIAL（终审 F1）", () => {
+    // 最坏情形恰好最容易静默：completeRounds=0 时 scalars() 与归因行全空，
+    // 若披露块嵌在「归因表非空」分支里，报告里将完全没有痕迹。
+    writeBaseline(NOW_FIXTURE, FULL_METRICS);
+    writeRaw(
+      { rounds: 2, completeRounds: 0, partial: true, metrics: {} },
+      undefined,
+      { omitAttributionScalars: true },
+    );
+    runReport();
+    const report = readFileSync(join(perf.outDir, "report.md"), "utf8");
+    expect(report).toContain("有 1 个场景存在未走完的测量轮（PARTIAL）");
+    expect(report).toContain(`${ID} 0/2 轮完整`);
+    // 归因表本身确实为空（说明这条披露不是靠表内行带出来的）
+    expect(report).not.toContain(`| ${ID} | statsMs |`);
   });
 
   it("公式节点未挂载：report.md 标 UNMEASURED 且 latest.json 带覆盖状态（#379 评审 R4）", () => {

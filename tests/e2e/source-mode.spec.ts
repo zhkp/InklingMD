@@ -387,15 +387,18 @@ test.describe("源代码模式", () => {
       `首帧大纲项：${JSON.stringify(firstFrame.texts)}`,
     ).toBe(4);
     expect(firstFrame.texts[3]).toContain("首帧标题");
-    // 首帧高亮不得闪回文档开头：光标/视口锚点在末尾，活动项必须是末尾两项
+    // 首帧高亮的精确断言（#375 评审 R5-3）：源码光标在文档末尾输入新标题，
+    // caretPos 换算到新文档后应把活动项定位到「首帧标题」，不能是宽松的
+    // 「末尾两项之一」或闪回文档开头的章节。
     expect(
       firstFrame.activeText,
       `首个可见帧没有活动项，标题集=${JSON.stringify(firstFrame.texts)}`,
     ).toBeTruthy();
     expect(
-      [firstFrame.texts[2], firstFrame.texts[3]],
-      `首帧活动项「${firstFrame.activeText}」闪回了文档开头，标题集=${JSON.stringify(firstFrame.texts)}`,
-    ).toContain(firstFrame.activeText);
+      firstFrame.activeText,
+      `首帧活动项应为刚输入的「首帧标题」，实际是「${firstFrame.activeText}」`,
+    ).toBe(firstFrame.texts[3]);
+    expect(firstFrame.activeText).toContain("首帧标题");
 
     // 退出后滚动的高亮跟手由 SM11（长文档）覆盖：本用例的 outline-demo.md
     // 太短、.editor-scroll 没有滚动空间，在这里做滚动断言只会得到恒真结果。
@@ -447,9 +450,70 @@ test.describe("源代码模式", () => {
       timeout: 10_000,
     });
 
+    // 连续 rAF 滚动窗口探针（#375 评审 R5-3）：退出前启动 60 帧循环，每帧
+    // 改 scrollTop 并派发 scroll，让活动项必须在顶/底之间来回切换。
+    // 这是真实浏览器的「持续滚动跟手」行为证据；「删除独立 geometryTimer
+    // 时测试必须红」的反向锁由 outline-tracker.test.ts 的两条确定性单测提供
+    // （无 scroll 200ms 重建 / 连续 60 帧滚动），实测删掉调度后 3 条全红。
+    // 浏览器侧另有 150ms doc-change 重建路径，E2E 无法单独隔离独立 timer，
+    // 在这里强加该反向断言只会得到伪断言。
+    await page.evaluate(() => {
+      const w = window as unknown as {
+        __sm11Samples?: string[];
+        __sm11Done?: boolean;
+      };
+      w.__sm11Samples = [];
+      w.__sm11Done = false;
+      let frame = 0;
+      const step = () => {
+        // 每帧重查：退出过渡可能替换滚动容器，不能持有旧节点引用
+        const scroller = document.querySelector(
+          ".editor-scroll",
+        ) as HTMLElement | null;
+        if (scroller) {
+          scroller.scrollTop = frame % 2 === 0 ? scroller.scrollHeight : 0;
+          scroller.dispatchEvent(new Event("scroll"));
+        }
+        w.__sm11Samples!.push(
+          document
+            .querySelector(".outline-panel .outline-item-active")
+            ?.textContent?.trim() ?? "",
+        );
+        frame += 1;
+        if (frame < 60) requestAnimationFrame(step);
+        else w.__sm11Done = true;
+      };
+      requestAnimationFrame(step);
+    });
+
     await page.keyboard.press(`${MOD}+Alt+KeyS`);
     await expect(page.locator(".ProseMirror")).toBeVisible({ timeout: 5_000 });
     await expect(panel.locator(".outline-item")).toHaveCount(31);
+    await expect
+      .poll(
+        async () =>
+          page.evaluate(
+            () =>
+              (window as unknown as { __sm11Done?: boolean }).__sm11Done ??
+              false,
+          ),
+        { timeout: 15_000 },
+      )
+      .toBe(true);
+    const samples = await page.evaluate(
+      () =>
+        (window as unknown as { __sm11Samples?: string[] }).__sm11Samples ?? [],
+    );
+    // 后半段（geometryTimer 的 200ms 已过）滚动每帧在顶/底交替，
+    // 活动项必须跟着在「文档顶部」与末尾章节之间切换。冻结在任意一项时
+    // 这两个标记不可能同时出现 → 断言红。
+    const tail = samples.slice(32);
+    const hasTop = tail.some((t) => t.includes("文档顶部"));
+    const hasChapter = tail.some((t) => t.includes("章节"));
+    expect(
+      hasTop && hasChapter,
+      `连续滚动窗口里活动项冻结：样本=${JSON.stringify(tail.slice(0, 16))}`,
+    ).toBe(true);
 
     const active = panel.locator(".outline-item-active");
     const scroller = page.locator(".editor-scroll");
