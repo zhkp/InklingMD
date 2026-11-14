@@ -27,6 +27,8 @@ pub struct ThemeDirScan {
     pub entries: Vec<ThemeDirEntry>,
     /// 被跳过的项（符号链接等），供 UI/日志显式登记（不静默）
     pub skipped: Vec<String>,
+    /// 目录本身是否存在（用于区分全新用户与已安装环境里的资源缺失）
+    pub exists: bool,
 }
 
 /// 扫描主题目录**单层**：目录在前、文件在后（名称不区分大小写排序）；
@@ -41,7 +43,7 @@ pub async fn scan_theme_dir(dir_path: String) -> Result<ThemeDirScan, String> {
 fn scan_theme_dir_sync(dir: &Path) -> Result<ThemeDirScan, String> {
     if !dir.exists() {
         // 主题目录尚未创建不是错误（首启自动创建由前端负责）：返回空扫描结果
-        return Ok(ThemeDirScan { entries: Vec::new(), skipped: Vec::new() });
+        return Ok(ThemeDirScan { entries: Vec::new(), skipped: Vec::new(), exists: false });
     }
     if !dir.is_dir() {
         return Err(format!("不是目录: {}", dir.display()));
@@ -74,7 +76,7 @@ fn scan_theme_dir_sync(dir: &Path) -> Result<ThemeDirScan, String> {
             .cmp(&a.is_dir)
             .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
     });
-    Ok(ThemeDirScan { entries, skipped })
+    Ok(ThemeDirScan { entries, skipped, exists: true })
 }
 
 #[derive(Debug, Serialize)]
@@ -390,6 +392,7 @@ mod tests {
         std::os::unix::fs::symlink(dir.join("vue.css"), dir.join("link.css")).unwrap();
 
         let scan = scan_theme_dir_sync(&dir).expect("扫描成功");
+        assert!(scan.exists);
         let names: Vec<_> = scan.entries.iter().map(|e| e.name.clone()).collect();
         assert!(names.contains(&"vue.css".to_string()));
         assert!(names.contains(&"vue".to_string()));
@@ -408,6 +411,7 @@ mod tests {
     #[test]
     fn scan_missing_dir_is_not_an_error() {
         let scan = scan_theme_dir_sync(Path::new("/tmp/inkling-definitely-not-exists-307")).unwrap();
+        assert!(!scan.exists);
         assert!(scan.entries.is_empty());
     }
 
