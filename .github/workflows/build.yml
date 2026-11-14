@@ -177,6 +177,7 @@ jobs:
           $themesDir = Join-Path $env:APPDATA "com.inklingmd.editor/themes"
           if (Test-Path -LiteralPath $themesDir) { Remove-Item -LiteralPath $themesDir -Recurse -Force }
           if (Test-Path -LiteralPath $themesDir) { throw "运行时验收必须从无 themes 目录的干净环境开始" }
+          $portableAuditDir = Join-Path $env:RUNNER_TEMP "inkling-portable-zip-audit"
           $evidenceDir = Join-Path $env:RUNNER_TEMP "inkling-portable-runtime-evidence"
           if (Test-Path -LiteralPath $evidenceDir) { Remove-Item -LiteralPath $evidenceDir -Recurse -Force }
           New-Item -ItemType Directory -Path $evidenceDir -Force | Out-Null
@@ -184,6 +185,7 @@ jobs:
           New-Item -ItemType Directory -Path $env:WEBVIEW2_USER_DATA_FOLDER -Force | Out-Null
           $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = "--remote-debugging-port=9222"
           $portableExe = Join-Path $portableAuditDir "InklingMD.exe"
+          if (-not (Test-Path -LiteralPath $portableExe -PathType Leaf)) { throw "ZIP 解包目录中缺少 InklingMD.exe: $portableExe" }
           $app = Start-Process -FilePath $portableExe -WorkingDirectory $portableAuditDir -PassThru
           try {
             & node "scripts/probe-portable-bundled-themes.mjs" $evidenceDir "9222"
