@@ -369,6 +369,8 @@ async function notify(title: string, body: string, kind: "info" | "warning" | "e
   }
 }
 
+let preinstalledThemesWarningShown = false;
+
 /**
  * 绝对路径 → 可加载 URL（`#306` §C9 的 `toAssetUrl`）。
  *
@@ -395,14 +397,18 @@ function backupStamp(): string {
 /** 读一次清单（扫描主题目录 + 预装清单，含 N15 识别与 N13 补齐计划） */
 async function collectCatalog(): Promise<{ root: string; catalog: CatalogResult }> {
   const root = await themesRoot();
+  const runtimeRootWasPresent = (await scanThemesDir(root)).exists;
   await ensureDir(root);
+  const bundledRoot = await bundledThemesRoot();
   const catalog = await buildThemeCatalog({
     themesRoot: root,
-    bundledRoot: await bundledThemesRoot(),
+    bundledRoot,
+    runtimeRootWasPresent,
+    bundledResourcesExpected: isTauri(),
     scanDir: (dir) => scanThemesDir(dir),
     readFile: (abs) => readThemeFile(abs),
     join: (dir, rel) => normalizePath(joinPath(dir, rel)),
-    manifestRaw: await readBundledManifest(),
+    manifestRaw: await readBundledManifest(bundledRoot),
   });
   return { root, catalog };
 }
@@ -441,7 +447,19 @@ async function syncThemes(set: SetState, get: GetState): Promise<void> {
       ({ root, catalog } = await collectCatalog());
       issues.push(`预装主题已按源副本补齐 ${copied} 项（N13：用户改动只落 user:*）`);
     }
-    applyCatalog({ ...catalog, issues: [...issues, ...catalog.issues] }, root, set);
+    const allIssues = [...issues, ...catalog.issues];
+    const missingSourceFiles = allIssues.filter((issue) => issue.startsWith("预装源副本缺失或不可读："));
+    if (missingSourceFiles.length > 0 && !allIssues.some((issue) => issue.startsWith("预装主题不可用："))) {
+      allIssues.unshift(`预装主题不可用：源副本缺少或无法读取 ${missingSourceFiles.length} 项`);
+    }
+    applyCatalog({ ...catalog, issues: allIssues }, root, set);
+    const unavailable = allIssues.find((issue) => issue.startsWith("预装主题不可用："));
+    if (unavailable && !preinstalledThemesWarningShown) {
+      await notify("预装主题不可用", unavailable, "warning");
+      preinstalledThemesWarningShown = true;
+    } else if (!unavailable) {
+      preinstalledThemesWarningShown = false;
+    }
 
     const currentId = get().themeId;
     if (!isBuiltinThemeId(currentId) && !getTheme(currentId)) {
