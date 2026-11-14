@@ -181,17 +181,33 @@ jobs:
           $evidenceDir = Join-Path $env:RUNNER_TEMP "inkling-portable-runtime-evidence"
           if (Test-Path -LiteralPath $evidenceDir) { Remove-Item -LiteralPath $evidenceDir -Recurse -Force }
           New-Item -ItemType Directory -Path $evidenceDir -Force | Out-Null
-          $env:WEBVIEW2_USER_DATA_FOLDER = Join-Path $env:RUNNER_TEMP "inkling-portable-webview2"
-          New-Item -ItemType Directory -Path $env:WEBVIEW2_USER_DATA_FOLDER -Force | Out-Null
+          $webView2PolicyPath = "HKLM:\Software\Policies\Microsoft\Edge\WebView2\AdditionalBrowserArguments"
+          $policyKeyExisted = Test-Path -LiteralPath $webView2PolicyPath
+          New-Item -Path $webView2PolicyPath -Force | Out-Null
+          $previousPolicy = Get-ItemProperty -Path $webView2PolicyPath -Name "InklingMD.exe" -ErrorAction SilentlyContinue
+          $hadPreviousPolicy = $null -ne $previousPolicy
+          if ($hadPreviousPolicy) { $previousPolicyValue = $previousPolicy."InklingMD.exe" }
+          New-ItemProperty -Path $webView2PolicyPath -Name "InklingMD.exe" -Value "--remote-debugging-port=9222" -PropertyType String -Force | Out-Null
           $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = "--remote-debugging-port=9222"
           $portableExe = Join-Path $portableAuditDir "InklingMD.exe"
           if (-not (Test-Path -LiteralPath $portableExe -PathType Leaf)) { throw "ZIP 解包目录中缺少 InklingMD.exe: $portableExe" }
-          $app = Start-Process -FilePath $portableExe -WorkingDirectory $portableAuditDir -PassThru
+          $app = $null
           try {
+            $app = Start-Process -FilePath $portableExe -WorkingDirectory $portableAuditDir -PassThru
             & node "scripts/probe-portable-bundled-themes.mjs" $evidenceDir "9222"
             if ($LASTEXITCODE -ne 0) { throw "便携版首次启动主题验收失败" }
           } finally {
-            if (-not $app.HasExited) { Stop-Process -Id $app.Id -Force -ErrorAction SilentlyContinue }
+            if ($null -ne $app) {
+              $app.Refresh()
+              if (-not $app.HasExited) { Stop-Process -Id $app.Id -Force -ErrorAction SilentlyContinue }
+              else { Write-Host "InklingMD.exe exited during probe; exit code: $($app.ExitCode)" }
+            }
+            if ($hadPreviousPolicy) {
+              Set-ItemProperty -Path $webView2PolicyPath -Name "InklingMD.exe" -Value $previousPolicyValue
+            } else {
+              Remove-ItemProperty -Path $webView2PolicyPath -Name "InklingMD.exe" -ErrorAction SilentlyContinue
+              if (-not $policyKeyExisted) { Remove-Item -LiteralPath $webView2PolicyPath -Force -ErrorAction SilentlyContinue }
+            }
           }
 
       # 扁平拷贝到 staging 目录再上传，确保下载后安装包位于 artifact 根目录
