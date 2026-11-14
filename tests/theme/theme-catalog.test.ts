@@ -168,7 +168,7 @@ describe("#307 N13 幂等补齐计划", () => {
   });
 
   it("源副本缺失 → 只登记不补齐（不删运行时副本；N15「补齐」与「用户意志」不冲突）", async () => {
-    const { copyPlan, issues } = await buildThemeCatalog(
+    const { copyPlan, issues, missingSourcePaths } = await buildThemeCatalog(
       stubIo({
         files: {},
         // 清单声明了 vue（含资源目录），但源副本只有 night → vue 既不能补齐也不该误报为「已就绪」
@@ -178,6 +178,27 @@ describe("#307 N13 幂等补齐计划", () => {
     );
     expect(copyPlan).toEqual([]);
     expect(issues.join("\n")).toContain("预装源副本缺失或不可读：vue.css");
+    expect(missingSourcePaths).toEqual(["vue.css"]);
+  });
+
+  it("结构化保留包含告警分隔文本的不同缺失源 CSS 路径", async () => {
+    const paths = ["themes/one（清单 slug=blue.css", "themes/one（清单 slug=green.css"];
+    const { issues, missingSourcePaths } = await buildThemeCatalog(
+      stubIo({
+        files: {},
+        manifest: {
+          v: 1,
+          themes: paths.map((css, index) => ({
+            slug: `source-${index}`,
+            css,
+            name: `Source ${index}`,
+            mode: index === 0 ? "light" : "dark",
+          })),
+        },
+      }),
+    );
+    expect(missingSourcePaths).toEqual(paths);
+    expect(issues).toHaveLength(2);
   });
 
   it("清单登记了资源目录：目录副本也进计划（带字体的预装主题才不缺字）", async () => {

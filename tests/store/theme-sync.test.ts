@@ -51,8 +51,12 @@ vi.mock("../../src/store/storageSyncRegistry", () => ({
 
 import { useTheme } from "../../src/store/theme";
 
-function catalogResult(issues: string[] = [], copyPlan: CopyPlanItem[] = []): CatalogResult {
-  return { themes: [], index: [], issues, copyPlan, manifest: [] };
+function catalogResult(
+  issues: string[] = [],
+  copyPlan: CopyPlanItem[] = [],
+  missingSourcePaths: string[] = [],
+): CatalogResult {
+  return { themes: [], index: [], issues, missingSourcePaths, copyPlan, manifest: [] };
 }
 
 function missingSourceIssue(path: string, slug: string): string {
@@ -77,7 +81,7 @@ describe("theme store missing bundled-source warning count", () => {
 
   it("counts a missing source CSS once when there is no copy plan", async () => {
     buildThemeCatalogMock.mockResolvedValueOnce(
-      catalogResult([missingSourceIssue("a.css", "alpha")]),
+      catalogResult([missingSourceIssue("a.css", "alpha")], [], ["a.css"]),
     );
 
     await useTheme.getState().syncThemes();
@@ -98,8 +102,8 @@ describe("theme store missing bundled-source warning count", () => {
     };
     const missing = missingSourceIssue("a.css", "alpha");
     buildThemeCatalogMock
-      .mockResolvedValueOnce(catalogResult([missing], [copyPlan]))
-      .mockResolvedValueOnce(catalogResult([missing]));
+      .mockResolvedValueOnce(catalogResult([missing], [copyPlan], ["a.css"]))
+      .mockResolvedValueOnce(catalogResult([missing], [], ["a.css"]));
 
     await useTheme.getState().syncThemes();
 
@@ -111,6 +115,25 @@ describe("theme store missing bundled-source warning count", () => {
     );
     expect(useTheme.getState().scanIssues).toContain(
       "预装主题已按源副本补齐 1 项（N13：用户改动只落 user:*）",
+    );
+  });
+
+  it("counts distinct missing CSS paths even when their names contain diagnostic delimiter text", async () => {
+    const bluePath = "themes/one（清单 slug=blue.css";
+    const greenPath = "themes/one（清单 slug=green.css";
+    buildThemeCatalogMock.mockResolvedValueOnce(
+      catalogResult(
+        [missingSourceIssue(bluePath, "blue"), missingSourceIssue(greenPath, "green")],
+        [],
+        [bluePath, greenPath],
+      ),
+    );
+
+    await useTheme.getState().syncThemes();
+
+    expect(showMessageMock).toHaveBeenCalledWith(
+      "预装主题不可用：源副本缺少或无法读取 2 项",
+      { title: "预装主题不可用", kind: "warning" },
     );
   });
 });

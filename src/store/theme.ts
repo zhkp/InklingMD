@@ -432,6 +432,7 @@ async function syncThemes(set: SetState, get: GetState): Promise<void> {
   try {
     let { root, catalog } = await collectCatalog();
     const issues = [...catalog.issues];
+    const missingSourcePaths = new Set(catalog.missingSourcePaths);
     let copied = 0;
     for (const item of catalog.copyPlan) {
       try {
@@ -445,14 +446,10 @@ async function syncThemes(set: SetState, get: GetState): Promise<void> {
     if (copied > 0) {
       // 补齐后重建一次清单（新文件要进入注册表与索引）
       ({ root, catalog } = await collectCatalog());
+      for (const path of catalog.missingSourcePaths) missingSourcePaths.add(path);
       issues.push(`预装主题已按源副本补齐 ${copied} 项（N13：用户改动只落 user:*）`);
     }
     const allIssues = [...issues, ...catalog.issues];
-    const missingSourcePaths = new Set<string>();
-    for (const issue of allIssues) {
-      const sourcePath = missingSourcePath(issue);
-      if (sourcePath) missingSourcePaths.add(sourcePath);
-    }
     if (missingSourcePaths.size > 0 && !allIssues.some((issue) => issue.startsWith("预装主题不可用："))) {
       allIssues.unshift(`预装主题不可用：源副本缺少或无法读取 ${missingSourcePaths.size} 项`);
     }
@@ -490,15 +487,6 @@ async function syncThemes(set: SetState, get: GetState): Promise<void> {
     recordSnapshotState({ last: "invalid", detail: `主题目录扫描失败：${messageOf(error)}` });
     await notify("主题目录不可用", `扫描主题目录失败：${messageOf(error)}`, "error");
   }
-}
-
-/** 从扫描诊断中提取源 CSS 路径，按路径去重，避免合并前后扫描结果时重复计数。 */
-function missingSourcePath(issue: string): string | undefined {
-  const prefix = "预装源副本缺失或不可读：";
-  if (!issue.startsWith(prefix)) return undefined;
-  const detailsStart = issue.indexOf("（清单 slug=", prefix.length);
-  const path = issue.slice(prefix.length, detailsStart < 0 ? undefined : detailsStart);
-  return path || undefined;
 }
 
 /** 内置基线对象（回落用；避免依赖 registry 内部数组的元素顺序） */
