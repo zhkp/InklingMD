@@ -146,16 +146,29 @@ jobs:
       - name: Prepare portable zip
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
           $version = (Get-Content src-tauri/tauri.conf.json | ConvertFrom-Json).version
           $portableDir = "src-tauri/target/release/portable-build"
+          if (Test-Path $portableDir) { Remove-Item -Path $portableDir -Recurse -Force }
           New-Item -ItemType Directory -Path $portableDir -Force | Out-Null
           Copy-Item src-tauri/target/release/InklingMD.exe "$portableDir/InklingMD.exe"
           # 便携版 resource_dir() 指向 exe 同目录，主题源副本必须位于 themes/。
           Copy-Item -Path "src-tauri/resources/themes" -Destination "$portableDir/themes" -Recurse
           # 便携模式标记文件：存在则启用绿色模式，数据写入同目录 data 文件夹
           Set-Content -Path "$portableDir/portable.txt" -Value "This marker file enables portable mode. Keep it next to InklingMD.exe. App data will be stored in the 'data' folder beside the exe."
-          Compress-Archive -Path "$portableDir/*" -DestinationPath "src-tauri/target/release/InklingMD-${version}-portable.zip" -Force
-          Write-Host "Portable zip: InklingMD-${version}-portable.zip"
+          $portableZip = "src-tauri/target/release/InklingMD-${version}-portable.zip"
+          Compress-Archive -Path "$portableDir/*" -DestinationPath $portableZip -Force
+          Write-Host "Portable zip: $portableZip"
+          $portableAuditDir = Join-Path $env:RUNNER_TEMP "inkling-portable-zip-audit"
+          if (Test-Path $portableAuditDir) { Remove-Item -Path $portableAuditDir -Recurse -Force }
+          New-Item -ItemType Directory -Path $portableAuditDir -Force | Out-Null
+          Expand-Archive -LiteralPath $portableZip -DestinationPath $portableAuditDir -Force
+          $themesDir = Join-Path $portableAuditDir "themes"
+          if (-not (Test-Path -LiteralPath (Join-Path $themesDir "manifest.json") -PathType Leaf)) { throw "便携 ZIP 根目录缺少 themes/manifest.json" }
+          if (-not (Test-Path -LiteralPath (Join-Path $themesDir "NOTICE") -PathType Leaf)) { throw "便携 ZIP 根目录缺少 themes/NOTICE" }
+          $expectedManifest = (Resolve-Path "src-tauri/resources/themes/manifest.json").Path
+          & node "scripts/check-bundled-theme-artifact.mjs" $portableAuditDir $expectedManifest
+          if ($LASTEXITCODE -ne 0) { throw "便携 ZIP 主题资源核对失败" }
 
       # 扁平拷贝到 staging 目录再上传，确保下载后安装包位于 artifact 根目录
       # （upload-artifact 会保留原 bundle 子目录层级，导致 release 的扁平 glob 匹配失败）
