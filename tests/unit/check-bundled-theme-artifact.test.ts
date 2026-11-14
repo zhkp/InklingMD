@@ -20,9 +20,13 @@ function writeJson(path: string, value: unknown): void {
   writeFileSync(path, JSON.stringify(value, null, 2));
 }
 
-function createPackage(name: string, manifest: unknown = SOURCE_MANIFEST): string {
+function createPackage(
+  name: string,
+  manifest: unknown = SOURCE_MANIFEST,
+  themesRelativePath = "themes",
+): string {
   const root = join(TEMP, name);
-  const themes = join(root, "resources", "themes");
+  const themes = join(root, themesRelativePath);
   mkdirSync(join(themes, "alpha"), { recursive: true });
   writeJson(join(themes, "manifest.json"), manifest);
   writeFileSync(join(themes, "alpha.css"), "h1 { color: red; }");
@@ -56,13 +60,20 @@ describe("check-bundled-theme-artifact", () => {
   beforeAll(() => writeJson(SOURCE, SOURCE_MANIFEST));
   afterAll(() => rmSync(TEMP, { recursive: true, force: true }));
 
-  it("accepts the exact manifest, CSS set, and optional resource directory", () => {
-    const root = createPackage("valid");
-    writeFileSync(join(root, "resources", "themes", "alpha", "support.css"), "span {}");
+  it("accepts the portable ZIP root layout with themes/ directly under the package root", () => {
+    const root = createPackage("portable-zip-root-layout");
+    writeFileSync(join(root, "themes", "alpha", "support.css"), "span {}");
     const result = run(root);
     expect(result.status).toBe(0);
     expect(result.stdout).toContain("2 个主题");
     expect(result.stderr).toBe("");
+  });
+
+  it("rejects themes nested under resources instead of the portable ZIP root", () => {
+    const root = createPackage("nested-resource-layout", SOURCE_MANIFEST, "resources/themes");
+    const result = run(root);
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("恰有一个 themes/manifest.json");
   });
 
   it("fails when the package has no themes/manifest.json", () => {
@@ -75,8 +86,8 @@ describe("check-bundled-theme-artifact", () => {
 
   it("fails when a manifest-declared CSS or resource directory is missing", () => {
     const root = createPackage("missing-resource");
-    rmSync(join(root, "resources", "themes", "beta.css"));
-    rmSync(join(root, "resources", "themes", "alpha"), { recursive: true, force: true });
+    rmSync(join(root, "themes", "beta.css"));
+    rmSync(join(root, "themes", "alpha"), { recursive: true, force: true });
     const result = run(root);
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("缺少清单声明的 CSS：beta.css");
@@ -92,7 +103,7 @@ describe("check-bundled-theme-artifact", () => {
       ],
     };
     const root = createPackage("drift", drifted);
-    writeFileSync(join(root, "resources", "themes", "gamma.css"), "h1 {}");
+    writeFileSync(join(root, "themes", "gamma.css"), "h1 {}");
     const result = run(root);
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("缺少仓库登记的主题 slug：beta");
@@ -128,7 +139,7 @@ describe("check-bundled-theme-artifact", () => {
 
   it("rejects a manifest-declared resource directory that is a symlink outside themes", (context) => {
     const root = createPackage("symlinked-resource-dir");
-    const themes = join(root, "resources", "themes");
+    const themes = join(root, "themes");
     const outside = join(TEMP, "outside-theme-resources");
     rmSync(join(themes, "alpha"), { recursive: true, force: true });
     mkdirSync(outside, { recursive: true });
@@ -142,13 +153,12 @@ describe("check-bundled-theme-artifact", () => {
 
     const result = run(root);
     expect(result.status).toBe(1);
-    expect(result.stderr).toContain("符号链接");
-    expect(result.stderr).toContain("alpha");
+    expect(result.stderr).toContain("alpha.dir 路径包含符号链接：alpha");
   });
 
   it("rejects an unmanifested CSS file that is a symlink", (context) => {
     const root = createPackage("symlinked-extra-css");
-    const themes = join(root, "resources", "themes");
+    const themes = join(root, "themes");
     createSymlinkOrSkip(join(themes, "alpha.css"), join(themes, "evil.css"), "file", context);
 
     const result = run(root);

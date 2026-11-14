@@ -6,7 +6,7 @@
  * The workflow extracts each release artifact independently before invoking this script.
  */
 import { lstatSync, readdirSync, readFileSync, statSync } from "node:fs";
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 const [packageRootArg, expectedManifestArg] = process.argv.slice(2);
 if (!packageRootArg || !expectedManifestArg) {
@@ -31,27 +31,18 @@ function readManifest(path, label) {
   }
 }
 
-function findThemeManifests(root) {
-  const found = [];
-  const visit = (dir) => {
-    let entries;
-    try {
-      entries = readdirSync(dir, { withFileTypes: true });
-    } catch (error) {
-      fail(`无法枚举解包目录 ${dir}：${error.message}`);
-      return;
-    }
-    for (const entry of entries) {
-      const path = join(dir, entry.name);
-      if (entry.isSymbolicLink()) continue;
-      if (entry.isDirectory()) visit(path);
-      else if (entry.isFile() && entry.name === "manifest.json" && basename(dirname(path)) === "themes") {
-        found.push(path);
-      }
-    }
-  };
-  visit(root);
-  return found;
+function findRootThemeManifest(root) {
+  const themesRoot = join(root, "themes");
+  const manifestPath = join(themesRoot, "manifest.json");
+  try {
+    const themesStat = lstatSync(themesRoot);
+    const manifestStat = lstatSync(manifestPath);
+    if (themesStat.isSymbolicLink() || !themesStat.isDirectory()) return undefined;
+    if (manifestStat.isSymbolicLink() || !manifestStat.isFile()) return undefined;
+    return manifestPath;
+  } catch {
+    return undefined;
+  }
 }
 
 function validateEntries(manifest, label) {
@@ -135,9 +126,10 @@ function listCssFiles(root) {
 }
 
 let actualThemesRoot;
-const manifests = findThemeManifests(packageRoot);
+const rootManifest = findRootThemeManifest(packageRoot);
+const manifests = rootManifest ? [rootManifest] : [];
 if (manifests.length !== 1) {
-  fail(`解包产物应恰有一个 themes/manifest.json，实际找到 ${manifests.length} 个`);
+  fail(`解包产物根目录应恰有一个 themes/manifest.json，实际找到 ${manifests.length} 个`);
 } else {
   actualThemesRoot = dirname(manifests[0]);
 }

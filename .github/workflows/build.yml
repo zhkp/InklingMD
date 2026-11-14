@@ -170,6 +170,28 @@ jobs:
           & node "scripts/check-bundled-theme-artifact.mjs" $portableAuditDir $expectedManifest
           if ($LASTEXITCODE -ne 0) { throw "便携 ZIP 主题资源核对失败" }
 
+      - name: Run portable app and verify first-run bundled themes
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $themesDir = Join-Path $env:APPDATA "com.inklingmd.editor/themes"
+          if (Test-Path -LiteralPath $themesDir) { Remove-Item -LiteralPath $themesDir -Recurse -Force }
+          if (Test-Path -LiteralPath $themesDir) { throw "运行时验收必须从无 themes 目录的干净环境开始" }
+          $evidenceDir = Join-Path $env:RUNNER_TEMP "inkling-portable-runtime-evidence"
+          if (Test-Path -LiteralPath $evidenceDir) { Remove-Item -LiteralPath $evidenceDir -Recurse -Force }
+          New-Item -ItemType Directory -Path $evidenceDir -Force | Out-Null
+          $env:WEBVIEW2_USER_DATA_FOLDER = Join-Path $env:RUNNER_TEMP "inkling-portable-webview2"
+          New-Item -ItemType Directory -Path $env:WEBVIEW2_USER_DATA_FOLDER -Force | Out-Null
+          $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = "--remote-debugging-port=9222"
+          $portableExe = Join-Path $portableAuditDir "InklingMD.exe"
+          $app = Start-Process -FilePath $portableExe -WorkingDirectory $portableAuditDir -PassThru
+          try {
+            & node "scripts/probe-portable-bundled-themes.mjs" $evidenceDir "9222"
+            if ($LASTEXITCODE -ne 0) { throw "便携版首次启动主题验收失败" }
+          } finally {
+            if (-not $app.HasExited) { Stop-Process -Id $app.Id -Force -ErrorAction SilentlyContinue }
+          }
+
       # 扁平拷贝到 staging 目录再上传，确保下载后安装包位于 artifact 根目录
       # （upload-artifact 会保留原 bundle 子目录层级，导致 release 的扁平 glob 匹配失败）
       - name: Stage installers for artifact
@@ -186,6 +208,14 @@ jobs:
           name: InklingMD-windows-installers
           path: windows-installers
           if-no-files-found: error
+
+      - name: Upload portable runtime evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: portable-theme-runtime-evidence
+          path: ${{ runner.temp }}/inkling-portable-runtime-evidence/
+          if-no-files-found: warn
 
   # Linux amd64 构建：AppImage + deb
   # PR 上跳过打包（#252）：同上，PR 门禁只需 test job
