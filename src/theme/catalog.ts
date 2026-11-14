@@ -64,8 +64,8 @@ export interface CatalogResult {
   index: ThemesIndexEntry[];
   /** 目录级/单主题级问题（统一走可见提示，不静默） */
   issues: string[];
-  /** 无法读取的预装源 CSS 相对路径（结构化信息，供告警按路径去重计数） */
-  missingSourcePaths: string[];
+  /** 无法读取的预装源 CSS 路径与对应诊断（供跨扫描按路径去重，不解析文案） */
+  missingSourceDiagnostics: Array<{ path: string; issue: string }>;
   copyPlan: CopyPlanItem[];
   manifest: BundledManifestEntry[];
 }
@@ -76,7 +76,7 @@ function messageOf(error: unknown): string {
 
 export async function buildThemeCatalog(io: CatalogIo): Promise<CatalogResult> {
   const issues: string[] = [];
-  const missingSourcePaths = new Set<string>();
+  const missingSourceDiagnostics: Array<{ path: string; issue: string }> = [];
   const scan = await io.scanDir(io.themesRoot);
   const bundledScan = await io.scanDir(io.bundledRoot);
   issues.push(...scan.skipped);
@@ -172,10 +172,9 @@ export async function buildThemeCatalog(io: CatalogIo): Promise<CatalogResult> {
       const css = await io.readFile(io.join(io.bundledRoot, entry.css));
       sourceHashes.set(entry.css.toLowerCase(), themeCssHash(css));
     } catch (error) {
-      missingSourcePaths.add(entry.css);
-      issues.push(
-        `预装源副本缺失或不可读：${entry.css}（清单 slug=${entry.slug}，${messageOf(error)}）→ 本次不补齐该主题`,
-      );
+      const issue = `预装源副本缺失或不可读：${entry.css}（清单 slug=${entry.slug}，${messageOf(error)}）→ 本次不补齐该主题`;
+      missingSourceDiagnostics.push({ path: entry.css, issue });
+      issues.push(issue);
     }
   }
   // 只把**实际读到的**运行时副本计入：读不到 = 运行时缺失（→ 补齐），
@@ -206,7 +205,7 @@ export async function buildThemeCatalog(io: CatalogIo): Promise<CatalogResult> {
     }
   }
 
-  return { themes, index, issues, missingSourcePaths: [...missingSourcePaths], copyPlan, manifest: manifest.entries };
+  return { themes, index, issues, missingSourceDiagnostics, copyPlan, manifest: manifest.entries };
 }
 
 /** 清单是否需要重写（避免多窗口 storage 事件风暴：内容相同就不写） */

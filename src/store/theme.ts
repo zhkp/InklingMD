@@ -431,8 +431,9 @@ async function syncThemes(set: SetState, get: GetState): Promise<void> {
   set({ scanState: "scanning" });
   try {
     let { root, catalog } = await collectCatalog();
+    const initialCatalog = catalog;
     const issues = [...catalog.issues];
-    const missingSourcePaths = new Set(catalog.missingSourcePaths);
+    const missingSourcePaths = new Set(catalog.missingSourceDiagnostics.map(({ path }) => path));
     let copied = 0;
     for (const item of catalog.copyPlan) {
       try {
@@ -446,10 +447,26 @@ async function syncThemes(set: SetState, get: GetState): Promise<void> {
     if (copied > 0) {
       // 补齐后重建一次清单（新文件要进入注册表与索引）
       ({ root, catalog } = await collectCatalog());
-      for (const path of catalog.missingSourcePaths) missingSourcePaths.add(path);
+      for (const { path } of catalog.missingSourceDiagnostics) missingSourcePaths.add(path);
       issues.push(`预装主题已按源副本补齐 ${copied} 项（N13：用户改动只落 user:*）`);
     }
-    const allIssues = [...issues, ...catalog.issues];
+    const allIssues = [...issues];
+    if (copied > 0) {
+      const seenMissingSourcePaths = new Set(initialCatalog.missingSourceDiagnostics.map(({ path }) => path));
+      const missingPathByIssue = new Map(catalog.missingSourceDiagnostics.map(({ path, issue }) => [issue, path]));
+      const seenIssueMessages = new Set(initialCatalog.issues);
+      for (const issue of catalog.issues) {
+        const sourcePath = missingPathByIssue.get(issue);
+        if (sourcePath !== undefined) {
+          if (seenMissingSourcePaths.has(sourcePath)) continue;
+          seenMissingSourcePaths.add(sourcePath);
+        } else if (seenIssueMessages.has(issue)) {
+          continue;
+        }
+        allIssues.push(issue);
+        seenIssueMessages.add(issue);
+      }
+    }
     if (missingSourcePaths.size > 0 && !allIssues.some((issue) => issue.startsWith("预装主题不可用："))) {
       allIssues.unshift(`预装主题不可用：源副本缺少或无法读取 ${missingSourcePaths.size} 项`);
     }
