@@ -40,7 +40,12 @@ try {
   }
   if (!page) throw new Error("CDP 已连接，但未找到 portable 应用页面");
 
-  await page.locator('button[title="主题"]').waitFor({ state: "visible", timeout: 60_000 });
+  await page.locator(".empty-state").waitFor({ state: "visible", timeout: 30_000 });
+  await page.bringToFront();
+  await page.keyboard.press("Control+n");
+  await page.locator(".ProseMirror").waitFor({ state: "visible", timeout: 30_000 });
+  const themeButton = page.locator('button[title="主题"]');
+  await themeButton.waitFor({ state: "visible", timeout: 30_000 });
   await page.waitForFunction(() => {
     try {
       const parsed = JSON.parse(window.localStorage.getItem("inkling-themes-index") ?? "null");
