@@ -30,6 +30,8 @@ export interface ThemeDirScan {
   entries: ThemeDirEntry[];
   /** 被跳过的项（符号链接等）——必须显式登记，不允许静默 */
   skipped: string[];
+  /** 扫描目标目录本身是否存在 */
+  exists: boolean;
 }
 
 export interface CopyReport {
@@ -75,7 +77,7 @@ export async function ensureDir(dir: string): Promise<void> {
     return;
   }
   const { mockEnsureDir } = await import("./mockThemes");
-  mockEnsureDir();
+  mockEnsureDir(dir);
 }
 
 /** 扫描主题目录单层（文件 + 目录；跳过隐藏项与符号链接） */
@@ -115,7 +117,7 @@ export async function readThemeFile(absPath: string): Promise<string> {
   return mockReadText(absPath);
 }
 
-/** 读取预装清单原文（缺失/不可读 → `undefined`，由 `parseBundledManifest` 判定为「无预装主题」） */
+/** 读取预装清单原文（缺失/不可读 → `undefined`；调用方结合源目录状态判定并登记问题） */
 export async function readBundledManifest(root?: string): Promise<unknown> {
   const dir = root ?? (await bundledThemesRoot());
   const file = normalizePath(joinPath(dir, BUNDLED_MANIFEST_FILE));
