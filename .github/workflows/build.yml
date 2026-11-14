@@ -155,6 +155,53 @@ jobs:
           Compress-Archive -Path "$portableDir/*" -DestinationPath "src-tauri/target/release/InklingMD-${version}-portable.zip" -Force
           Write-Host "Portable zip: InklingMD-${version}-portable.zip"
 
+      # #403：检查每一种实际交付包，而不是只检查仓库源文件或 bundle 输出目录。
+      # 任一解包工具 / 包格式不可用都显式失败；不允许静默跳过。
+      - name: Verify bundled themes in every Windows package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $expectedManifest = (Resolve-Path "src-tauri/resources/themes/manifest.json").Path
+          $script = "scripts/check-bundled-theme-artifact.mjs"
+          $auditRoot = Join-Path $env:RUNNER_TEMP "inkling-theme-audit"
+          if (Test-Path $auditRoot) { Remove-Item $auditRoot -Recurse -Force }
+          New-Item -ItemType Directory -Path $auditRoot -Force | Out-Null
+
+          $portableFiles = @(Get-ChildItem "src-tauri/target/release/InklingMD-*-portable.zip" -File)
+          if ($portableFiles.Count -eq 0) { throw "未生成便携 ZIP，无法完成 #403 包内对账" }
+          foreach ($package in $portableFiles) {
+            $destination = Join-Path $auditRoot ("portable-" + [IO.Path]::GetFileNameWithoutExtension($package.Name))
+            Expand-Archive -LiteralPath $package.FullName -DestinationPath $destination -Force
+            & node $script $destination $expectedManifest
+            if ($LASTEXITCODE -ne 0) { throw "便携包主题资源核对失败：$($package.Name)" }
+            "PASS portable ZIP: $($package.Name)" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          }
+
+          $nsisFiles = @(Get-ChildItem "src-tauri/target/release/bundle/nsis/*.exe" -File)
+          if ($nsisFiles.Count -eq 0) { throw "未生成 NSIS 安装包，无法完成 #403 包内对账" }
+          foreach ($package in $nsisFiles) {
+            $destination = Join-Path $auditRoot ("nsis-" + $package.BaseName)
+            New-Item -ItemType Directory -Path $destination -Force | Out-Null
+            # NSIS /S + /D=... 安装到 runner 临时目录，不启动应用。
+            $process = Start-Process -FilePath $package.FullName -ArgumentList @("/S", "/D=$destination") -Wait -PassThru
+            if ($process.ExitCode -ne 0) { throw "NSIS 静默解包失败（exit $($process.ExitCode)）：$($package.Name)" }
+            & node $script $destination $expectedManifest
+            if ($LASTEXITCODE -ne 0) { throw "NSIS 包主题资源核对失败：$($package.Name)" }
+            "PASS NSIS: $($package.Name)" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          }
+
+          $msiFiles = @(Get-ChildItem "src-tauri/target/release/bundle/msi/*.msi" -File)
+          if ($msiFiles.Count -eq 0) { throw "未生成 MSI 安装包，无法完成 #403 包内对账" }
+          foreach ($package in $msiFiles) {
+            $destination = Join-Path $auditRoot ("msi-" + $package.BaseName)
+            $arguments = @("/a", "`"$($package.FullName)`"", "/qn", "/norestart", "TARGETDIR=`"$destination`"")
+            $process = Start-Process -FilePath "msiexec.exe" -ArgumentList $arguments -Wait -PassThru
+            if ($process.ExitCode -notin @(0, 3010)) { throw "MSI 管理性解包失败（exit $($process.ExitCode)）：$($package.Name)" }
+            & node $script $destination $expectedManifest
+            if ($LASTEXITCODE -ne 0) { throw "MSI 包主题资源核对失败：$($package.Name)" }
+            "PASS MSI: $($package.Name)" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          }
+
       # 扁平拷贝到 staging 目录再上传，确保下载后安装包位于 artifact 根目录
       # （upload-artifact 会保留原 bundle 子目录层级，导致 release 的扁平 glob 匹配失败）
       - name: Stage installers for artifact
@@ -197,7 +244,8 @@ jobs:
             build-essential \
             curl \
             wget \
-            file
+            file \
+            squashfs-tools
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v5
@@ -224,6 +272,52 @@ jobs:
       # 显式只构建 appimage + deb，避免 rpm bundler 缺少依赖导致失败
       - name: Build Tauri app
         run: pnpm tauri build --bundles appimage,deb
+
+      # #403：deb 用 dpkg-deb 解包、AppImage 用其官方 --appimage-extract 模式解包。
+      # 任一工具缺失或任一格式没产物都显式失败，并写明本 job 的覆盖情况。
+      - name: Verify bundled themes in every Linux package
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v dpkg-deb >/dev/null 2>&1; then
+            echo "FAIL: dpkg-deb 不可用，未验证 deb 包" | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          if ! command -v unsquashfs >/dev/null 2>&1; then
+            echo "FAIL: unsquashfs 不可用，未验证 AppImage" | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          expected_manifest="src-tauri/resources/themes/manifest.json"
+          audit_root="$RUNNER_TEMP/inkling-theme-audit"
+          rm -rf "$audit_root"
+          mkdir -p "$audit_root"
+          shopt -s nullglob
+          debs=(src-tauri/target/release/bundle/deb/*.deb)
+          appimages=(src-tauri/target/release/bundle/appimage/*.AppImage)
+          if ((${#debs[@]} == 0)); then
+            echo "FAIL: 未生成 deb，无法完成 #403 包内对账" | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          if ((${#appimages[@]} == 0)); then
+            echo "FAIL: 未生成 AppImage，无法完成 #403 包内对账" | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          for package in "${debs[@]}"; do
+            destination="$audit_root/deb-$(basename "$package" .deb)"
+            mkdir -p "$destination"
+            dpkg-deb -x "$package" "$destination"
+            node scripts/check-bundled-theme-artifact.mjs "$destination" "$expected_manifest"
+            echo "PASS deb: $(basename "$package")" | tee -a "$GITHUB_STEP_SUMMARY"
+          done
+          for package in "${appimages[@]}"; do
+            destination="$audit_root/appimage-$(basename "$package" .AppImage)"
+            mkdir -p "$destination"
+            chmod +x "$package"
+            absolute_package="$(realpath "$package")"
+            (cd "$destination" && "$absolute_package" --appimage-extract >/dev/null)
+            node scripts/check-bundled-theme-artifact.mjs "$destination/squashfs-root" "$expected_manifest"
+            echo "PASS AppImage: $(basename "$package")" | tee -a "$GITHUB_STEP_SUMMARY"
+          done
 
       # 扁平拷贝到 staging 目录再上传，确保下载后安装包位于 artifact 根目录
       - name: Stage installers for artifact

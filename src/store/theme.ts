@@ -369,6 +369,8 @@ async function notify(title: string, body: string, kind: "info" | "warning" | "e
   }
 }
 
+let preinstalledThemesWarningShown = false;
+
 /**
  * 绝对路径 → 可加载 URL（`#306` §C9 的 `toAssetUrl`）。
  *
@@ -395,14 +397,18 @@ function backupStamp(): string {
 /** 读一次清单（扫描主题目录 + 预装清单，含 N15 识别与 N13 补齐计划） */
 async function collectCatalog(): Promise<{ root: string; catalog: CatalogResult }> {
   const root = await themesRoot();
+  const runtimeRootWasPresent = (await scanThemesDir(root)).exists;
   await ensureDir(root);
+  const bundledRoot = await bundledThemesRoot();
   const catalog = await buildThemeCatalog({
     themesRoot: root,
-    bundledRoot: await bundledThemesRoot(),
+    bundledRoot,
+    runtimeRootWasPresent,
+    bundledResourcesExpected: isTauri(),
     scanDir: (dir) => scanThemesDir(dir),
     readFile: (abs) => readThemeFile(abs),
     join: (dir, rel) => normalizePath(joinPath(dir, rel)),
-    manifestRaw: await readBundledManifest(),
+    manifestRaw: await readBundledManifest(bundledRoot),
   });
   return { root, catalog };
 }
@@ -425,7 +431,9 @@ async function syncThemes(set: SetState, get: GetState): Promise<void> {
   set({ scanState: "scanning" });
   try {
     let { root, catalog } = await collectCatalog();
+    const initialCatalog = catalog;
     const issues = [...catalog.issues];
+    const missingSourcePaths = new Set(catalog.missingSourceDiagnostics.map(({ path }) => path));
     let copied = 0;
     for (const item of catalog.copyPlan) {
       try {
@@ -439,9 +447,37 @@ async function syncThemes(set: SetState, get: GetState): Promise<void> {
     if (copied > 0) {
       // 补齐后重建一次清单（新文件要进入注册表与索引）
       ({ root, catalog } = await collectCatalog());
+      for (const { path } of catalog.missingSourceDiagnostics) missingSourcePaths.add(path);
       issues.push(`预装主题已按源副本补齐 ${copied} 项（N13：用户改动只落 user:*）`);
     }
-    applyCatalog({ ...catalog, issues: [...issues, ...catalog.issues] }, root, set);
+    const allIssues = [...issues];
+    if (copied > 0) {
+      const seenMissingSourcePaths = new Set(initialCatalog.missingSourceDiagnostics.map(({ path }) => path));
+      const missingPathByIssue = new Map(catalog.missingSourceDiagnostics.map(({ path, issue }) => [issue, path]));
+      const seenIssueMessages = new Set(initialCatalog.issues);
+      for (const issue of catalog.issues) {
+        const sourcePath = missingPathByIssue.get(issue);
+        if (sourcePath !== undefined) {
+          if (seenMissingSourcePaths.has(sourcePath)) continue;
+          seenMissingSourcePaths.add(sourcePath);
+        } else if (seenIssueMessages.has(issue)) {
+          continue;
+        }
+        allIssues.push(issue);
+        seenIssueMessages.add(issue);
+      }
+    }
+    if (missingSourcePaths.size > 0 && !allIssues.some((issue) => issue.startsWith("预装主题不可用："))) {
+      allIssues.unshift(`预装主题不可用：源副本缺少或无法读取 ${missingSourcePaths.size} 项`);
+    }
+    applyCatalog({ ...catalog, issues: allIssues }, root, set);
+    const unavailable = allIssues.find((issue) => issue.startsWith("预装主题不可用："));
+    if (unavailable && !preinstalledThemesWarningShown) {
+      await notify("预装主题不可用", unavailable, "warning");
+      preinstalledThemesWarningShown = true;
+    } else if (!unavailable) {
+      preinstalledThemesWarningShown = false;
+    }
 
     const currentId = get().themeId;
     if (!isBuiltinThemeId(currentId) && !getTheme(currentId)) {

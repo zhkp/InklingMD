@@ -37,7 +37,11 @@ export interface CatalogScanEntry {
 export interface CatalogIo {
   themesRoot: string;
   bundledRoot: string;
-  scanDir: (dir: string) => Promise<{ entries: CatalogScanEntry[]; skipped: string[] }>;
+  /** 用户主题目录在本次启动创建前是否已经存在 */
+  runtimeRootWasPresent?: boolean;
+  /** 桌面应用始终应携带预装资源；浏览器预览/纯编排首启可无两端目录 */
+  bundledResourcesExpected?: boolean;
+  scanDir: (dir: string) => Promise<{ entries: CatalogScanEntry[]; skipped: string[]; exists?: boolean }>;
   readFile: (absPath: string) => Promise<string>;
   /** 路径拼接（Windows 为 `\`，POSIX 为 `/`） */
   join: (dir: string, rel: string) => string;
@@ -60,6 +64,8 @@ export interface CatalogResult {
   index: ThemesIndexEntry[];
   /** 目录级/单主题级问题（统一走可见提示，不静默） */
   issues: string[];
+  /** 无法读取的预装源 CSS 路径与对应诊断（供跨扫描按路径去重，不解析文案） */
+  missingSourceDiagnostics: Array<{ path: string; issue: string }>;
   copyPlan: CopyPlanItem[];
   manifest: BundledManifestEntry[];
 }
@@ -70,14 +76,27 @@ function messageOf(error: unknown): string {
 
 export async function buildThemeCatalog(io: CatalogIo): Promise<CatalogResult> {
   const issues: string[] = [];
+  const missingSourceDiagnostics: Array<{ path: string; issue: string }> = [];
   const scan = await io.scanDir(io.themesRoot);
+  const bundledScan = await io.scanDir(io.bundledRoot);
   issues.push(...scan.skipped);
 
-  // 无预装清单（尚无预装主题 / 索引未落地）是**正常状态**：不登记 issue；仅有内容但非法时才登记
+  // 无清单只在全新用户（运行时主题目录与预装源目录此前都不存在）时正常；
+  // 已安装环境里的源目录缺失、或源目录存在但清单缺失/损坏，都必须显式提示。
+  const bundledRootExists = bundledScan.exists ?? true;
+  if (!bundledRootExists && (io.bundledResourcesExpected || io.runtimeRootWasPresent === true)) {
+    issues.push("预装主题不可用：预装主题源目录整体缺失（$RESOURCE/themes）");
+  }
+  if (bundledRootExists && io.manifestRaw === undefined) {
+    issues.push("预装主题不可用：源目录存在，但 manifest.json 缺失、损坏或不可读");
+  }
   const manifest =
     io.manifestRaw === undefined
       ? { entries: [] as BundledManifestEntry[], issues: [] as string[] }
       : parseBundledManifest(io.manifestRaw);
+  if (bundledRootExists && manifest.issues.length > 0 && io.manifestRaw !== undefined) {
+    issues.push(`预装主题不可用：源 manifest.json 无效（${manifest.issues.join("；")}）`);
+  }
   issues.push(...manifest.issues);
 
   const fileEntries = scan.entries.filter((e) => !e.is_dir);
@@ -153,9 +172,9 @@ export async function buildThemeCatalog(io: CatalogIo): Promise<CatalogResult> {
       const css = await io.readFile(io.join(io.bundledRoot, entry.css));
       sourceHashes.set(entry.css.toLowerCase(), themeCssHash(css));
     } catch (error) {
-      issues.push(
-        `预装源副本缺失或不可读：${entry.css}（清单 slug=${entry.slug}，${messageOf(error)}）→ 本次不补齐该主题`,
-      );
+      const issue = `预装源副本缺失或不可读：${entry.css}（清单 slug=${entry.slug}，${messageOf(error)}）→ 本次不补齐该主题`;
+      missingSourceDiagnostics.push({ path: entry.css, issue });
+      issues.push(issue);
     }
   }
   // 只把**实际读到的**运行时副本计入：读不到 = 运行时缺失（→ 补齐），
@@ -186,7 +205,7 @@ export async function buildThemeCatalog(io: CatalogIo): Promise<CatalogResult> {
     }
   }
 
-  return { themes, index, issues, copyPlan, manifest: manifest.entries };
+  return { themes, index, issues, missingSourceDiagnostics, copyPlan, manifest: manifest.entries };
 }
 
 /** 清单是否需要重写（避免多窗口 storage 事件风暴：内容相同就不写） */
