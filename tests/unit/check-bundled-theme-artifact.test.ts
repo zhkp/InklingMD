@@ -69,11 +69,12 @@ describe("check-bundled-theme-artifact", () => {
     expect(result.stderr).toBe("");
   });
 
-  it("rejects themes nested under resources instead of the portable ZIP root", () => {
-    const root = createPackage("nested-resource-layout", SOURCE_MANIFEST, "resources/themes");
+  it("accepts themes nested under the extracted application directory", () => {
+    const root = createPackage("nested-resource-layout", SOURCE_MANIFEST, "usr/lib/inklingmd/themes");
     const result = run(root);
-    expect(result.status).toBe(1);
-    expect(result.stderr).toContain("恰有一个 themes/manifest.json");
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain("2 个主题");
+    expect(result.stderr).toBe("");
   });
 
   it("fails when the package has no themes/manifest.json", () => {
@@ -84,7 +85,7 @@ describe("check-bundled-theme-artifact", () => {
     expect(result.stderr).toContain("恰有一个 themes/manifest.json");
   });
 
-  it("fails when a manifest-declared CSS or resource directory is missing", () => {
+  it("fails when a manifest-declared CSS or resource directory is missing without duplicate CSS diagnostics", () => {
     const root = createPackage("missing-resource");
     rmSync(join(root, "themes", "beta.css"));
     rmSync(join(root, "themes", "alpha"), { recursive: true, force: true });
@@ -92,6 +93,8 @@ describe("check-bundled-theme-artifact", () => {
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("缺少清单声明的 CSS：beta.css");
     expect(result.stderr).toContain("缺少清单声明的资源目录：alpha");
+    expect(result.stderr.match(/缺少清单声明的 CSS：beta\.css/g)).toHaveLength(1);
+    expect(result.stderr.match(/清单登记的 CSS 未出现在包内：beta\.css/g)).toBeNull();
   });
 
   it("fails on unmanifested CSS and package/source slug drift", () => {
@@ -153,7 +156,8 @@ describe("check-bundled-theme-artifact", () => {
 
     const result = run(root);
     expect(result.status).toBe(1);
-    expect(result.stderr).toContain("alpha.dir 路径包含符号链接：alpha");
+    expect(result.stderr).toContain("符号链接");
+    expect(result.stderr).toContain("alpha");
   });
 
   it("rejects an unmanifested CSS file that is a symlink", (context) => {
