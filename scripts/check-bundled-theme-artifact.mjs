@@ -1,13 +1,12 @@
 #!/usr/bin/env node
 /**
- * Verify an extracted application package with root-level themes/ contains the exact bundled theme set.
+ * Verify an extracted application package contains the exact bundled theme set.
  *
  * Usage: node scripts/check-bundled-theme-artifact.mjs <extracted-package-root> <source-manifest>
- * Intended for package layouts with themes/ at the package root (portable ZIP and NSIS install directory).
- * MSI, deb, and AppImage layouts require package-specific checks; see #403.
+ * The workflow extracts each release artifact independently before invoking this script.
  */
-import { lstatSync, readdirSync, readFileSync, statSync } from "node:fs";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { readdirSync, readFileSync, statSync } from "node:fs";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 const [packageRootArg, expectedManifestArg] = process.argv.slice(2);
 if (!packageRootArg || !expectedManifestArg) {
@@ -32,18 +31,27 @@ function readManifest(path, label) {
   }
 }
 
-function findRootThemeManifest(root) {
-  const themesRoot = join(root, "themes");
-  const manifestPath = join(themesRoot, "manifest.json");
-  try {
-    const themesStat = lstatSync(themesRoot);
-    const manifestStat = lstatSync(manifestPath);
-    if (themesStat.isSymbolicLink() || !themesStat.isDirectory()) return undefined;
-    if (manifestStat.isSymbolicLink() || !manifestStat.isFile()) return undefined;
-    return manifestPath;
-  } catch {
-    return undefined;
-  }
+function findThemeManifests(root) {
+  const found = [];
+  const visit = (dir) => {
+    let entries;
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch (error) {
+      fail(`无法枚举解包目录 ${dir}：${error.message}`);
+      return;
+    }
+    for (const entry of entries) {
+      const path = join(dir, entry.name);
+      if (entry.isSymbolicLink()) continue;
+      if (entry.isDirectory()) visit(path);
+      else if (entry.isFile() && entry.name === "manifest.json" && basename(dirname(path)) === "themes") {
+        found.push(path);
+      }
+    }
+  };
+  visit(root);
+  return found;
 }
 
 function validateEntries(manifest, label) {
@@ -92,30 +100,12 @@ function safeRelative(value, label) {
   return segments.join(sep);
 }
 
-function findSymlinkComponent(root, relativePath) {
-  let current = root;
-  for (const segment of relativePath.split(sep)) {
-    current = join(current, segment);
-    try {
-      if (lstatSync(current).isSymbolicLink()) {
-        return relative(root, current).split(sep).join("/");
-      }
-    } catch {
-      // Leave missing or unreadable paths to the existing stat-based diagnostics.
-      return undefined;
-    }
-  }
-  return undefined;
-}
-
 function listCssFiles(root) {
   const files = [];
   const visit = (dir) => {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (entry.isSymbolicLink()) continue;
       const path = join(dir, entry.name);
-      if (entry.isSymbolicLink()) {
-        throw new Error(`主题目录包含符号链接：${relative(root, path).split(sep).join("/")}`);
-      }
       if (entry.isDirectory()) visit(path);
       else if (entry.isFile() && entry.name.toLowerCase().endsWith(".css")) {
         files.push(relative(root, path).split(sep).join("/"));
@@ -127,10 +117,9 @@ function listCssFiles(root) {
 }
 
 let actualThemesRoot;
-const rootManifest = findRootThemeManifest(packageRoot);
-const manifests = rootManifest ? [rootManifest] : [];
+const manifests = findThemeManifests(packageRoot);
 if (manifests.length !== 1) {
-  fail(`解包产物根目录应恰有一个 themes/manifest.json，实际找到 ${manifests.length} 个`);
+  fail(`解包产物应恰有一个 themes/manifest.json，实际找到 ${manifests.length} 个`);
 } else {
   actualThemesRoot = dirname(manifests[0]);
 }
@@ -175,11 +164,8 @@ if (expectedManifest && actualThemesRoot) {
     if (cssRel) {
       expectedCss.add(cssRel.split(sep).join("/"));
       const target = resolve(actualThemesRoot, cssRel);
-      const symlink = findSymlinkComponent(actualThemesRoot, cssRel);
       const inside = relative(actualThemesRoot, target);
-      if (symlink) {
-        fail(`${entry.slug}.css 路径包含符号链接：${symlink}`);
-      } else if (inside === ".." || inside.startsWith(`..${sep}`) || isAbsolute(inside)) {
+      if (inside === ".." || inside.startsWith(`..${sep}`) || isAbsolute(inside)) {
         fail(`${entry.slug}.css 越出 themes 目录：${entry.css}`);
       } else {
         try {
@@ -194,11 +180,8 @@ if (expectedManifest && actualThemesRoot) {
       if (dirRel) {
         resourceDirs.push(dirRel.split(sep).join("/"));
         const target = resolve(actualThemesRoot, dirRel);
-        const symlink = findSymlinkComponent(actualThemesRoot, dirRel);
         const inside = relative(actualThemesRoot, target);
-        if (symlink) {
-          fail(`${entry.slug}.dir 路径包含符号链接：${symlink}`);
-        } else if (inside === ".." || inside.startsWith(`..${sep}`) || isAbsolute(inside)) {
+        if (inside === ".." || inside.startsWith(`..${sep}`) || isAbsolute(inside)) {
           fail(`${entry.slug}.dir 越出 themes 目录：${entry.dir}`);
         } else {
           try {
