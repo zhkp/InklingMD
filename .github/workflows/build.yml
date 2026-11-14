@@ -191,9 +191,11 @@ jobs:
           $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = "--remote-debugging-port=9222"
           $portableExe = Join-Path $portableAuditDir "InklingMD.exe"
           if (-not (Test-Path -LiteralPath $portableExe -PathType Leaf)) { throw "ZIP 解包目录中缺少 InklingMD.exe: $portableExe" }
+          $probeDocument = Join-Path $portableAuditDir "portable-theme-probe.md"
+          Set-Content -LiteralPath $probeDocument -Value "# Portable theme runtime probe" -Encoding utf8
           $app = $null
           try {
-            $app = Start-Process -FilePath $portableExe -WorkingDirectory $portableAuditDir -PassThru
+            $app = Start-Process -FilePath $portableExe -ArgumentList ('"{0}"' -f $probeDocument) -WorkingDirectory $portableAuditDir -PassThru
             & node "scripts/probe-portable-bundled-themes.mjs" $evidenceDir "9222"
             if ($LASTEXITCODE -ne 0) { throw "便携版首次启动主题验收失败" }
           } finally {

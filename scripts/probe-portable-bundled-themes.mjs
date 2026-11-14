@@ -16,6 +16,7 @@ const port = Number(portArg);
 const expectedSlugs = ["drake", "drake-dark", "lapis", "lapis-dark", "notion", "notion-dark"];
 const pause = (ms) => new Promise((resolvePromise) => setTimeout(resolvePromise, ms));
 let browser;
+let page;
 
 try {
   const deadline = Date.now() + 60_000;
@@ -30,7 +31,6 @@ try {
   }
   if (!browser) throw new Error(`60 秒内无法连接 WebView2 CDP 端口 ${port}: ${lastConnectionError}`);
 
-  let page;
   const pageDeadline = Date.now() + 60_000;
   while (!page && Date.now() < pageDeadline) {
     const pages = browser.contexts().flatMap((context) => context.pages());
@@ -89,6 +89,18 @@ try {
   console.log(`inkling-themes-index 原文：${indexText}`);
   console.log(`验收报告：${reportPath}`);
 } catch (error) {
+  mkdirSync(evidenceDir, { recursive: true });
+  const failureReport = {
+    verdict: "failed",
+    error: error instanceof Error ? error.message : String(error),
+    appUrl: page?.url() ?? null,
+    pageTitle: page ? await page.title().catch(() => null) : null,
+    bodyText: page ? (await page.locator("body").innerText({ timeout: 1_000 }).catch(() => "")).slice(0, 4_000) : null,
+  };
+  if (page) {
+    await page.screenshot({ path: join(evidenceDir, "portable-theme-runtime-failure.png"), fullPage: true }).catch(() => {});
+  }
+  writeFileSync(join(evidenceDir, "portable-theme-runtime-failure.json"), `${JSON.stringify(failureReport, null, 2)}\n`);
   console.error(`便携版首次启动验收失败：${error instanceof Error ? error.stack : String(error)}`);
   process.exitCode = 1;
 } finally {
