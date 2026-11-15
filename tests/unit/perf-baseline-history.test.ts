@@ -14,17 +14,22 @@
 
 import { execFileSync } from "node:child_process";
 import { readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
+import * as ts from "typescript";
 import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createPerfReportWorkspace, type PerfReportWorkspace } from "./perf-report-env";
 
 const REPORT = "tests/perf/report.mjs";
 const ID = "scroll-H-test";
 const FIXTURE = { version: 2, hash: "histtest0001", lines: 1000, source: "generated:rich" };
-// Keep this override local: Vitest's documented default is 5s, while this case starts 11 child processes.
-// https://vitest.dev/api/#test
-const HISTORY_LIMIT_TEST_TIMEOUT_MS = 30_000;
-const DEFAULT_VITEST_TEST_TIMEOUT_MS = 5_000;
+const HISTORY_LIMIT_TEST_TITLE = "历史序列上限 8 点，保留最近的运行";
+const HISTORY_LIMIT_TIMEOUT_MS = 30_000;
+// Two clean barrier rounds: 35 target-callback samples fully inside all four gate PID intervals (50ms edge pad).
+// Nearest-rank p95 = 1,965.185ms (rounded up to 1,966); max = 2,033.995ms. The 30s local timeout is 15.27× p95.
+// The source-level guard requires 10× rounded p95 (19.66s); the global Vitest timeout remains untouched.
+const HISTORY_LIMIT_CALLBACK_WALL_P95_MS = 1_966;
+const HISTORY_LIMIT_TIMEOUT_SAFETY_FACTOR = 10;
+const HISTORY_LIMIT_SUBPROCESS_COUNT = 11;
 
 const roots: string[] = [];
 let perf: PerfReportWorkspace;
@@ -212,15 +217,180 @@ describe("基线身份 = 测量配置（路径隔离）", () => {
     expect(frameHistory()).toHaveLength(1); // 从本次重新起头，而不是 [median, median]
   });
 
-  it("历史序列上限 8 点，保留最近的运行", { timeout: HISTORY_LIMIT_TEST_TIMEOUT_MS }, async () => {
+  // Vitest documents the per-test timeout option at https://vitest.dev/api/#test.
+  // Keep the override local: this sync test launches 11 report.mjs subprocesses serially.
+  it("历史序列上限 8 点，保留最近的运行", { timeout: 30_000 }, () => {
     for (let i = 0; i < 11; i += 1) {
       writeRaw({ frameMedian: 16 + i * 0.1 });
       updateBaseline();
     }
-    // Deliberately cross Vitest's 5s default so removing the local override fails this test.
-    await new Promise<void>((resolve) => setTimeout(resolve, DEFAULT_VITEST_TEST_TIMEOUT_MS + 250));
     const history = frameHistory();
     expect(history).toHaveLength(8);
     expect(history[history.length - 1]).toBeGreaterThan(history[0]); // 保留尾部
+  });
+});
+
+// Use TypeScript's AST API so comments and unrelated strings cannot satisfy the source-level contract.
+// https://github.com/microsoft/TypeScript/wiki/Using-the-Compiler-API
+function parseTypeScriptFile(relativePath: string): ts.SourceFile {
+  const absolutePath = resolve(process.cwd(), relativePath);
+  return ts.createSourceFile(
+    absolutePath,
+    readFileSync(absolutePath, "utf8"),
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TS,
+  );
+}
+
+function objectMemberName(member: ts.ObjectLiteralElementLike): string | undefined {
+  if (
+    ts.isPropertyAssignment(member) ||
+    ts.isShorthandPropertyAssignment(member) ||
+    ts.isMethodDeclaration(member) ||
+    ts.isGetAccessorDeclaration(member) ||
+    ts.isSetAccessorDeclaration(member)
+  ) {
+    const name = member.name;
+    if (ts.isIdentifier(name) || ts.isStringLiteral(name)) return name.text;
+  }
+  return undefined;
+}
+
+function objectMembersNamed(object: ts.ObjectLiteralExpression, name: string): ts.ObjectLiteralElementLike[] {
+  return object.properties.filter((member) => objectMemberName(member) === name);
+}
+
+function collectAstNodes<T extends ts.Node>(root: ts.Node, matches: (node: ts.Node) => node is T): T[] {
+  const result: T[] = [];
+  const visit = (node: ts.Node): void => {
+    if (matches(node)) result.push(node);
+    ts.forEachChild(node, visit);
+  };
+  visit(root);
+  return result;
+}
+
+function vitestTestOptions(source: ts.SourceFile): ts.ObjectLiteralExpression {
+  const calls = collectAstNodes(
+    source,
+    (node): node is ts.CallExpression =>
+      ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === "defineConfig",
+  );
+  if (calls.length !== 1 || !calls[0].arguments[0] || !ts.isObjectLiteralExpression(calls[0].arguments[0])) {
+    throw new Error("vitest.config.ts must have one defineConfig object");
+  }
+
+  const testMembers = objectMembersNamed(calls[0].arguments[0], "test");
+  if (
+    testMembers.length !== 1 ||
+    !ts.isPropertyAssignment(testMembers[0]) ||
+    !ts.isObjectLiteralExpression(testMembers[0].initializer)
+  ) {
+    throw new Error("vitest.config.ts must define one direct test options object");
+  }
+  return testMembers[0].initializer;
+}
+
+function numericLiteralValue(expression: ts.Expression): number | undefined {
+  return ts.isNumericLiteral(expression) ? Number(expression.text.replaceAll("_", "")) : undefined;
+}
+
+function isHistorySubprocessLoop(loop: ts.ForStatement): boolean {
+  const initializer = loop.initializer;
+  if (!initializer || !ts.isVariableDeclarationList(initializer) || initializer.declarations.length !== 1) {
+    return false;
+  }
+  const declaration = initializer.declarations[0];
+  if (
+    !ts.isIdentifier(declaration.name) ||
+    !declaration.initializer ||
+    numericLiteralValue(declaration.initializer) !== 0
+  ) {
+    return false;
+  }
+
+  const index = declaration.name.text;
+  const condition = loop.condition;
+  if (
+    !condition ||
+    !ts.isBinaryExpression(condition) ||
+    condition.operatorToken.kind !== ts.SyntaxKind.LessThanToken ||
+    !ts.isIdentifier(condition.left) ||
+    condition.left.text !== index ||
+    numericLiteralValue(condition.right) !== HISTORY_LIMIT_SUBPROCESS_COUNT
+  ) {
+    return false;
+  }
+
+  const incrementor = loop.incrementor;
+  return Boolean(
+    incrementor &&
+      ts.isBinaryExpression(incrementor) &&
+      incrementor.operatorToken.kind === ts.SyntaxKind.PlusEqualsToken &&
+      ts.isIdentifier(incrementor.left) &&
+      incrementor.left.text === index &&
+      numericLiteralValue(incrementor.right) === 1,
+  );
+}
+
+function historyLimitTestCall(source: ts.SourceFile): ts.CallExpression {
+  const calls = collectAstNodes(
+    source,
+    (node): node is ts.CallExpression =>
+      ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === "it",
+  );
+  const targetCalls = calls.filter((call) => {
+    const title = call.arguments[0];
+    return title && ts.isStringLiteral(title) && title.text === HISTORY_LIMIT_TEST_TITLE;
+  });
+  if (targetCalls.length !== 1) throw new Error(`expected one test titled "${HISTORY_LIMIT_TEST_TITLE}"`);
+  return targetCalls[0];
+}
+
+describe("#411 历史上限测试超时配置守卫", () => {
+  it("全局默认不变、目标用例有足够的局部 wall-time 预算", () => {
+    const config = parseTypeScriptFile("vitest.config.ts");
+    const globalTestOptions = vitestTestOptions(config);
+    expect(objectMembersNamed(globalTestOptions, "testTimeout")).toHaveLength(0);
+    expect(globalTestOptions.properties.some((member) => ts.isSpreadAssignment(member))).toBe(false);
+
+    const source = parseTypeScriptFile("tests/unit/perf-baseline-history.test.ts");
+    const target = historyLimitTestCall(source);
+    const options = target.arguments[1];
+    if (!options || !ts.isObjectLiteralExpression(options)) {
+      throw new Error("history limit test must keep a direct local options object");
+    }
+    const timeoutMembers = objectMembersNamed(options, "timeout");
+    expect(timeoutMembers).toHaveLength(1);
+    if (timeoutMembers.length !== 1 || !ts.isPropertyAssignment(timeoutMembers[0])) {
+      throw new Error("history limit test must declare one numeric timeout option");
+    }
+    const timeoutMs = numericLiteralValue(timeoutMembers[0].initializer);
+    expect(timeoutMs).toBe(HISTORY_LIMIT_TIMEOUT_MS);
+    expect(timeoutMs).toBeGreaterThanOrEqual(HISTORY_LIMIT_CALLBACK_WALL_P95_MS * HISTORY_LIMIT_TIMEOUT_SAFETY_FACTOR);
+
+    const callback = target.arguments[2];
+    if (!callback || !ts.isArrowFunction(callback)) throw new Error("history limit callback must remain an arrow function");
+    expect(callback.modifiers?.some((modifier) => modifier.kind === ts.SyntaxKind.AsyncKeyword) ?? false).toBe(false);
+
+    const loops = collectAstNodes(callback, (node): node is ts.ForStatement => ts.isForStatement(node));
+    const historyLoops = loops.filter(isHistorySubprocessLoop);
+    expect(historyLoops).toHaveLength(1);
+    if (historyLoops.length === 1) {
+      const body = historyLoops[0].statement;
+      if (!ts.isBlock(body)) throw new Error("history subprocess loop must use a direct block body");
+      const bodyCalls = body.statements.map((statement) => {
+        if (
+          !ts.isExpressionStatement(statement) ||
+          !ts.isCallExpression(statement.expression) ||
+          !ts.isIdentifier(statement.expression.expression)
+        ) {
+          return undefined;
+        }
+        return statement.expression.expression.text;
+      });
+      expect(bodyCalls).toEqual(["writeRaw", "updateBaseline"]);
+    }
   });
 });
