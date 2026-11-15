@@ -139,6 +139,7 @@ export function SourceModeEditor({
     let scrollRaf: number | null = null;
     let activeHeadings = extractMarkdownOutline(value);
     stampHeadingVersion(activeHeadings);
+    let publishedHeadings = activeHeadings;
     let currentActiveIndex = -1;
     /** 最近一次内容变化的时间点（探针未启用时为 null） */
     let outlineSettleStart: number | null = null;
@@ -189,6 +190,8 @@ export function SourceModeEditor({
       activeIndex: number,
     ) => {
       currentActiveIndex = activeIndex;
+      stampHeadingVersion(headings);
+      publishedHeadings = headings;
       perfProbeCount("outlinePublish");
       onOutlineChangeRef.current?.({ headings, activeIndex });
     };
@@ -212,7 +215,6 @@ export function SourceModeEditor({
           return;
         }
         const nextHeadings = extractMarkdownOutline(v.state.doc.toString());
-        stampHeadingVersion(nextHeadings);
         const nextActive = locateActiveHeading(v, nextHeadings);
         const structureChanged = !isSameMarkdownOutline(
           activeHeadings,
@@ -223,6 +225,10 @@ export function SourceModeEditor({
         activeHeadings = nextHeadings;
         if (structureChanged || nextActive !== currentActiveIndex) {
           publishOutline(activeHeadings, nextActive);
+        } else {
+          // 结构不变时面板保留原对象，重新认证这些对象即可保持正常导航；
+          // 标题顺序/文本/层级/行号一旦变化，则发布新对象，旧对象保持 stale。
+          stampHeadingVersion(publishedHeadings);
         }
         outlineStale = false;
         // 计时结束放在重算/发布之后：outlineSettle 表示「停笔 → 大纲更新完成」
@@ -269,18 +275,19 @@ export function SourceModeEditor({
           return;
         }
         const currentDoc = v.state.doc.toString();
-        const offset = findSourceModeHeadingOffset(currentDoc, heading);
+        // A stale snapshot cannot use text-only matching; same-shape outlines are
+        // re-stamped after debounce, while changed structures publish new objects.
+        if (headingDocumentVersions.get(heading) !== documentVersion) return;
 
+        const offset = findSourceModeHeadingOffset(currentDoc, heading);
         let targetPos = offset ?? -1;
         if (
           !Number.isInteger(targetPos) ||
           targetPos < 0 ||
           targetPos > currentDoc.length
         ) {
-          // 旧 offset 只有来自当前文档 revision 才能作为 fallback；stale 大纲的
-          // 文本匹配失效后直接放弃，绝不把旧位置落到另一行。
+          // 旧 offset 只有来自当前文档 revision 才能作为 fallback。
           if (
-            headingDocumentVersions.get(heading) !== documentVersion ||
             !Number.isInteger(heading.pos) ||
             heading.pos < 0 ||
             heading.pos > currentDoc.length
@@ -288,6 +295,13 @@ export function SourceModeEditor({
             return;
           }
           targetPos = heading.pos;
+        }
+        if (
+          !Number.isInteger(targetPos) ||
+          targetPos < 0 ||
+          targetPos > currentDoc.length
+        ) {
+          return;
         }
 
         // 移动光标并平滑滚动到该行
