@@ -31,4 +31,30 @@ describe("ThemeMenu scan diagnostics", () => {
     expect(details).toHaveTextContent("theme-with-assets");
     expect(details).toHaveTextContent(skippedPath);
   });
+
+  it("keeps expanded details out of the menu tab and arrow-key focus model", () => {
+    useTheme.setState({ scanIssues: ["预装主题资源跳过（theme-with-assets）：font-link.woff2"] });
+    render(<ThemeMenu open onOpenChange={vi.fn()} />);
+
+    const menu = screen.getByRole("menu");
+    const toggle = screen.getByRole("menuitem", { name: "查看上次扫描提示（1 条）" });
+    fireEvent.click(toggle);
+
+    const details = screen.getByRole("group", { name: "收起扫描提示（1 条）" });
+    const focusableItems = Array.from(
+      menu.querySelectorAll<HTMLElement>('button:not(:disabled), [tabindex="0"]'),
+    );
+    expect(focusableItems.every((item) => item.getAttribute("role")?.startsWith("menuitem"))).toBe(true);
+    expect(details).not.toHaveAttribute("tabindex");
+
+    const menuItems = Array.from(menu.querySelectorAll<HTMLElement>('[role="menuitem"]'));
+    const toggleIndex = menuItems.indexOf(toggle);
+    expect(menuItems).not.toContain(details);
+    expect(menuItems[toggleIndex + 1]).toBeDefined();
+
+    toggle.focus();
+    fireEvent.keyDown(toggle, { key: "ArrowDown" });
+    expect(document.activeElement).toBe(menuItems[toggleIndex + 1]);
+    expect(document.activeElement).not.toBe(details);
+  });
 });

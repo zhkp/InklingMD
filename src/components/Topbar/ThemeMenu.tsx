@@ -210,7 +210,6 @@ export function ThemeMenu({ open, onOpenChange }: ThemeMenuProps) {
                   className="theme-scan-issues-details"
                   role="group"
                   aria-labelledby={scanIssuesToggleId}
-                  tabIndex={0}
                   hidden={!scanIssuesExpanded}
                   data-theme-issue-details="1"
                 >
