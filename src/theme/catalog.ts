@@ -37,11 +37,9 @@ export interface CatalogScanEntry {
 export interface CatalogIo {
   themesRoot: string;
   bundledRoot: string;
-  /** 用户主题目录在本次启动创建前是否已经存在 */
-  runtimeRootWasPresent?: boolean;
   /** 桌面应用始终应携带预装资源；浏览器预览/纯编排首启可无两端目录 */
-  bundledResourcesExpected?: boolean;
-  scanDir: (dir: string) => Promise<{ entries: CatalogScanEntry[]; skipped: string[]; exists?: boolean }>;
+  bundledResourcesExpected: boolean;
+  scanDir: (dir: string) => Promise<{ entries: CatalogScanEntry[]; skipped: string[]; exists: boolean }>;
   readFile: (absPath: string) => Promise<string>;
   /** 路径拼接（Windows 为 `\`，POSIX 为 `/`） */
   join: (dir: string, rel: string) => string;
@@ -81,10 +79,10 @@ export async function buildThemeCatalog(io: CatalogIo): Promise<CatalogResult> {
   const bundledScan = await io.scanDir(io.bundledRoot);
   issues.push(...scan.skipped);
 
-  // 无清单只在全新用户（运行时主题目录与预装源目录此前都不存在）时正常；
-  // 已安装环境里的源目录缺失、或源目录存在但清单缺失/损坏，都必须显式提示。
-  const bundledRootExists = bundledScan.exists ?? true;
-  if (!bundledRootExists && (io.bundledResourcesExpected || io.runtimeRootWasPresent === true)) {
+  // 非桌面预览可不带预装资源；桌面应用按 bundledResourcesExpected 明确要求随包源目录。
+  // 源目录存在但清单缺失或损坏时，仍需显式提示。
+  const bundledRootExists = bundledScan.exists;
+  if (!bundledRootExists && io.bundledResourcesExpected === true) {
     issues.push("预装主题不可用：预装主题源目录整体缺失（$RESOURCE/themes）");
   }
   if (bundledRootExists && io.manifestRaw === undefined) {
@@ -96,8 +94,9 @@ export async function buildThemeCatalog(io: CatalogIo): Promise<CatalogResult> {
       : parseBundledManifest(io.manifestRaw);
   if (bundledRootExists && manifest.issues.length > 0 && io.manifestRaw !== undefined) {
     issues.push(`预装主题不可用：源 manifest.json 无效（${manifest.issues.join("；")}）`);
+  } else {
+    issues.push(...manifest.issues);
   }
-  issues.push(...manifest.issues);
 
   const fileEntries = scan.entries.filter((e) => !e.is_dir);
   const dirNames = scan.entries.filter((e) => e.is_dir).map((e) => e.name);

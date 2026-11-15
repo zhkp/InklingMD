@@ -15,7 +15,6 @@ interface StubOptions {
   skipped?: string[];
   failRead?: string[];
   dirs?: Record<string, boolean>;
-  runtimeRootWasPresent?: boolean;
   bundledRootExists?: boolean;
   bundledResourcesExpected?: boolean;
 }
@@ -25,8 +24,7 @@ function stubIo(opts: StubOptions): CatalogIo {
   return {
     themesRoot: THEMES,
     bundledRoot: BUNDLED,
-    runtimeRootWasPresent: opts.runtimeRootWasPresent,
-    bundledResourcesExpected: opts.bundledResourcesExpected,
+    bundledResourcesExpected: opts.bundledResourcesExpected ?? false,
     manifestRaw: opts.manifest,
     join,
     scanDir: async (dir: string) => {
@@ -211,25 +209,29 @@ describe("#307 N13 幂等补齐计划", () => {
 });
 
 describe("#403 预装源状态判定", () => {
-  it("全新用户的运行时目录与预装源目录都不存在时不误报", async () => {
+  it("非桌面预览没有预装资源目录时不误报", async () => {
     const { issues } = await buildThemeCatalog(
-      stubIo({ files: {}, runtimeRootWasPresent: false, bundledRootExists: false }),
+      stubIo({ files: {}, bundledRootExists: false }),
     );
     expect(issues).toEqual([]);
   });
 
-  it("桌面便携包首次启动即使用户目录尚未创建，缺少源目录仍提示", async () => {
+  it("桌面应用预期携带资源，源目录缺失时提示", async () => {
     const { issues } = await buildThemeCatalog(
-      stubIo({ files: {}, runtimeRootWasPresent: false, bundledRootExists: false, bundledResourcesExpected: true }),
+      stubIo({ files: {}, bundledRootExists: false, bundledResourcesExpected: true }),
     );
     expect(issues.join("\n")).toContain("预装主题不可用：预装主题源目录整体缺失");
   });
 
-  it("既有运行时主题目录对应的预装源目录整体缺失时登记可见 issue", async () => {
+  it("浏览器已有用户主题但无预装资源时不登记预装缺失告警", async () => {
     const { issues } = await buildThemeCatalog(
-      stubIo({ files: {}, runtimeRootWasPresent: true, bundledRootExists: false }),
+      stubIo({
+        files: { [`${THEMES}/custom.css`]: "h1{}" },
+        bundledRootExists: false,
+        bundledResourcesExpected: false,
+      }),
     );
-    expect(issues.join("\n")).toContain("预装主题不可用：预装主题源目录整体缺失");
+    expect(issues.some((issue) => issue.startsWith("预装主题不可用："))).toBe(false);
   });
 
   it("源目录存在但清单缺失或损坏时登记预装主题不可用", async () => {
@@ -242,6 +244,7 @@ describe("#403 预装源状态判定", () => {
       stubIo({ files: {}, bundledFiles: {}, bundledRootExists: true, manifest: { v: 1 } }),
     );
     expect(invalid.issues.join("\n")).toContain("预装主题不可用：源 manifest.json 无效");
+    expect(invalid.issues).toHaveLength(1);
   });
 });
 

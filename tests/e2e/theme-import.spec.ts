@@ -87,6 +87,18 @@ test.describe("#307 主题目录 → 列表 → 生效 → 持久化", () => {
   // 串行：每个用例都要冷启动应用（Vite 首次编译 + 主题扫描），并行会把「慢」放大成超时
   test.describe.configure({ mode: "serial" });
 
+  test("浏览器预览已有用户主题但没有预装资源时不弹预装缺失告警", async ({ page }) => {
+    const dialogs: string[] = [];
+    page.on("dialog", async (dialog) => {
+      dialogs.push(dialog.message());
+      await dialog.dismiss();
+    });
+    await seedThemes(page);
+    await openThemeMenu(page);
+    await expect(page.locator('[data-theme-option="user:probe"]')).toBeVisible();
+    expect(dialogs.some((message) => message.includes("预装主题不可用"))).toBe(false);
+  });
+
   test("扫描主题目录后列表出现已导入主题，可选中并生效（兼容层改写过）", async ({ page }) => {
     await seedThemes(page);
     await ensureTopbar(page);

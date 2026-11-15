@@ -309,8 +309,7 @@ jobs:
             build-essential \
             curl \
             wget \
-            file \
-            squashfs-tools
+            file
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v5
@@ -338,7 +337,7 @@ jobs:
       - name: Build Tauri app
         run: pnpm tauri build --bundles appimage,deb
 
-      # #403：deb 用 dpkg-deb 解包、AppImage 用其官方 --appimage-extract 模式解包。
+      # #403：deb 用 dpkg-deb 解包；AppImage 用其自带 --appimage-extract 模式解包。
       # 任一工具缺失或任一格式没产物都显式失败，并写明本 job 的覆盖情况。
       - name: Verify bundled themes in every Linux package
         shell: bash
@@ -346,10 +345,6 @@ jobs:
           set -euo pipefail
           if ! command -v dpkg-deb >/dev/null 2>&1; then
             echo "FAIL: dpkg-deb 不可用，未验证 deb 包" | tee -a "$GITHUB_STEP_SUMMARY"
-            exit 1
-          fi
-          if ! command -v unsquashfs >/dev/null 2>&1; then
-            echo "FAIL: unsquashfs 不可用，未验证 AppImage" | tee -a "$GITHUB_STEP_SUMMARY"
             exit 1
           fi
           expected_manifest="src-tauri/resources/themes/manifest.json"

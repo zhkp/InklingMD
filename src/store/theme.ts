@@ -397,13 +397,11 @@ function backupStamp(): string {
 /** 读一次清单（扫描主题目录 + 预装清单，含 N15 识别与 N13 补齐计划） */
 async function collectCatalog(): Promise<{ root: string; catalog: CatalogResult }> {
   const root = await themesRoot();
-  const runtimeRootWasPresent = (await scanThemesDir(root)).exists;
   await ensureDir(root);
   const bundledRoot = await bundledThemesRoot();
   const catalog = await buildThemeCatalog({
     themesRoot: root,
     bundledRoot,
-    runtimeRootWasPresent,
     bundledResourcesExpected: isTauri(),
     scanDir: (dir) => scanThemesDir(dir),
     readFile: (abs) => readThemeFile(abs),

@@ -180,7 +180,6 @@ if (expectedManifest && actualThemesRoot) {
   for (const entry of actualEntries) {
     const cssRel = safeRelative(entry.css, `${entry.slug}.css`);
     if (cssRel) {
-      expectedCss.add(cssRel.split(sep).join("/"));
       const target = resolve(actualThemesRoot, cssRel);
       const symlink = findSymlinkComponent(actualThemesRoot, cssRel);
       const inside = relative(actualThemesRoot, target);
@@ -190,7 +189,11 @@ if (expectedManifest && actualThemesRoot) {
         fail(`${entry.slug}.css 越出 themes 目录：${entry.css}`);
       } else {
         try {
-          if (!statSync(target).isFile()) fail(`包内 CSS 不是文件：${entry.css}`);
+          if (statSync(target).isFile()) {
+            expectedCss.add(cssRel.split(sep).join("/"));
+          } else {
+            fail(`包内 CSS 不是文件：${entry.css}`);
+          }
         } catch {
           fail(`包内缺少清单声明的 CSS：${entry.css}（slug=${entry.slug}）`);
         }
