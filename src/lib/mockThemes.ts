@@ -15,7 +15,7 @@ export interface MockThemeSeed {
   files?: Record<string, string>;
   /** 压缩包路径 → `{ 包内相对路径: 内容 }`（用于模拟解压） */
   zips?: Record<string, Record<string, string>>;
-  /** 显式存在但暂时为空的目录（测试首次启动 / 缺失资源场景用） */
+  /** 显式存在但暂时为空的目录（用于 E2E 验证空预装源目录的诊断） */
   existingDirs?: string[];
 }
 
@@ -40,7 +40,7 @@ function ensureState(): MockState {
     bundledRoot: seed?.bundledRoot ?? DEFAULT_BUNDLED_ROOT,
     files: new Map(Object.entries(seed?.files ?? {})),
     zips: new Map(Object.entries(seed?.zips ?? {})),
-    dirs: new Set(seed?.existingDirs ?? []),
+    dirs: new Set((seed?.existingDirs ?? []).map((dir) => dir.replace(/\/+$/, ""))),
   };
   return state;
 }
@@ -65,6 +65,7 @@ export function mockBundledThemesRoot(): string {
 export interface MockScan {
   entries: { name: string; path: string; is_dir: boolean; size: number }[];
   skipped: string[];
+  skippedPaths: string[];
   exists: boolean;
 }
 
@@ -88,7 +89,7 @@ export function mockScan(dir: string): MockScan {
     a.is_dir === b.is_dir ? a.name.localeCompare(b.name) : a.is_dir ? -1 : 1,
   );
   const exists = s.dirs.has(base) || [...s.files.keys()].some((path) => path.startsWith(`${base}/`));
-  return { entries: list, skipped: [], exists };
+  return { entries: list, skipped: [], skippedPaths: [], exists };
 }
 
 /** 读取文本（主题 CSS / manifest） */

@@ -34,12 +34,20 @@ export interface CatalogScanEntry {
   size: number;
 }
 
+export interface CatalogScanResult {
+  entries: CatalogScanEntry[];
+  skipped: string[];
+  /** skipped 项相对于扫描目录的名称；用于安全判据，不能从提示文案反解析 */
+  skippedPaths: string[];
+  exists: boolean;
+}
+
 export interface CatalogIo {
   themesRoot: string;
   bundledRoot: string;
   /** 桌面应用始终应携带预装资源；浏览器预览/纯编排首启可无两端目录 */
   bundledResourcesExpected: boolean;
-  scanDir: (dir: string) => Promise<{ entries: CatalogScanEntry[]; skipped: string[]; exists: boolean }>;
+  scanDir: (dir: string) => Promise<CatalogScanResult>;
   readFile: (absPath: string) => Promise<string>;
   /** 路径拼接（Windows 为 `\`，POSIX 为 `/`） */
   join: (dir: string, rel: string) => string;
@@ -78,6 +86,51 @@ export async function buildThemeCatalog(io: CatalogIo): Promise<CatalogResult> {
   const scan = await io.scanDir(io.themesRoot);
   const bundledScan = await io.scanDir(io.bundledRoot);
   issues.push(...scan.skipped);
+  const bundledScanCache = new Map<string, CatalogScanResult>([[io.bundledRoot, bundledScan]]);
+  const reportedBundledDirectories = new Set<string>();
+  const reportBundledSkipped = (relativeDir: string, result: CatalogScanResult): void => {
+    const key = relativeDir.toLowerCase();
+    if (reportedBundledDirectories.has(key)) return;
+    reportedBundledDirectories.add(key);
+    for (const skipped of result.skipped) {
+      issues.push(`预装源目录${relativeDir ? `/${relativeDir}` : ""}：${skipped}`);
+    }
+  };
+  reportBundledSkipped("", bundledScan);
+
+  const scanBundledDir = async (absDir: string, relativeDir: string): Promise<CatalogScanResult> => {
+    let result = bundledScanCache.get(absDir);
+    if (!result) {
+      result = await io.scanDir(absDir);
+      bundledScanCache.set(absDir, result);
+    }
+    reportBundledSkipped(relativeDir, result);
+    return result;
+  };
+
+  const findSkippedBundledPath = async (relativePath: string): Promise<string | undefined> => {
+    const segments = relativePath.replace(/\\/g, "/").split("/").filter(Boolean);
+    let result = bundledScan;
+    let absDir = io.bundledRoot;
+    const relativeDirectories: string[] = [];
+    for (const [index, segment] of segments.entries()) {
+      const skippedIndex = result.skippedPaths.findIndex((name) => name.toLowerCase() === segment.toLowerCase());
+      if (skippedIndex >= 0) {
+        const skipped = result.skipped[skippedIndex] ?? segment;
+        const relativeDir = relativeDirectories.join("/");
+        return `预装源目录${relativeDir ? `/${relativeDir}` : ""}：${skipped}`;
+      }
+      if (index === segments.length - 1) return undefined;
+      const directory = result.entries.find(
+        (entry) => entry.name.toLowerCase() === segment.toLowerCase() && entry.is_dir,
+      );
+      if (!directory) return undefined;
+      relativeDirectories.push(segment);
+      absDir = directory.path;
+      result = await scanBundledDir(absDir, relativeDirectories.join("/"));
+    }
+    return undefined;
+  };
 
   // 非桌面预览可不带预装资源；桌面应用按 bundledResourcesExpected 明确要求随包源目录。
   // 源目录存在但清单缺失或损坏时，仍需显式提示。
@@ -166,7 +219,17 @@ export async function buildThemeCatalog(io: CatalogIo): Promise<CatalogResult> {
 
   // N13：源副本 hash（用于判断运行时副本是否需要按源覆盖）
   const sourceHashes = new Map<string, string>();
+  const skippedBundledDirectories = new Set<string>();
   for (const entry of manifest.entries) {
+    if (entry.dir && (await findSkippedBundledPath(entry.dir))) {
+      skippedBundledDirectories.add(entry.dir.toLowerCase());
+    }
+    const skippedCss = await findSkippedBundledPath(entry.css);
+    if (skippedCss !== undefined) {
+      // 目录扫描跳过的 symlink 不得由 readFile 跟随读取，否则会被误当作有效源副本。
+      missingSourceDiagnostics.push({ path: entry.css, issue: skippedCss });
+      continue;
+    }
     try {
       const css = await io.readFile(io.join(io.bundledRoot, entry.css));
       sourceHashes.set(entry.css.toLowerCase(), themeCssHash(css));
@@ -194,7 +257,7 @@ export async function buildThemeCatalog(io: CatalogIo): Promise<CatalogResult> {
       to: io.join(io.themesRoot, entry.css),
       reason,
     });
-    if (entry.dir) {
+    if (entry.dir && !skippedBundledDirectories.has(entry.dir.toLowerCase())) {
       copyPlan.push({
         slug: entry.slug,
         from: io.join(io.bundledRoot, entry.dir),

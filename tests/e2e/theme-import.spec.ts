@@ -8,6 +8,7 @@
  */
 import { test, expect, type Page } from "@playwright/test";
 import { openFile, openMockWorkspace } from "./helpers";
+import type { MockThemeSeed } from "../../src/lib/mockThemes";
 
 const THEMES_ROOT = "/mock-appdata/themes";
 const PROBE_CSS = "#write h1{color:rgb(1,2,3)}\n#write p{margin:0}";
@@ -22,10 +23,10 @@ const SEED = {
   },
 };
 
-async function seedThemes(page: Page): Promise<void> {
+async function seedThemes(page: Page, seed: MockThemeSeed = SEED): Promise<void> {
   await page.addInitScript((seed) => {
     (window as unknown as { __inklingThemesMock?: unknown }).__inklingThemesMock = seed;
-  }, SEED);
+  }, seed);
 }
 
 /** 顶栏（含主题菜单）只在打开工作区**且有打开的文件**后渲染 → 未就绪时先补这两步 */
@@ -97,6 +98,23 @@ test.describe("#307 主题目录 → 列表 → 生效 → 持久化", () => {
     await openThemeMenu(page);
     await expect(page.locator('[data-theme-option="user:probe"]')).toBeVisible();
     expect(dialogs.some((message) => message.includes("预装主题不可用"))).toBe(false);
+  });
+
+  test("空但存在的预装源目录会提示 manifest 缺失", async ({ page }) => {
+    const dialogs: string[] = [];
+    page.on("dialog", async (dialog) => {
+      dialogs.push(dialog.message());
+      await dialog.dismiss();
+    });
+    await seedThemes(page, {
+      ...SEED,
+      existingDirs: ["/mock-resource/themes"],
+    });
+    await openThemeMenu(page);
+
+    await expect
+      .poll(() => dialogs.some((message) => message.includes("源目录存在，但 manifest.json 缺失")))
+      .toBe(true);
   });
 
   test("扫描主题目录后列表出现已导入主题，可选中并生效（兼容层改写过）", async ({ page }) => {

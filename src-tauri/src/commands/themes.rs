@@ -27,6 +27,9 @@ pub struct ThemeDirScan {
     pub entries: Vec<ThemeDirEntry>,
     /// 被跳过的项（符号链接等），供 UI/日志显式登记（不静默）
     pub skipped: Vec<String>,
+    /// 被跳过项相对于本次扫描目录的名称（供路径安全判据使用，不解析诊断文案）
+    #[serde(rename = "skippedPaths")]
+    pub skipped_paths: Vec<String>,
     /// 目录本身是否存在（用于区分全新用户与已安装环境里的资源缺失）
     pub exists: bool,
 }
@@ -43,7 +46,12 @@ pub async fn scan_theme_dir(dir_path: String) -> Result<ThemeDirScan, String> {
 fn scan_theme_dir_sync(dir: &Path) -> Result<ThemeDirScan, String> {
     if !dir.exists() {
         // 主题目录尚未创建不是错误（首启自动创建由前端负责）：返回空扫描结果
-        return Ok(ThemeDirScan { entries: Vec::new(), skipped: Vec::new(), exists: false });
+        return Ok(ThemeDirScan {
+            entries: Vec::new(),
+            skipped: Vec::new(),
+            skipped_paths: Vec::new(),
+            exists: false,
+        });
     }
     if !dir.is_dir() {
         return Err(format!("不是目录: {}", dir.display()));
@@ -51,6 +59,7 @@ fn scan_theme_dir_sync(dir: &Path) -> Result<ThemeDirScan, String> {
 
     let mut entries: Vec<ThemeDirEntry> = Vec::new();
     let mut skipped: Vec<String> = Vec::new();
+    let mut skipped_paths: Vec<String> = Vec::new();
     let reader = fs::read_dir(dir).map_err(|e| format!("读取主题目录失败: {e}"))?;
     for item in reader {
         let item = item.map_err(|e| format!("读取主题目录项失败: {e}"))?;
@@ -62,6 +71,7 @@ fn scan_theme_dir_sync(dir: &Path) -> Result<ThemeDirScan, String> {
         let meta = fs::symlink_metadata(&path).map_err(|e| format!("读取元数据失败: {e}"))?;
         if meta.file_type().is_symlink() {
             skipped.push(format!("{}（符号链接，不跟随）", name));
+            skipped_paths.push(name.clone());
             continue;
         }
         entries.push(ThemeDirEntry {
@@ -76,7 +86,12 @@ fn scan_theme_dir_sync(dir: &Path) -> Result<ThemeDirScan, String> {
             .cmp(&a.is_dir)
             .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
     });
-    Ok(ThemeDirScan { entries, skipped, exists: true })
+    Ok(ThemeDirScan {
+        entries,
+        skipped,
+        skipped_paths,
+        exists: true,
+    })
 }
 
 #[derive(Debug, Serialize)]
@@ -402,6 +417,7 @@ mod tests {
         {
             assert!(!names.contains(&"link.css".to_string()));
             assert_eq!(scan.skipped.len(), 1);
+            assert_eq!(scan.skipped_paths, vec!["link.css".to_string()]);
         }
         // 目录在前
         assert!(scan.entries[0].is_dir);
@@ -413,6 +429,7 @@ mod tests {
         let scan = scan_theme_dir_sync(Path::new("/tmp/inkling-definitely-not-exists-307")).unwrap();
         assert!(!scan.exists);
         assert!(scan.entries.is_empty());
+        assert!(scan.skipped_paths.is_empty());
     }
 
     #[test]

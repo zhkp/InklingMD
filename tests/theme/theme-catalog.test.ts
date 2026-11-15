@@ -13,6 +13,10 @@ interface StubOptions {
   bundledFiles?: Record<string, string>;
   manifest?: unknown;
   skipped?: string[];
+  bundledSkipped?: string[];
+  skippedPaths?: string[];
+  bundledSkippedPaths?: string[];
+  bundledScans?: Record<string, { skipped: string[]; skippedPaths: string[] }>;
   failRead?: string[];
   dirs?: Record<string, boolean>;
   bundledRootExists?: boolean;
@@ -27,8 +31,13 @@ function stubIo(opts: StubOptions): CatalogIo {
     bundledResourcesExpected: opts.bundledResourcesExpected ?? false,
     manifestRaw: opts.manifest,
     join,
-    scanDir: async (dir: string) => {
+    scanDir: async (dir) => {
       const base = dir.replace(/\/+$/, "");
+      const nestedBundledScan = dir === THEMES ? undefined : opts.bundledScans?.[dir];
+      const skipped = dir === THEMES ? opts.skipped ?? [] : nestedBundledScan?.skipped ?? opts.bundledSkipped ?? [];
+      const skippedPaths =
+        dir === THEMES ? opts.skippedPaths ?? [] : nestedBundledScan?.skippedPaths ?? opts.bundledSkippedPaths ?? [];
+      const skippedNames = new Set(skippedPaths.map((name) => name.toLowerCase()));
       const entries = new Map<string, { name: string; path: string; is_dir: boolean; size: number }>();
       const all = dir === THEMES ? opts.files : (opts.bundledFiles ?? {});
       for (const [path, content] of Object.entries(all)) {
@@ -36,17 +45,20 @@ function stubIo(opts: StubOptions): CatalogIo {
         const rest = path.slice(base.length + 1);
         const [head, ...tail] = rest.split("/");
         if (!head) continue;
+        if (skippedNames.has(head.toLowerCase())) continue;
         if (tail.length === 0) entries.set(head, { name: head, path, is_dir: false, size: content.length });
         else if (!entries.has(head)) entries.set(head, { name: head, path: join(base, head), is_dir: true, size: 0 });
       }
       for (const [rel, isDir] of Object.entries(opts.dirs ?? {})) {
         const name = rel.split("/").pop()!;
-        if (isDir && !entries.has(name)) entries.set(name, { name, path: join(base, name), is_dir: true, size: 0 });
+        if (isDir && !skippedNames.has(name.toLowerCase()) && !entries.has(name)) {
+          entries.set(name, { name, path: join(base, name), is_dir: true, size: 0 });
+        }
       }
       const exists = dir === THEMES
         ? true
         : opts.bundledRootExists ?? Object.keys(opts.bundledFiles ?? {}).some((path) => path.startsWith(`${base}/`));
-      return { entries: [...entries.values()], skipped: opts.skipped ?? [], exists };
+      return { entries: [...entries.values()], skipped, skippedPaths, exists };
     },
     readFile: async (abs: string) => {
       if (opts.failRead?.includes(abs)) throw new Error("读取失败");
@@ -152,6 +164,67 @@ describe("#307 N13 幂等补齐计划", () => {
     };
     const { copyPlan } = await buildThemeCatalog(stubIo({ files, bundledFiles, manifest }));
     expect(copyPlan).toEqual([]);
+  });
+
+  it("预装源 CSS 被扫描跳过（符号链接）→ 登记诊断且不生成补齐计划", async () => {
+    const css = "vue.css";
+    const result = await buildThemeCatalog(
+      stubIo({
+        files: { [`${THEMES}/${css}`]: "h1{color:red}" },
+        // mockReadFile 仍能读到目标内容，以模拟底层 readFile 会跟随 symlink 的风险。
+        bundledFiles: { [`${BUNDLED}/${css}`]: "h1{color:blue}" },
+        bundledSkipped: [`${css}（符号链接，不跟随）`],
+        bundledSkippedPaths: [css],
+        manifest: {
+          v: 1,
+          themes: [{ slug: "vue", css, name: "Vue", mode: "light" }],
+        },
+      }),
+    );
+
+    expect(result.issues).toContain(`预装源目录：${css}（符号链接，不跟随）`);
+    expect(result.missingSourceDiagnostics.map(({ path }) => path)).toEqual([css]);
+    expect(result.copyPlan).toEqual([]);
+  });
+
+  it("嵌套 manifest CSS 的祖先符号链接被扫描跳过时不跟随读取或生成补齐计划", async () => {
+    const css = "assets/vue.css";
+    const result = await buildThemeCatalog(
+      stubIo({
+        files: {},
+        // readFile 仍能返回链接目标内容，验证 catalog 不会绕过目录扫描去跟随链接。
+        bundledFiles: { [`${BUNDLED}/${css}`]: "h1{color:blue}" },
+        bundledScans: {
+          [`${BUNDLED}/assets`]: {
+            skipped: ["vue.css（符号链接，不跟随）"],
+            skippedPaths: ["vue.css"],
+          },
+        },
+        manifest: { v: 1, themes: [{ slug: "vue", css, name: "Vue", mode: "light" }] },
+      }),
+    );
+
+    expect(result.issues).toContain("预装源目录/assets：vue.css（符号链接，不跟随）");
+    expect(result.missingSourceDiagnostics.map(({ path }) => path)).toEqual([css]);
+    expect(result.copyPlan).toEqual([]);
+  });
+
+  it("预装资源目录被跳过时过滤目录复制，但仍可安全补齐独立 CSS", async () => {
+    const result = await buildThemeCatalog(
+      stubIo({
+        files: {},
+        bundledFiles: { [`${BUNDLED}/vue.css`]: "h1{}" },
+        bundledSkipped: ["vue（符号链接，不跟随）"],
+        bundledSkippedPaths: ["vue"],
+        manifest: {
+          v: 1,
+          themes: [{ slug: "vue", css: "vue.css", dir: "vue", name: "Vue", mode: "light" }],
+        },
+      }),
+    );
+
+    expect(result.issues).toContain("预装源目录：vue（符号链接，不跟随）");
+    expect(result.copyPlan.map(({ from }) => from)).toEqual([`${BUNDLED}/vue.css`]);
   });
 
   it("运行时被改动（hash 不一致）→ 按源副本覆盖并给原因", async () => {

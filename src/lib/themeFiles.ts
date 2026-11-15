@@ -30,6 +30,8 @@ export interface ThemeDirScan {
   entries: ThemeDirEntry[];
   /** 被跳过的项（符号链接等）——必须显式登记，不允许静默 */
   skipped: string[];
+  /** 被跳过项相对于本次扫描目录的名称；供安全判据使用，不解析 skipped 文案 */
+  skippedPaths: string[];
   /** 扫描目标目录本身是否存在 */
   exists: boolean;
 }

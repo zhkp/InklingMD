@@ -16,7 +16,7 @@ const {
   copyThemePathMock: vi.fn(async () => undefined),
   ensureDirMock: vi.fn(async () => undefined),
   readBundledManifestMock: vi.fn(async () => ({ themes: [] })),
-  scanThemesDirMock: vi.fn(async () => ({ entries: [], skipped: [], exists: true })),
+  scanThemesDirMock: vi.fn(async () => ({ entries: [], skipped: [], skippedPaths: [], exists: true })),
   showMessageMock: vi.fn(async () => undefined),
   themesRootMock: vi.fn(async () => "/app/themes"),
 }));
@@ -76,7 +76,7 @@ describe("theme store missing bundled-source warning count", () => {
     buildThemeCatalogMock.mockReset().mockResolvedValue(catalogResult());
     copyThemePathMock.mockReset().mockResolvedValue(undefined);
     ensureDirMock.mockReset().mockResolvedValue(undefined);
-    scanThemesDirMock.mockReset().mockResolvedValue({ entries: [], skipped: [], exists: true });
+    scanThemesDirMock.mockReset().mockResolvedValue({ entries: [], skipped: [], skippedPaths: [], exists: true });
     showMessageMock.mockReset().mockResolvedValue(undefined);
 
     // A clean scan resets the module-level one-time warning guard between cases.
