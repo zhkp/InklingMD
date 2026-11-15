@@ -126,13 +126,14 @@ describe("waitFormulaSettled 完成条件（#379 评审 P1）", () => {
     expect(result.unmeasured).toBe(true);
   });
 
-  it("custom 口径多算：minNodes 下界就绪即完成，但 unmeasured 仍披露数量差异（#375 评审 R6-1）", async () => {
-    // 预期 3 个、实际只有 1 个且已渲染：GFM 表格 / frontmatter 吃掉 `$` 的真实形态
+  it("custom 口径多算：minNodes=0 时只要已挂载节点渲染完就完成，unmeasured 仍披露差异（#375 评审 R6-1/R7-1）", async () => {
+    // 预期 3 个、实际只有 1 个且已渲染：GFM 表格 / frontmatter 吃掉 `$` 的真实形态。
+    // minNodes 用的是**生产值 0**（`formulaGate("custom", n).minNodes`）。
     formulaNode(true);
     const result = await waitFormulaSettled({
       maxFrames: 0,
       expectedNodes: 3,
-      minNodes: 1,
+      minNodes: 0,
     });
     expect(result.nodeViews).toBe(1);
     expect(result.complete).toBe(true);
@@ -140,15 +141,38 @@ describe("waitFormulaSettled 完成条件（#379 评审 P1）", () => {
     expect(result.unmeasured).toBe(true);
   });
 
-  it("反向锁：把就绪阈值退回完整 expected（旧守卫）时同场景必红", async () => {
-    // 与上一条同 fixture，仅去掉 minNodes——这正是 R6-1 修复前的行为
-    formulaNode(true);
+  it("custom 零节点：minNodes=0 时首帧即完成，由 unmeasured 披露（#375 评审 R7-1）", async () => {
+    // 用户文档的公式全被 GFM 表格 / frontmatter 吃掉：生产上就是 0 个 NodeView。
+    // 若这里判红（complete=false），整轮会被误判成 UNMEASURED 并 exit 2。
     const result = await waitFormulaSettled({
+      maxFrames: 0,
+      expectedNodes: 4,
+      minNodes: 0,
+    });
+    expect(result.nodeViews).toBe(0);
+    expect(result.complete).toBe(true);
+    expect(result.unmeasured).toBe(true);
+  });
+
+  it("反向锁：把就绪阈值退回完整 expected（旧守卫）时同场景必红", async () => {
+    // 与上面两条同 fixture，仅去掉 minNodes（= expected）——这正是 R6-1 修复前的行为。
+    // 有节点、零节点两种形态都必须失败，否则「删掉 open.spec 的 minNodes 传递」
+    // 不会被任何用例抓到。
+    formulaNode(true);
+    const withNodes = await waitFormulaSettled({
       maxFrames: 0,
       expectedNodes: 3,
     });
-    expect(result.complete).toBe(false);
-    expect(result.unmeasured).toBe(true);
+    expect(withNodes.complete).toBe(false);
+    expect(withNodes.unmeasured).toBe(true);
+
+    document.body.innerHTML = "";
+    const noNodes = await waitFormulaSettled({
+      maxFrames: 0,
+      expectedNodes: 4,
+    });
+    expect(noNodes.complete).toBe(false);
+    expect(noNodes.unmeasured).toBe(true);
   });
 });
 

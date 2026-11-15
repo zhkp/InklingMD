@@ -537,12 +537,15 @@ export function waitFormulaSettled(opts: {
    */
   expectedNodes?: number;
   /**
-   * 判定「节点已挂载」的下界（#375 评审 R6-1）。缺省等于 `expectedNodes`。
+   * 判定「节点已挂载」的数量门禁（#375 评审 R6-1 / R7-1）。缺省等于 `expectedNodes`。
    *
-   * custom 档直接读用户文档：预期值来自只挂 remark-math 的管线，而编辑器还挂
-   * GFM 表格与 frontmatter，这两处会吃掉 `$`，实际节点数可能少于预期。此时
-   * 完整 expected 会让等待跑满帧预算并假判 UNMEASURED；传入下界（1）后
-   * 只要真有节点挂载就算 ready，数量差异由 `unmeasured` 单独披露。
+   * - `> 0`：至少要挂载这么多 NodeView 才算 ready（生成档位用完整预期数，
+   *   这样「预期 76 个但一个都没挂」不会因 `0 >= 0` 直接判完成）。
+   * - `= 0`：**完全不做数量门禁**（custom 档）。完成条件退化为「当前已挂载的
+   *   节点都渲染完」；`nodeViews=0` 时首帧即 `complete=true`。custom 直接读
+   *   用户文档，预期值来自只挂 remark-math 的管线，而编辑器还挂 GFM 表格与
+   *   frontmatter，这两处会吃掉 `$`，实际节点数可能为 0 且完全正常——数量差异
+   *   一律由 `unmeasured`（实际 < 预期）披露，不判红、也不写 `formulaReadyMs`。
    */
   minNodes?: number;
 }): Promise<{

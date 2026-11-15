@@ -53,8 +53,10 @@ for (const tier of ctx.tiers) {
         fixture.content,
       );
       // custom 档直接读用户文档：预期值来自只挂 remark-math 的管线，而编辑器
-      // 还挂 GFM 表格与 frontmatter（这两处会吃掉 `$`），实际节点可能少于预期。
-      // 生成档位要求数量精确相等，custom 只要求「真有节点挂载」（#375 评审 R6-1）。
+      // 还挂 GFM 表格与 frontmatter（这两处会吃掉 `$`），实际节点可能少于预期，
+      // 甚至为 0。因此 custom **不做数量门禁**（minNodes=0）：0 个节点也算
+      // complete，数量差异一律由 `unmeasured` 披露、不写 formulaReadyMs、不判红
+      // （#375 评审 R6-1 / R7-1）；生成档位才要求数量精确相等。
       // 计数正确性由 `perf-formula-settle.test.ts` 对 remark-math 的边界用例锁定；
       // 这里不再写 `expected === breakdown.math + inlineMath`——两者同源，是恒真断言。
       const gate = formulaGate(kind, expectedFormulaNodes);
@@ -151,16 +153,17 @@ for (const tier of ctx.tiers) {
               `（${formula.rendered}+${formula.empty} 空/${formula.nodeViews}），` +
               `公式归因按测量失败处理`,
           ).toBe(true);
-          // custom 档允许「口径多算」：此时 unmeasured 可能为 true，
-          // 但那是计数口径差异而非渲染未完成，按「公式归因未测量」披露，
-          // 不把整个场景判红（生成档位仍严格要求 false）。
-          // 注意：complete 现在就绪阈值用的是 formulaMinNodes，custom 不会
-          // 因为数量差异跑满帧预算，所以这条断言对 custom 也可达且必须为 true。
-          if (strictCount) {
+          // custom 档允许「口径多算」：数量差异由 unmeasured 披露、不判红。
+          // 这里断言的是**会变的关系**：unmeasured 必须等于「实际挂载数 < 预期」。
+          // 生成档位下 complete=true 已推出 nodeViews >= 预期，`unmeasured===false`
+          // 恒成立（原来那条 `expect(unmeasured).toBe(false)` 是不可能失败的
+          // 恒真断言），所以只在 custom 侧守这条关系（#375 评审 R7-2）。
+          if (!strictCount && expectedFormulaNodes > 0) {
             expect(
               formula.unmeasured,
-              `${id}：公式节点未挂载却被判为已完成（UNMEASURED）`,
-            ).toBe(false);
+              `${id}：custom 的 unmeasured 应为「实际 ${formula.nodeViews} < 预期 ` +
+                `${expectedFormulaNodes}」，否则口径差异不会被写入 formulaCoverage`,
+            ).toBe(formula.nodeViews < expectedFormulaNodes);
           }
           // 标定负载：#236 与编辑器代码无关的固定工作量，用于把「机器慢」与「代码回归」分开
           await probe.measure(page);
