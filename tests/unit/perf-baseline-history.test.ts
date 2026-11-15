@@ -24,10 +24,11 @@ const ID = "scroll-H-test";
 const FIXTURE = { version: 2, hash: "histtest0001", lines: 1000, source: "generated:rich" };
 const HISTORY_LIMIT_TEST_TITLE = "历史序列上限 8 点，保留最近的运行";
 const HISTORY_LIMIT_TIMEOUT_MS = 30_000;
-// Calibration was measured on snapshot 421708176835c415a28919d867cbbb064c9367cb; this update records the evidence, not a callback/timeout change.
-// 40 callback samples were fully inside all four gate PID intervals (50ms edge pad); nearest-rank p95 = 2,029.138ms (ceil 2,030ms), max = 2,062.349ms.
-// The 30s local timeout is 14.78× the rounded p95 and 9.7s above the 10× guard; the repository-wide Vitest timeout remains untouched.
-const HISTORY_LIMIT_CALLBACK_WALL_P95_MS = 2_030;
+// Pooled calibration: 59/62 strict-overlap samples across snapshots 421708176835c415a28919d867cbbb064c9367cb (40) and d3097e2ef44ee0bf53928dc33c5cee12316d416e (19).
+// Every sample records its SHA/tree/source hash; callback, local timeout options, and helper AST hashes match across snapshots.
+// Nearest-rank pooled p95 = 2,062.349ms (ceil 2,063ms); pooled max = 2,168.114ms.
+// The 30s local timeout is 14.54× rounded p95 and 9.37s above the 10× guard; the repository-wide Vitest timeout remains untouched.
+const HISTORY_LIMIT_CALLBACK_WALL_P95_MS = 2_063;
 const HISTORY_LIMIT_TIMEOUT_SAFETY_FACTOR = 10;
 const HISTORY_LIMIT_SUBPROCESS_COUNT = 11;
 
