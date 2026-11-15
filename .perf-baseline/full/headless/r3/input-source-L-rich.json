@@ -1,0 +1,299 @@
+{
+  "schemaVersion": 2,
+  "env": "ci-ubuntu",
+  "profile": "full",
+  "mode": "headless",
+  "scenario": "input-source",
+  "tier": "L",
+  "kind": "rich",
+  "rounds": 3,
+  "fixture": {
+    "version": 2,
+    "hash": "c0580cf40b67",
+    "lines": 20000,
+    "source": "generated:rich"
+  },
+  "metrics": {
+    "inputPaintMs": {
+      "median": 31.7,
+      "p95": 62.9,
+      "max": 83.5,
+      "n": 180,
+      "history": [
+        30.9,
+        31.7
+      ],
+      "historyP95": [
+        63.1,
+        62.9
+      ]
+    },
+    "inputSyncMs": {
+      "median": 0.4,
+      "p95": 0.7,
+      "max": 0.8,
+      "n": 180,
+      "history": [
+        0.4,
+        0.4
+      ],
+      "historyP95": [
+        0.6,
+        0.7
+      ]
+    },
+    "longTaskCount": {
+      "median": 13.67,
+      "p95": null,
+      "max": null,
+      "n": null,
+      "scalar": true,
+      "history": [
+        13.67,
+        13.67
+      ]
+    },
+    "longTaskMs": {
+      "median": 814,
+      "p95": null,
+      "max": null,
+      "n": null,
+      "scalar": true,
+      "history": [
+        831.33,
+        814
+      ]
+    },
+    "cls": {
+      "median": 0,
+      "p95": null,
+      "max": null,
+      "n": null,
+      "scalar": true,
+      "history": [
+        0,
+        0
+      ]
+    },
+    "heapDeltaMB": {
+      "median": 0,
+      "p95": null,
+      "max": null,
+      "n": null,
+      "scalar": true,
+      "history": [
+        0,
+        0
+      ]
+    },
+    "probeMs": {
+      "median": 44.8,
+      "p95": null,
+      "max": null,
+      "n": null,
+      "scalar": true,
+      "history": [
+        45,
+        44.8
+      ]
+    },
+    "probeLayoutMs": {
+      "median": 12.7,
+      "p95": null,
+      "max": null,
+      "n": null,
+      "scalar": true,
+      "history": [
+        13,
+        12.7
+      ]
+    },
+    "probeCpuMs": {
+      "median": 32.1,
+      "p95": null,
+      "max": null,
+      "n": null,
+      "scalar": true,
+      "history": [
+        32,
+        32.1
+      ]
+    },
+    "statsMs": {
+      "median": 8.1,
+      "p95": null,
+      "max": null,
+      "n": null,
+      "scalar": true,
+      "history": [
+        7.8,
+        8.1
+      ]
+    },
+    "statsMaxMs": {
+      "median": 8.1,
+      "p95": null,
+      "max": null,
+      "n": null,
+      "scalar": true,
+      "history": [
+        7.8,
+        8.1
+      ]
+    },
+    "statsCount": {
+      "median": 1,
+      "p95": null,
+      "max": null,
+      "n": null,
+      "scalar": true,
+      "history": [
+        1,
+        1
+      ]
+    },
+    "statsSettleMs": {
+      "median": 308.3,
+      "p95": null,
+      "max": null,
+      "n": null,
+      "scalar": true,
+      "history": [
+        307.97,
+        308.3
+      ]
+    },
+    "statsSettleMaxMs": {
+      "median": 308.3,
+      "p95": null,
+      "max": null,
+      "n": null,
+      "scalar": true,
+      "history": [
+        307.97,
+        308.3
+      ]
+    },
+    "statsSettleCount": {
+      "median": 1,
+      "p95": null,
+      "max": null,
+      "n": null,
+      "scalar": true,
+      "history": [
+        1,
+        1
+      ]
+    },
+    "outlineExtractMs": {
+      "median": 5.43,
+      "p95": null,
+      "max": null,
+      "n": null,
+      "scalar": true,
+      "history": [
+        5.57,
+        5.43
+      ]
+    },
+    "outlineExtractMaxMs": {
+      "median": 5.43,
+      "p95": null,
+      "max": null,
+      "n": null,
+      "scalar": true,
+      "history": [
+        5.57,
+        5.43
+      ]
+    },
+    "outlineExtractCount": {
+      "median": 1,
+      "p95": null,
+      "max": null,
+      "n": null,
+      "scalar": true,
+      "history": [
+        1,
+        1
+      ]
+    },
+    "outlineSettleMs": {
+      "median": 206.4,
+      "p95": null,
+      "max": null,
+      "n": null,
+      "scalar": true,
+      "history": [
+        206.57,
+        206.4
+      ]
+    },
+    "outlineSettleMaxMs": {
+      "median": 206.4,
+      "p95": null,
+      "max": null,
+      "n": null,
+      "scalar": true,
+      "history": [
+        206.57,
+        206.4
+      ]
+    },
+    "outlineSettleCount": {
+      "median": 1,
+      "p95": null,
+      "max": null,
+      "n": null,
+      "scalar": true,
+      "history": [
+        1,
+        1
+      ]
+    },
+    "headingLocateMs": {
+      "median": 0,
+      "p95": null,
+      "max": null,
+      "n": null,
+      "scalar": true,
+      "history": [
+        0,
+        0
+      ]
+    },
+    "headingLocateMaxMs": {
+      "median": 0,
+      "p95": null,
+      "max": null,
+      "n": null,
+      "scalar": true,
+      "history": [
+        0,
+        0
+      ]
+    },
+    "headingLocateCount": {
+      "median": 1,
+      "p95": null,
+      "max": null,
+      "n": null,
+      "scalar": true,
+      "history": [
+        1,
+        1
+      ]
+    },
+    "outlinePublishCount": {
+      "median": 0,
+      "p95": null,
+      "max": null,
+      "n": null,
+      "scalar": true,
+      "history": [
+        0
+      ]
+    }
+  },
+  "updatedAt": "2026-11-01T09:18:44.362Z"
+}

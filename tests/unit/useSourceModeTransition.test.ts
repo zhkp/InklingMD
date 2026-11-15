@@ -2,8 +2,14 @@ import { describe, expect, it, vi } from "vitest";
 import { renderHook } from "@testing-library/react";
 import { useSourceModeTransition } from "../../src/components/Editor/useSourceModeTransition";
 import { editorViewCtx, parserCtx } from "@milkdown/kit/core";
+import { Schema } from "@milkdown/kit/prose/model";
 import { markdownOffsetToProsePos } from "../../src/lib/source-mode-cursor";
 import { useWorkspace } from "../../src/store/workspace";
+import {
+  EMPTY_EDITOR_OUTLINE,
+  type EditorOutlineSnapshot,
+} from "../../src/lib/outline";
+import { useOutline } from "../../src/store/outline";
 import * as dialogs from "../../src/lib/dialogs";
 
 describe("useSourceModeTransition", () => {
@@ -179,6 +185,16 @@ describe("useSourceModeTransition", () => {
     // 真实路径：由 onUnmountSnapshot 注入到 exitSnapshotRef
     result.current.exitSnapshotRef.current = exitSnap;
 
+    // 退出瞬间面板上的大纲快照（#375）：源码模式最后一次发布的结果，
+    // 必须随退出事务带给 tracker——它自己手里的索引停在进入源码模式那一刻
+    const exitOutline: EditorOutlineSnapshot = {
+      headings: [
+        { index: 0, level: 1, text: "Title", pos: 0, nodeId: null, id: "标题" },
+      ],
+      activeIndex: 0,
+    };
+    useOutline.setState({ file: filePath, snapshot: exitOutline });
+
     // Switch back to WYSIWYG mode
     rerender({ sourceMode: false });
 
@@ -191,6 +207,24 @@ describe("useSourceModeTransition", () => {
     // Verify PM transaction replaced content and restored selection
     expect(mockTr.replaceWith).toHaveBeenCalled();
     expect(mockView.dispatch).toHaveBeenCalled();
+
+    // 退出事务必须挂「同帧刷新大纲」标记（#375），负载含面板快照 +
+    // 源码视口锚点换算到新文档的 PM 位置（#375 评审 R4）。少了后者，
+    // 「活动项前插入同身份标题」时首帧高亮无法消歧。
+    const outlineMeta = mockTr.setMeta.mock.calls.find((call) =>
+      String((call[0] as { key?: string })?.key ?? call[0]).startsWith(
+        "inkling-outline-tracker",
+      ),
+    );
+    expect(outlineMeta, "退出事务没有携带大纲同步刷新标记").toBeTruthy();
+    expect(outlineMeta?.[1]).toEqual({
+      active: exitOutline,
+      anchorPos: expect.any(Number),
+      // exitSnap.cursorVisible=false（只滚动未编辑）：不能拿陈旧光标拽偏首帧
+      caretPos: null,
+    });
+
+    useOutline.setState({ file: null, snapshot: EMPTY_EDITOR_OUTLINE });
     // 内容锚点映射：锚点内容（布局偏移 100）滚到视口顶部 → scrollTop=100。
     // 与旧比例映射（50/100×200=100）数值巧合相同，但锚点偏移 20 ≠ 光标 5
     // 决定了选区与记忆位置，证明取的是视口顶部内容而非光标/比例
@@ -651,5 +685,246 @@ describe("useSourceModeTransition", () => {
     expect(dispatch).toHaveBeenCalled();
     expect(result.current.enterSnapshot).toBeNull();
     expect(lastSyncedRef.current).toBe(malformed);
+  });
+
+  // ---- #375 评审 R4 验收 F1/F6：首帧位置信息的两条护栏 ----
+
+  /**
+   * 真实 PM doc（#375 评审 R5-3）：`resolveAnchorProsePos` 依赖
+   * `doc.textBetween(0, pos, "\n", "\n")` 做候选行文本匹配 + 二分，
+   * 用假 doc 会让它必然走 fallback，精确换算路径一次都跑不到。
+   */
+  const anchorSchema = new Schema({
+    nodes: {
+      doc: { content: "block+" },
+      heading: {
+        content: "inline*",
+        group: "block",
+        attrs: { level: { default: 1 } },
+      },
+      paragraph: { content: "inline*", group: "block" },
+      text: { group: "inline" },
+    },
+  });
+  const EXIT_VALUE = "# 标题\n\n正文锚点行\n\n## 第二节";
+  const makeAnchorDoc = (value: string) =>
+    anchorSchema.node(
+      "doc",
+      null,
+      value.split("\n").map((line) => {
+        if (line.trim() === "") return anchorSchema.node("paragraph", null, []);
+        if (line.startsWith("#")) {
+          return anchorSchema.node("heading", { level: 1 }, [
+            anchorSchema.text(line.replace(/^#+\s*/, "")),
+          ]);
+        }
+        return anchorSchema.node("paragraph", null, [anchorSchema.text(line)]);
+      }),
+    );
+
+  /** 最小退出事务 harness，只取 setMeta 的大纲负载 */
+  function exitMetaFor(
+    filePath: string,
+    snap: {
+      cursor: number;
+      scrollTop: number;
+      anchorOffset?: number;
+      cursorVisible?: boolean;
+    } | null,
+    opts: { value?: string } = {},
+  ) {
+    const value = opts.value ?? EXIT_VALUE;
+    const parsedDoc = makeAnchorDoc(value);
+    const mockTr = {
+      replaceWith: vi.fn().mockReturnThis(),
+      setSelection: vi.fn().mockReturnThis(),
+      setMeta: vi.fn().mockReturnThis(),
+    };
+    const mockScrollEl = {
+      scrollTop: 0,
+      isConnected: true,
+      scrollHeight: 200,
+      clientHeight: 80,
+      getBoundingClientRect: () => ({ top: 20, height: 80 }),
+    };
+    Object.setPrototypeOf(mockScrollEl, HTMLElement.prototype);
+    const mockView = {
+      state: {
+        plugins: [],
+        doc: {
+          content: { size: 40 },
+          resolve: vi.fn().mockReturnValue({ pos: 18 }),
+          textBetween: () => "",
+        },
+        selection: { head: 18 },
+        tr: mockTr,
+      },
+      dispatch: vi.fn(),
+      coordsAtPos: () => ({ top: 20, bottom: 21 }),
+      dom: {
+        closest: (s: string) => (s === ".editor-scroll" ? mockScrollEl : null),
+      },
+    };
+    const mockEditor = {
+      action: (fn: (ctx: { get: (k: unknown) => unknown }) => void) =>
+        fn({
+          get: (key: unknown) => {
+            if (key === editorViewCtx) return mockView;
+            if (key === parserCtx) {
+              return (v: string) => (v === value ? parsedDoc : makeAnchorDoc(v));
+            }
+            return null;
+          },
+        }),
+    };
+    useWorkspace.setState({
+      activeTabPath: filePath,
+      currentFile: filePath,
+      currentContent: value,
+      openTabs: [
+        {
+          path: filePath,
+          content: value,
+          dirty: false,
+          lastSavedAt: null,
+          cursorPos: null,
+          scrollTop: null,
+        },
+      ],
+    });
+    const { result, rerender } = renderHook(
+      ({ sourceMode }) =>
+        useSourceModeTransition({
+          filePath,
+          sourceMode,
+          value,
+          getEditor: () => mockEditor as never,
+          lastSyncedRef: { current: value },
+        }),
+      { initialProps: { sourceMode: true } },
+    );
+    if (snap) result.current.exitSnapshotRef.current = snap;
+    rerender({ sourceMode: false });
+    const call = mockTr.setMeta.mock.calls.find((c) =>
+      String((c[0] as { key?: string })?.key ?? c[0]).startsWith(
+        "inkling-outline-tracker",
+      ),
+    );
+    return {
+      meta: call?.[1] as
+        | {
+            active: unknown;
+            anchorPos: number | null;
+            caretPos: number | null;
+          }
+        | undefined,
+      value,
+      docSize: parsedDoc.content.size,
+      textBefore(pos: number): string {
+        return parsedDoc.textBetween(0, pos, "\n", "\n");
+      },
+    };
+  }
+
+  it("光标在源码视口内时才传 caretPos（只滚动未编辑不能用陈旧光标）", () => {
+    const visible = exitMetaFor("/tmp/r4-caret-visible.md", {
+      cursor: 18,
+      scrollTop: 100,
+      anchorOffset: 3,
+      cursorVisible: true,
+    });
+    expect(visible.meta?.anchorPos).toEqual(expect.any(Number));
+    expect(visible.meta?.caretPos).toEqual(expect.any(Number));
+
+    const hidden = exitMetaFor("/tmp/r4-caret-hidden.md", {
+      cursor: 18,
+      scrollTop: 100,
+      anchorOffset: 3,
+      cursorVisible: false,
+    });
+    expect(hidden.meta?.anchorPos).toEqual(expect.any(Number));
+    // 与 source-mode-editor-initial-scroll.test.tsx 的脱链卸载用例构成完整链：
+    // 那里断言卸载快照 cursorVisible===false，这里断言下游 caretPos 保持 null，
+    // 陈旧光标不会经 Math.max(anchorPos, caretPos) 钉住首帧高亮。
+    expect(hidden.meta?.caretPos).toBeNull();
+  });
+
+  it("没有卸载快照时两个位置都不传（让身份兜底生效，不钉在首章）", () => {
+    const { meta } = exitMetaFor("/tmp/r4-no-snap.md", null);
+    expect(meta?.anchorPos).toBeNull();
+    expect(meta?.caretPos).toBeNull();
+    expect(meta?.active).toEqual({ headings: [], activeIndex: null });
+  });
+
+  // ---- #375 评审 R5-3：精确换算必须真的执行，且退化路径可验证 ----
+
+  it("精确换算命中锚点行：二分定位到该行首字，不是权重比例 fallback（反向锁）", () => {
+    const anchorOffset = EXIT_VALUE.indexOf("正文锚点行");
+    const { meta, value, docSize, textBefore } = exitMetaFor(
+      "/tmp/r5-precise.md",
+      { cursor: 0, scrollTop: 0, anchorOffset, cursorVisible: false },
+    );
+    const fallback = markdownOffsetToProsePos(docSize, value, anchorOffset);
+    expect(meta?.anchorPos).toEqual(expect.any(Number));
+    // 反向锁：把 resolveAnchorProsePos 改成恒 fallback 时这条必须红
+    expect(
+      meta?.anchorPos,
+      "精确换算没有命中正文锚点行，退化成了权重比例 fallback",
+    ).not.toBe(fallback);
+    // 精确结果必须让「正文锚点行」的首字刚好进入 textBetween(0, pos)
+    const pos = meta?.anchorPos as number;
+    expect(pos).toBeGreaterThan(0);
+    expect(pos).toBeLessThan(docSize);
+    const prefix = textBefore(pos);
+    expect(prefix.endsWith("正"), `prefix=${JSON.stringify(prefix)}`).toBe(true);
+    expect(textBefore(pos - 1).endsWith("正")).toBe(false);
+  });
+
+  it("纯标记行（分隔线/空引用/表格分隔）匹配不到时退回权重比例 fallback", () => {
+    // markdownNormLine 对这些行都返回 []，候选行收集为空 → 精确换算必须
+    // 走 fallback，且不能抛异常或给出文档外位置。
+    const value = [
+      "---",
+      "***",
+      "___",
+      "> ",
+      "| --- | --- |",
+      "",
+      "---",
+      "***",
+      "___",
+      "---",
+      "***",
+      "---",
+    ].join("\n");
+    const anchorOffset = value.indexOf("> ");
+    const { meta, docSize, textBefore } = exitMetaFor(
+      "/tmp/r5-fallback.md",
+      { cursor: 0, scrollTop: 0, anchorOffset, cursorVisible: false },
+      { value },
+    );
+    const fallback = markdownOffsetToProsePos(docSize, value, anchorOffset);
+    expect(meta?.anchorPos).toBe(fallback);
+    expect(meta?.anchorPos).toBeGreaterThanOrEqual(0);
+    expect(meta?.anchorPos).toBeLessThanOrEqual(docSize);
+    expect(() => textBefore(meta?.anchorPos as number)).not.toThrow();
+  });
+
+  it("锚点偏移超界与空文档都不抛，位置仍钳在文档内", () => {
+    const over = exitMetaFor("/tmp/r5-over.md", {
+      cursor: 0,
+      scrollTop: 0,
+      anchorOffset: 10_000,
+      cursorVisible: false,
+    });
+    expect(over.meta?.anchorPos).toBeGreaterThanOrEqual(0);
+    expect(over.meta?.anchorPos).toBeLessThanOrEqual(over.docSize);
+    const empty = exitMetaFor(
+      "/tmp/r5-empty.md",
+      { cursor: 0, scrollTop: 0, anchorOffset: 0, cursorVisible: false },
+      { value: "" },
+    );
+    expect(empty.meta?.anchorPos).toBeGreaterThanOrEqual(0);
+    expect(empty.meta?.anchorPos).toBeLessThanOrEqual(empty.docSize);
   });
 });

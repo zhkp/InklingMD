@@ -126,6 +126,50 @@ export function resolutionPct(entry, statistic = "median") {
 export const SESSION_PROBE_METRICS = ["probeMs", "probeLayoutMs", "probeCpuMs"];
 
 /**
+ * 归因指标（issue #379）：统计 / 大纲 / 标题定位 / KaTeX 的分解成本。
+ *
+ * 与 SESSION_PROBE_METRICS 同族——**进基线、不参与判定**：
+ * 它们是「钱花在哪」的披露，不是用户可感知耗时的回归目标；把它们判成 FAIL/WARN
+ * 会让归因行本身变成噪声源。真正的判定仍由 inputSyncMs / inputPaintMs / ttiMs 等主指标承担。
+ *
+ * 名称必须与 `tests/perf/metrics.ts` 的 ATTRIBUTION_BUCKETS 派生结果一致，
+ * 单测 `perf-attribution.test.ts` 直接对账，防止两边漂移。
+ */
+export const ATTRIBUTION_METRICS = [
+  "statsMs",
+  "statsMaxMs",
+  "statsCount",
+  "statsSettleMs",
+  "statsSettleMaxMs",
+  "statsSettleCount",
+  "outlineExtractMs",
+  "outlineExtractMaxMs",
+  "outlineExtractCount",
+  "outlineSettleMs",
+  "outlineSettleMaxMs",
+  "outlineSettleCount",
+  "headingLocateMs",
+  "headingLocateMaxMs",
+  "headingLocateCount",
+  // outlinePublish 只计次数（perfProbeCount）：没有 Ms/MaxMs，见 metrics.COUNT_ONLY_BUCKETS
+  "outlinePublishCount",
+  "katexLoadMs",
+  "katexLoadMaxMs",
+  "katexLoadCount",
+  "katexRenderMs",
+  "katexRenderMaxMs",
+  "katexRenderCount",
+  "formulaNodeViewMs",
+  "formulaNodeViewMaxMs",
+  "formulaNodeViewCount",
+  "formulaReadyMs",
+  "formulaNodeViews",
+  "formulaRendered",
+  "formulaLateLongTaskCount",
+  "formulaLateLongTaskMs",
+];
+
+/**
  * 分辨率提醒阈值（%）：3σ 达到参考值这个比例时，报告会显式列出该指标。
  *
  * 取 30% 的依据：默认劣化阈值是 15%（p95 为 25%），3σ 一旦超过两倍基础阈值，

@@ -246,4 +246,49 @@ describe("SourceModeEditor 初始滚动恢复（#136 方向 B）", () => {
     expect(current).toBeGreaterThanOrEqual(200 * 12);
     expect(rafQueue.length).toBe(0);
   });
+
+  it("脱链卸载时用最后可信 scrollTop 判光标可见性（#375 评审 R5-5）", () => {
+    const onUnmountSnapshot = vi.fn();
+    const { container, unmount } = render(
+      <SourceModeEditor
+        filePath="/tmp/detach-cursor.md"
+        value={LONG_TEXT}
+        onChange={() => {}}
+        initialCursor={0}
+        initialScrollTop={0}
+        spellcheck={false}
+        onUnmountSnapshot={onUnmountSnapshot}
+      />,
+    );
+    const scroller = container.querySelector(".cm-scroller") as HTMLElement;
+    expect(scroller).not.toBeNull();
+
+    // 在线且布局可信：视口 [500,1100]，光标仍在首行（top≈0）→ 不可见。
+    // 先让 refreshCursorVisible 把 clientHeight/scrollTop 缓存下来。
+    let clientHeight = 600;
+    Object.defineProperty(scroller, "clientHeight", {
+      get: () => clientHeight,
+      configurable: true,
+    });
+    Object.defineProperty(scroller, "scrollHeight", {
+      get: () => 2000,
+      configurable: true,
+    });
+    scroller.scrollTop = 500;
+    scroller.dispatchEvent(new Event("scroll"));
+    flushFrame();
+
+    // 模拟容器脱链：现场 clientHeight / scrollTop 都归 0
+    clientHeight = 0;
+    scroller.scrollTop = 0;
+    unmount();
+
+    const snap = onUnmountSnapshot.mock.calls.at(-1)?.[0] as
+      | { scrollTop: number; cursorVisible: boolean }
+      | undefined;
+    expect(snap, "cleanup 没有回传卸载快照").toBeTruthy();
+    // 现场读数 0 不能覆盖缓存；下游 caretPos 门控也不能被重新打开
+    expect(snap?.scrollTop).toBe(500);
+    expect(snap?.cursorVisible).toBe(false);
+  });
 });

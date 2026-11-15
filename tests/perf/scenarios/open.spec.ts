@@ -9,12 +9,18 @@
 import { expect, test } from "@playwright/test";
 import { PERF_DOC_PATH } from "../inject";
 import { bootWithFiles, openFileInTree } from "../helpers";
+import { formulaGate, formulaWaitOptions } from "../formula-gate";
+import { countExpectedMathNodes } from "../math-nodes";
 import {
   armTiming,
+  createAttributionAggregator,
   createSessionProbe,
   installObservers,
+  installPerfProbe,
   readObservers,
+  readPerfProbe,
   readTimingStart,
+  waitFormulaSettled,
   waitRenderStable,
   waitTwoFrames,
 } from "../metrics";
@@ -40,16 +46,38 @@ for (const tier of ctx.tiers) {
       test.skip(!shouldRun(id, ctx), "不在本次运行范围（复测过滤）");
 
       const fixture = fixtureFor(tier, kind);
+      // 预期公式节点数（#379 评审 R4）：从 markdown 源文数出「成对 $$ 块 +
+      // 行内 $...$」。>0 时 waitFormulaSettled 必须等到节点真的挂载，
+      // 否则调用瞬间 nodeViews=0 会被 `0 >= 0` 当成「没有公式、已完成」。
+      const expectedFormulaNodes = await countExpectedMathNodes(
+        fixture.content,
+      );
+      // custom 档直接读用户文档：预期值来自只挂 remark-math 的管线，而编辑器
+      // 还挂 GFM 表格与 frontmatter（这两处会吃掉 `$`），实际节点可能少于预期，
+      // 甚至为 0。因此 custom **不做数量门禁**（minNodes=0）：0 个节点也算
+      // complete，数量差异一律由 `unmeasured` 披露、不写 formulaReadyMs、不判红
+      // （#375 评审 R6-1 / R7-1）；生成档位才要求数量精确相等。
+      // 计数正确性由 `perf-formula-settle.test.ts` 对 remark-math 的边界用例锁定；
+      // 这里不再写 `expected === breakdown.math + inlineMath`——两者同源，是恒真断言。
+      const gate = formulaGate(kind, expectedFormulaNodes);
+      const strictCount = gate.strict;
       const probe = createSessionProbe();
+      const attribution = createAttributionAggregator();
       const ttiSamples: number[] = [];
       const longTaskCount: number[] = [];
       const longTaskMs: number[] = [];
       const clsValues: number[] = [];
       const heapDeltas: number[] = [];
+      const formulaReadyMs: number[] = [];
+      const formulaNodeViews: number[] = [];
+      const formulaRendered: number[] = [];
+      const formulaLateLongTaskCount: number[] = [];
+      const formulaLateLongTaskMs: number[] = [];
 
       for (let round = 0; round < ctx.warmups + ctx.rounds; round += 1) {
         await bootWithFiles(page, [{ path: PERF_DOC_PATH, content: fixture.content }]);
         await page.evaluate(installObservers);
+        await page.evaluate(installPerfProbe);
         await page.evaluate(armTiming, { event: "pointerdown" } as const);
 
         await openFileInTree(page, PERF_DOC_PATH, 120_000);
@@ -62,8 +90,80 @@ for (const tier of ctx.tiers) {
         const startAt = await page.evaluate(readTimingStart);
         const observers = await page.evaluate(readObservers);
 
+        // TTI 的既有口径不变（上面已读完判定用观测值）；公式归因在其后单独等待：
+        // KaTeX 动态导入可能在 TTI 之后才落地，若不等待就会把「还没渲染」记成「零成本」。
+        // 参数统一由 formulaWaitOptions 构造（#375 评审 R8-1）：就地拼盘时
+        // `minNodes` 这一行被删掉也不会被任何单测/CI 场景抓到（默认场景都是
+        // 生成档，minNodes 缺省即等于 expected）。纯函数 + 接线断言把这条锁死。
+        const formula = await page.evaluate(
+          waitFormulaSettled,
+          formulaWaitOptions(kind, expectedFormulaNodes),
+        );
+        const observersAfterFormula = await page.evaluate(readObservers);
+        const buckets = await page.evaluate(readPerfProbe);
+
         // warm-up 轮次只用来消除 Vite 首次编译 / PM 首次挂载 / JIT 预热的影响
         if (round >= ctx.warmups) {
+          // 公式前提与完成条件都只在 measured 轮断言：warmup 的结果本就要丢弃，
+          // 它的一次 KaTeX 抖动不该把整场景判成 UNMEASURED（exit 2）。
+          // 公式密集档必须真的有 200+ 公式节点（#376 的测量前提），否则数据不能用于决策
+          if (
+            kind === "rich" &&
+            (tier === "M" || tier === "L" || tier === "XL")
+          ) {
+            expect(
+              formula.nodeViews,
+              `${id}：公式节点数不足 200（实际 ${formula.nodeViews}），不满足 #376 测量前提`,
+            ).toBeGreaterThanOrEqual(200);
+            expect(
+              formula.rendered + formula.empty,
+              `${id}：KaTeX 未在等待窗口内渲染完全（${formula.rendered}+${formula.empty} 空/${formula.nodeViews}）`,
+            ).toBeGreaterThanOrEqual(formula.nodeViews);
+          }
+          // 含公式档位（含 S-rich / custom）必须先确认节点真的挂载且渲染完全
+          // （#379 评审 R4）：帧预算耗尽时 formula.at 只是超时时刻，拿它当
+          // formulaReadyMs 等于把「还没渲染完」记成「渲染耗时」。测量失败就判红
+          // ——本轮不落 raw，场景按「未测量」处理（exit 2）。
+          if (expectedFormulaNodes > 0 && strictCount) {
+            // 生成档位：预期数与编辑器实际挂载必须精确相等（计数低估=漏算，
+            // 高估=假 UNMEASURED）。custom 档不做数量断言——预期值来自只挂
+            // remark-math 的管线，编辑器还挂 GFM 表格与 frontmatter，数量
+            // 差异无法区分「口径」与「漏挂」，只披露不判红（#375 评审 R6-1）。
+            expect(
+              formula.nodeViews,
+              `${id}：预期 ${expectedFormulaNodes} 个公式节点，实际只挂载 ` +
+                `${formula.nodeViews} 个（等待 ${formula.frames} 帧），按 UNMEASURED 处理`,
+            ).toBeGreaterThanOrEqual(expectedFormulaNodes);
+            const actualFormulaNodes = await page.evaluate(
+              () =>
+                document.querySelectorAll(
+                  "[data-math-inline], [data-math-display]",
+                ).length,
+            );
+            expect(
+              expectedFormulaNodes,
+              `${id}：公式节点预期 ${expectedFormulaNodes} 与编辑器实际挂载 ` +
+                `${actualFormulaNodes} 不一致，计数口径与 remark-math 分叉`,
+            ).toBe(actualFormulaNodes);
+          }
+          expect(
+            formula.complete,
+            `${id}：KaTeX 未在 ${formula.frames} 帧内渲染完全` +
+              `（${formula.rendered}+${formula.empty} 空/${formula.nodeViews}），` +
+              `公式归因按测量失败处理`,
+          ).toBe(true);
+          // custom 档允许「口径多算」：数量差异由 unmeasured 披露、不判红。
+          // 这里断言的是**会变的关系**：unmeasured 必须等于「实际挂载数 < 预期」。
+          // 生成档位下 complete=true 已推出 nodeViews >= 预期，`unmeasured===false`
+          // 恒成立（原来那条 `expect(unmeasured).toBe(false)` 是不可能失败的
+          // 恒真断言），所以只在 custom 侧守这条关系（#375 评审 R7-2）。
+          if (!strictCount && expectedFormulaNodes > 0) {
+            expect(
+              formula.unmeasured,
+              `${id}：custom 的 unmeasured 应为「实际 ${formula.nodeViews} < 预期 ` +
+                `${expectedFormulaNodes}」，否则口径差异不会被写入 formulaCoverage`,
+            ).toBe(formula.nodeViews < expectedFormulaNodes);
+          }
           // 标定负载：#236 与编辑器代码无关的固定工作量，用于把「机器慢」与「代码回归」分开
           await probe.measure(page);
           ttiSamples.push(endAt - startAt);
@@ -75,6 +175,22 @@ for (const tier of ctx.tiers) {
               ? Math.round((observers.heapEndMB - observers.heapStartMB) * 100) / 100
               : 0,
           );
+          attribution.add(buckets);
+          // 含公式档位写标量，S-rich / custom 不再被 `nodeViews > 0` 静默跳过。
+          // 唯一例外是 custom 档的口径多算（unmeasured=true）：那一轮没拿到
+          // 完整公式样本，不写标量，由 formulaCoverage.unmeasured 披露。
+          if (expectedFormulaNodes > 0 && !formula.unmeasured) {
+            formulaReadyMs.push(formula.at - startAt);
+            formulaNodeViews.push(formula.nodeViews);
+            formulaRendered.push(formula.rendered);
+            // 只把 TTI 之后新增的 long task 算作「公式尾部渲染」的归因
+            formulaLateLongTaskCount.push(
+              Math.max(0, observersAfterFormula.longTaskCount - observers.longTaskCount),
+            );
+            formulaLateLongTaskMs.push(
+              Math.max(0, observersAfterFormula.longTaskMs - observers.longTaskMs),
+            );
+          }
         }
       }
 
@@ -98,10 +214,32 @@ for (const tier of ctx.tiers) {
         samples: { ttiMs: ttiSamples },
         scalars: {
           ...probe.scalars(),
+          ...attribution.scalars(),
+          ...(formulaReadyMs.length > 0
+            ? {
+                formulaReadyMs: avg(formulaReadyMs),
+                formulaNodeViews: avg(formulaNodeViews),
+                formulaRendered: avg(formulaRendered),
+                formulaLateLongTaskCount: avg(formulaLateLongTaskCount),
+                formulaLateLongTaskMs: avg(formulaLateLongTaskMs),
+              }
+            : {}),
           longTaskCount: avg(longTaskCount),
           longTaskMs: avg(longTaskMs),
           cls: avg(clsValues),
           heapDeltaMB: avg(heapDeltas),
+        },
+        // 归因标量的覆盖状态（#379 评审 R4）：部分缺采必须在产物里可见
+        attributionCoverage: attribution.coverage(),
+        // 公式测量覆盖状态：预期节点数 / 实际记到完整样本的轮数。
+        // 判红时本 raw 根本不落盘，report 会给出 UNMEASURED 行；这里让
+        // 「有公式档位却没写 formulaReadyMs」也无法伪装成纯文本档。
+        formulaCoverage: {
+          expectedNodes: expectedFormulaNodes,
+          measuredRounds: formulaReadyMs.length,
+          expectedRounds: ctx.rounds,
+          unmeasured:
+            expectedFormulaNodes > 0 && formulaReadyMs.length < ctx.rounds,
         },
       });
     });

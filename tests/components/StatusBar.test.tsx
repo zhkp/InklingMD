@@ -1,9 +1,10 @@
 // StatusBar 组件测试
 // 验证：无文件时不渲染、有文件时显示字数/字符/行数/阅读时长/缩放比例
 
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import { render, screen, fireEvent, act } from "@testing-library/react";
 import { StatusBar } from "../../src/components/StatusBar/StatusBar";
+import { STATS_DEBOUNCE_MS } from "../../src/lib/useDeferredStats";
 import { useWorkspace } from "../../src/store/workspace";
 import { useSettings } from "../../src/store/settings";
 
@@ -51,16 +52,29 @@ describe("StatusBar", () => {
     expect(screen.getByText(/行 3/)).toBeInTheDocument();
   });
 
-  it("内容变化时统计更新", () => {
-    useWorkspace.setState({
-      currentFile: "/test.md",
-      currentContent: "foo",
-    });
-    const { rerender } = render(<StatusBar />);
-    expect(screen.getByText(/字数 1/)).toBeInTheDocument();
-    useWorkspace.setState({ currentContent: "foo bar baz" });
-    rerender(<StatusBar />);
-    expect(screen.getByText(/字数 3/)).toBeInTheDocument();
+  it("内容变化后停笔防抖窗口结束刷新统计（#374）", () => {
+    vi.useFakeTimers();
+    try {
+      useWorkspace.setState({
+        currentFile: "/test.md",
+        currentContent: "foo",
+      });
+      const { rerender } = render(<StatusBar />);
+      expect(screen.getByText(/字数 1/)).toBeInTheDocument();
+
+      act(() => {
+        useWorkspace.setState({ currentContent: "foo bar baz" });
+      });
+      rerender(<StatusBar />);
+      // 防抖窗口内保留旧值（状态栏不闪空），停笔后才刷新
+      expect(screen.getByText(/字数 1/)).toBeInTheDocument();
+      act(() => {
+        vi.advanceTimersByTime(STATS_DEBOUNCE_MS);
+      });
+      expect(screen.getByText(/字数 3/)).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("默认显示 100% 缩放，调整后显示新比例", () => {
