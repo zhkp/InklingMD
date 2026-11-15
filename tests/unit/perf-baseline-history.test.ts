@@ -21,6 +21,10 @@ import { createPerfReportWorkspace, type PerfReportWorkspace } from "./perf-repo
 const REPORT = "tests/perf/report.mjs";
 const ID = "scroll-H-test";
 const FIXTURE = { version: 2, hash: "histtest0001", lines: 1000, source: "generated:rich" };
+// Keep this override local: Vitest's documented default is 5s, while this case starts 11 child processes.
+// https://vitest.dev/api/#test
+const HISTORY_LIMIT_TEST_TIMEOUT_MS = 30_000;
+const DEFAULT_VITEST_TEST_TIMEOUT_MS = 5_000;
 
 const roots: string[] = [];
 let perf: PerfReportWorkspace;
@@ -208,11 +212,13 @@ describe("基线身份 = 测量配置（路径隔离）", () => {
     expect(frameHistory()).toHaveLength(1); // 从本次重新起头，而不是 [median, median]
   });
 
-  it("历史序列上限 8 点，保留最近的运行", () => {
+  it("历史序列上限 8 点，保留最近的运行", { timeout: HISTORY_LIMIT_TEST_TIMEOUT_MS }, async () => {
     for (let i = 0; i < 11; i += 1) {
       writeRaw({ frameMedian: 16 + i * 0.1 });
       updateBaseline();
     }
+    // Deliberately cross Vitest's 5s default so removing the local override fails this test.
+    await new Promise<void>((resolve) => setTimeout(resolve, DEFAULT_VITEST_TEST_TIMEOUT_MS + 250));
     const history = frameHistory();
     expect(history).toHaveLength(8);
     expect(history[history.length - 1]).toBeGreaterThan(history[0]); // 保留尾部
