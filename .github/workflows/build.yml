@@ -146,14 +146,71 @@ jobs:
       - name: Prepare portable zip
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
           $version = (Get-Content src-tauri/tauri.conf.json | ConvertFrom-Json).version
           $portableDir = "src-tauri/target/release/portable-build"
+          if (Test-Path $portableDir) { Remove-Item -Path $portableDir -Recurse -Force }
           New-Item -ItemType Directory -Path $portableDir -Force | Out-Null
           Copy-Item src-tauri/target/release/InklingMD.exe "$portableDir/InklingMD.exe"
+          # 便携版 resource_dir() 指向 exe 同目录，主题源副本必须位于 themes/。
+          Copy-Item -Path "src-tauri/resources/themes" -Destination "$portableDir/themes" -Recurse
           # 便携模式标记文件：存在则启用绿色模式，数据写入同目录 data 文件夹
           Set-Content -Path "$portableDir/portable.txt" -Value "This marker file enables portable mode. Keep it next to InklingMD.exe. App data will be stored in the 'data' folder beside the exe."
-          Compress-Archive -Path "$portableDir/*" -DestinationPath "src-tauri/target/release/InklingMD-${version}-portable.zip" -Force
-          Write-Host "Portable zip: InklingMD-${version}-portable.zip"
+          $portableZip = "src-tauri/target/release/InklingMD-${version}-portable.zip"
+          Compress-Archive -Path "$portableDir/*" -DestinationPath $portableZip -Force
+          Write-Host "Portable zip: $portableZip"
+          $portableAuditDir = Join-Path $env:RUNNER_TEMP "inkling-portable-zip-audit"
+          if (Test-Path $portableAuditDir) { Remove-Item -Path $portableAuditDir -Recurse -Force }
+          New-Item -ItemType Directory -Path $portableAuditDir -Force | Out-Null
+          Expand-Archive -LiteralPath $portableZip -DestinationPath $portableAuditDir -Force
+          $themesDir = Join-Path $portableAuditDir "themes"
+          if (-not (Test-Path -LiteralPath (Join-Path $themesDir "manifest.json") -PathType Leaf)) { throw "便携 ZIP 根目录缺少 themes/manifest.json" }
+          if (-not (Test-Path -LiteralPath (Join-Path $themesDir "NOTICE") -PathType Leaf)) { throw "便携 ZIP 根目录缺少 themes/NOTICE" }
+          $expectedManifest = (Resolve-Path "src-tauri/resources/themes/manifest.json").Path
+          & node "scripts/check-bundled-theme-artifact.mjs" $portableAuditDir $expectedManifest
+          if ($LASTEXITCODE -ne 0) { throw "便携 ZIP 主题资源核对失败" }
+
+      - name: Run portable app and verify first-run bundled themes
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $themesDir = Join-Path $env:APPDATA "com.inklingmd.editor/themes"
+          if (Test-Path -LiteralPath $themesDir) { Remove-Item -LiteralPath $themesDir -Recurse -Force }
+          if (Test-Path -LiteralPath $themesDir) { throw "运行时验收必须从无 themes 目录的干净环境开始" }
+          $portableAuditDir = Join-Path $env:RUNNER_TEMP "inkling-portable-zip-audit"
+          $evidenceDir = Join-Path $env:RUNNER_TEMP "inkling-portable-runtime-evidence"
+          if (Test-Path -LiteralPath $evidenceDir) { Remove-Item -LiteralPath $evidenceDir -Recurse -Force }
+          New-Item -ItemType Directory -Path $evidenceDir -Force | Out-Null
+          $webView2PolicyPath = "HKLM:\Software\Policies\Microsoft\Edge\WebView2\AdditionalBrowserArguments"
+          $policyKeyExisted = Test-Path -LiteralPath $webView2PolicyPath
+          New-Item -Path $webView2PolicyPath -Force | Out-Null
+          $previousPolicy = Get-ItemProperty -Path $webView2PolicyPath -Name "InklingMD.exe" -ErrorAction SilentlyContinue
+          $hadPreviousPolicy = $null -ne $previousPolicy
+          if ($hadPreviousPolicy) { $previousPolicyValue = $previousPolicy."InklingMD.exe" }
+          New-ItemProperty -Path $webView2PolicyPath -Name "InklingMD.exe" -Value "--remote-debugging-port=9222" -PropertyType String -Force | Out-Null
+          $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = "--remote-debugging-port=9222"
+          $portableExe = Join-Path $portableAuditDir "InklingMD.exe"
+          if (-not (Test-Path -LiteralPath $portableExe -PathType Leaf)) { throw "ZIP 解包目录中缺少 InklingMD.exe: $portableExe" }
+          $expectedManifest = Join-Path $env:GITHUB_WORKSPACE "src-tauri/resources/themes/manifest.json"
+          if (-not (Test-Path -LiteralPath $expectedManifest -PathType Leaf)) { throw "缺少仓库源主题清单: $expectedManifest" }
+          $app = $null
+          try {
+            $app = Start-Process -FilePath $portableExe -WorkingDirectory $portableAuditDir -PassThru
+            & node "scripts/probe-portable-bundled-themes.mjs" $evidenceDir $expectedManifest "9222"
+            if ($LASTEXITCODE -ne 0) { throw "便携版首次启动主题验收失败" }
+          } finally {
+            if ($null -ne $app) {
+              $app.Refresh()
+              if (-not $app.HasExited) { Stop-Process -Id $app.Id -Force -ErrorAction SilentlyContinue }
+              else { Write-Host "InklingMD.exe exited during probe; exit code: $($app.ExitCode)" }
+            }
+            if ($hadPreviousPolicy) {
+              Set-ItemProperty -Path $webView2PolicyPath -Name "InklingMD.exe" -Value $previousPolicyValue
+            } else {
+              Remove-ItemProperty -Path $webView2PolicyPath -Name "InklingMD.exe" -ErrorAction SilentlyContinue
+              if (-not $policyKeyExisted) { Remove-Item -LiteralPath $webView2PolicyPath -Force -ErrorAction SilentlyContinue }
+            }
+          }
 
       # 扁平拷贝到 staging 目录再上传，确保下载后安装包位于 artifact 根目录
       # （upload-artifact 会保留原 bundle 子目录层级，导致 release 的扁平 glob 匹配失败）
@@ -171,6 +228,14 @@ jobs:
           name: InklingMD-windows-installers
           path: windows-installers
           if-no-files-found: error
+
+      - name: Upload portable runtime evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: portable-theme-runtime-evidence
+          path: ${{ runner.temp }}/inkling-portable-runtime-evidence/
+          if-no-files-found: warn
 
   # Linux amd64 构建：AppImage + deb
   # PR 上跳过打包（#252）：同上，PR 门禁只需 test job
