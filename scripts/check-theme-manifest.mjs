@@ -2,7 +2,7 @@
 /**
  * #307 预装清单校验（发版门禁的一环）：
  *  - `manifest.json` 版本与最小字段集（slug / css / name / mode，可选 dir / hiddenByDefault）；
- *  - slug 唯一、`css` / `dir` 在清单同级目录真实存在（打包遗漏会在这里暴露，而不是到用户机器上才「主题缺失」）；
+ *  - slug 唯一、`css` / `dir` 在仓库源目录真实存在（只保证仓库侧一致，不检查最终安装包；产物侧由 #403 门禁负责）；
  *  - 与 #308 的许可登记（`docs/theme-licenses.json`）**两侧 slug 集合一致**（该文件尚未落地 → 跳过并提示）。
  *
  * 用法：node scripts/check-theme-manifest.mjs [--json]
@@ -79,7 +79,7 @@ if (!manifest) {
         }
         const target = join(THEMES_DIR, value);
         if (!existsSync(target)) {
-          fail(`${where}.${field} 指向的文件不存在：${value}（打包/入库遗漏）`);
+          fail(`${where}.${field} 指向的文件不存在：${value}（仓库源目录缺失）`);
         } else if (field === "css" && statSync(target).isDirectory()) {
           fail(`${where}.css 指向的是目录：${value}`);
         } else if (field === "dir" && !statSync(target).isDirectory()) {
@@ -109,7 +109,7 @@ if (!manifest) {
 }
 
 if (!existsSync(THEMES_DIR)) {
-  warn("src-tauri/resources/themes 目录不存在（预装主题运行时光源副本，06 §2 N13）");
+  warn("src-tauri/resources/themes 目录不存在（仓库内的预装主题源副本，06 §2 N13）");
 }
 
 if (process.argv.includes("--json")) {

@@ -1,6 +1,6 @@
 // 主题下拉菜单（#225 主题清单 + #307 导入/管理）：
 // 分组列表（内置 / 已导入） + 当前选中 + 明暗变体一键切换 + 导入三条路径 + 打开主题文件夹 + 移除/隐藏 + 自定义 CSS
-import { useRef } from "react";
+import { useId, useRef, useState } from "react";
 import { useTheme } from "../../store/theme";
 import { themeDisplayName } from "../../theme/registry";
 import { useMenuA11y } from "../../hooks/useMenuA11y";
@@ -24,6 +24,9 @@ interface ThemeMenuProps {
 
 export function ThemeMenu({ open, onOpenChange }: ThemeMenuProps) {
   const menuRef = useRef<HTMLDivElement | null>(null);
+  const [scanIssuesExpanded, setScanIssuesExpanded] = useState(false);
+  const scanIssuesToggleId = useId();
+  const scanIssuesDetailsId = `${scanIssuesToggleId}-details`;
   // #188：打开聚焦首项 + 方向键导航
   useMenuA11y({ ref: menuRef, enabled: open, focusFirstOnOpen: true });
 
@@ -186,9 +189,37 @@ export function ThemeMenu({ open, onOpenChange }: ThemeMenuProps) {
             </button>
 
             {scanIssues.length > 0 && (
-              <div className="export-item export-item-muted" role="presentation" data-theme-issues="1">
-                <IconAlertTriangle size={14} /> 上次扫描有 {scanIssues.length} 条提示
-              </div>
+              <>
+                <button
+                  id={scanIssuesToggleId}
+                  type="button"
+                  className="export-item export-item-muted"
+                  role="menuitem"
+                  aria-expanded={scanIssuesExpanded}
+                  aria-controls={scanIssuesDetailsId}
+                  data-theme-issues="1"
+                  onClick={() => setScanIssuesExpanded((expanded) => !expanded)}
+                >
+                  <IconAlertTriangle size={14} />
+                  {scanIssuesExpanded
+                    ? `收起扫描提示（${scanIssues.length} 条）`
+                    : `查看上次扫描提示（${scanIssues.length} 条）`}
+                </button>
+                <div
+                  id={scanIssuesDetailsId}
+                  className="theme-scan-issues-details"
+                  role="group"
+                  aria-labelledby={scanIssuesToggleId}
+                  hidden={!scanIssuesExpanded}
+                  data-theme-issue-details="1"
+                >
+                  <ul className="theme-scan-issues-list">
+                    {scanIssues.map((issue, index) => (
+                      <li key={`${index}-${issue}`}>{issue}</li>
+                    ))}
+                  </ul>
+                </div>
+              </>
             )}
 
             {currentIsEditable && (
