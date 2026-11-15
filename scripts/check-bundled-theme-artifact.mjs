@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 /**
- * Verify an extracted application package contains the exact bundled theme set.
+ * Verify an extracted application package with root-level themes/ contains the exact bundled theme set.
  *
  * Usage: node scripts/check-bundled-theme-artifact.mjs <extracted-package-root> <source-manifest>
- * The workflow extracts each release artifact independently before invoking this script.
+ * Intended for package layouts with themes/ at the package root (portable ZIP and NSIS install directory).
+ * MSI, deb, and AppImage layouts require package-specific checks; see #403.
  */
 import { lstatSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";

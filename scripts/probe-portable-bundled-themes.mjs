@@ -1,24 +1,27 @@
 #!/usr/bin/env node
 // Run the extracted portable app on Windows, then verify its first-run bundled-theme UI and index.
-// Usage: node scripts/probe-portable-bundled-themes.mjs <evidence-dir> [CDP-port=9222]
-import { mkdirSync, writeFileSync } from "node:fs";
+// Usage: node scripts/probe-portable-bundled-themes.mjs <evidence-dir> <source-manifest> [CDP-port=9222]
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { chromium } from "@playwright/test";
+import { expectedThemeSlugs, hasExpectedBundledThemes } from "./lib/portable-theme-probe.mjs";
 
-const [evidenceDirArg, portArg = "9222"] = process.argv.slice(2);
-if (!evidenceDirArg || !/^\d+$/.test(portArg)) {
-  console.error("用法：node scripts/probe-portable-bundled-themes.mjs <证据目录> [CDP 端口=9222]");
+const [evidenceDirArg, expectedManifestArg, portArg = "9222"] = process.argv.slice(2);
+if (!evidenceDirArg || !expectedManifestArg || !/^\d+$/.test(portArg)) {
+  console.error("用法：node scripts/probe-portable-bundled-themes.mjs <证据目录> <源主题清单> [CDP 端口=9222]");
   process.exit(1);
 }
 
 const evidenceDir = resolve(evidenceDirArg);
 const port = Number(portArg);
-const expectedSlugs = ["drake", "drake-dark", "lapis", "lapis-dark", "notion", "notion-dark"];
 const pause = (ms) => new Promise((resolvePromise) => setTimeout(resolvePromise, ms));
 let browser;
 let page;
+let expectedSlugs = [];
 
 try {
+  const expectedManifest = JSON.parse(readFileSync(resolve(expectedManifestArg), "utf8"));
+  expectedSlugs = expectedThemeSlugs(expectedManifest);
   const deadline = Date.now() + 60_000;
   let lastConnectionError;
   while (!browser && Date.now() < deadline) {
@@ -46,22 +49,29 @@ try {
   await page.locator(".ProseMirror").waitFor({ state: "visible", timeout: 30_000 });
   const themeButton = page.locator('button[title="主题"]');
   await themeButton.waitFor({ state: "visible", timeout: 30_000 });
-  await page.waitForFunction(() => {
+  const indexDeadline = Date.now() + 60_000;
+  let indexText = null;
+  let index;
+  while (Date.now() < indexDeadline) {
+    indexText = await page.evaluate(() => window.localStorage.getItem("inkling-themes-index"));
     try {
-      const parsed = JSON.parse(window.localStorage.getItem("inkling-themes-index") ?? "null");
-      return Array.isArray(parsed?.themes) && parsed.themes.filter((theme) => theme.source === "bundled").length === 6;
+      if (indexText) {
+        index = JSON.parse(indexText);
+        if (hasExpectedBundledThemes(index, expectedSlugs)) break;
+      }
     } catch {
-      return false;
+      index = undefined;
     }
-  }, undefined, { timeout: 60_000 });
-
-  const indexText = await page.evaluate(() => window.localStorage.getItem("inkling-themes-index"));
-  if (!indexText) throw new Error("未写入 inkling-themes-index");
-  const index = JSON.parse(indexText);
-  const bundledEntries = index.themes.filter((theme) => theme.source === "bundled");
-  const indexedSlugs = bundledEntries.map((theme) => theme.id.replace(/^bundled:/, "")).sort();
-  if (JSON.stringify(indexedSlugs) !== JSON.stringify([...expectedSlugs].sort())) {
-    throw new Error(`bundled 索引主题集合不匹配：${JSON.stringify(indexedSlugs)}`);
+    await pause(500);
+  }
+  const indexedSlugs = Array.isArray(index?.themes)
+    ? index.themes
+      .filter((theme) => theme?.source === "bundled")
+      .map((theme) => typeof theme.id === "string" ? theme.id.replace(/^bundled:/, "") : "(无效 id)")
+      .sort()
+    : [];
+  if (!hasExpectedBundledThemes(index, expectedSlugs)) {
+    throw new Error(`bundled 索引主题集合不匹配：expected=${JSON.stringify(expectedSlugs)}, actual=${JSON.stringify(indexedSlugs)}`);
   }
 
   await page.locator('button[title="主题"]').click();
@@ -84,12 +94,13 @@ try {
   const report = {
     verdict: "passed",
     appUrl: page.url(),
+    expectedManifest: resolve(expectedManifestArg),
     bundledSlugs: expectedSlugs,
     menuEntries,
     evidence: { screenshot: screenshotPath, index: indexPath },
   };
   writeFileSync(reportPath, `${JSON.stringify(report, null, 2)}\n`);
-  console.log("便携版首次启动验收通过：主题菜单显示 6 套预装主题，均为 bundled。");
+  console.log(`便携版首次启动验收通过：主题菜单显示 ${expectedSlugs.length} 套预装主题，均为 bundled。`);
   console.log(`菜单截图：${screenshotPath}`);
   console.log(`inkling-themes-index 原文：${indexText}`);
   console.log(`验收报告：${reportPath}`);
@@ -98,6 +109,8 @@ try {
   const failureReport = {
     verdict: "failed",
     error: error instanceof Error ? error.message : String(error),
+    expectedManifest: resolve(expectedManifestArg),
+    expectedSlugs,
     appUrl: page?.url() ?? null,
     pageTitle: page ? await page.title().catch(() => null) : null,
     bodyText: page ? (await page.locator("body").innerText({ timeout: 1_000 }).catch(() => "")).slice(0, 4_000) : null,
