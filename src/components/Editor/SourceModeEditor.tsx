@@ -89,8 +89,6 @@ export function SourceModeEditor({
   onUnmountRef.current = onUnmountSnapshot;
   const onOutlineChangeRef = useRef(onOutlineChange);
   onOutlineChangeRef.current = onOutlineChange;
-  const currentFilePathRef = useRef(filePath);
-  currentFilePathRef.current = filePath;
   const lastEmittedRef = useRef(value);
   const themeCompRef = useRef(new Compartment());
 
@@ -206,12 +204,7 @@ export function SourceModeEditor({
       delayMs: SOURCE_OUTLINE_DEBOUNCE_MS,
       run: () => {
         const v = viewRef.current;
-        if (
-          disposed ||
-          currentFilePathRef.current !== filePath ||
-          !v ||
-          v !== view
-        ) {
+        if (disposed || !v || v !== view) {
           return;
         }
         const nextHeadings = extractMarkdownOutline(v.state.doc.toString());
@@ -220,8 +213,8 @@ export function SourceModeEditor({
           activeHeadings,
           nextHeadings,
         );
-        // 行号/文本都没变时也换成本次结果：视口定位需要最新的标题偏移；
-        // 不发布可避免面板重渲染，点击旧快照时仍会按当前全文匹配。
+        // 结构未变时不发布，避免面板重渲染。防抖期间面板保留的标题对象仍
+        // 属于旧文档 revision，点击会 no-op；防抖完成后重新认证这些对象。
         activeHeadings = nextHeadings;
         if (structureChanged || nextActive !== currentActiveIndex) {
           publishOutline(activeHeadings, nextActive);
@@ -266,12 +259,7 @@ export function SourceModeEditor({
     registerSourceModeScroll(filePath, {
       scrollToHeading: (heading) => {
         const v = viewRef.current;
-        if (
-          disposed ||
-          currentFilePathRef.current !== filePath ||
-          !v ||
-          v !== view
-        ) {
+        if (disposed || !v || v !== view) {
           return;
         }
         const currentDoc = v.state.doc.toString();
@@ -328,17 +316,12 @@ export function SourceModeEditor({
 
     // 监听滚动更新大纲高亮（Issue #118）：定位只做一次行块读取 + 二分
     const handleScroll = () => {
-      if (disposed || currentFilePathRef.current !== filePath) return;
+      if (disposed) return;
       if (scrollRaf !== null) return;
       scrollRaf = requestAnimationFrame(() => {
         scrollRaf = null;
         const v = viewRef.current;
-        if (
-          disposed ||
-          currentFilePathRef.current !== filePath ||
-          !v ||
-          v !== view
-        ) {
+        if (disposed || !v || v !== view) {
           return;
         }
         refreshCursorVisible(v);
@@ -357,11 +340,7 @@ export function SourceModeEditor({
       typeof ResizeObserver !== "undefined"
         ? new ResizeObserver(() => {
             const v = viewRef.current;
-            if (
-              !disposed &&
-              currentFilePathRef.current === filePath &&
-              v === view
-            ) {
+            if (!disposed && v === view) {
               refreshCursorVisible(v);
             }
           })
@@ -397,7 +376,6 @@ export function SourceModeEditor({
     let focusRaf: number | null = null;
     const isCurrentView = () =>
       !disposed &&
-      currentFilePathRef.current === filePath &&
       viewRef.current === view;
     const computeTarget = () => {
       if (initialAnchorOffset != null && initialAnchorOffset > 0) {
@@ -458,15 +436,13 @@ export function SourceModeEditor({
           scrollTop: cachedScrollTop,
           scrollHeight: cachedScrollHeight,
         });
-        if (currentFilePathRef.current === filePath) {
-          onUnmountRef.current?.({
-            cursor: head,
-            scrollTop,
-            scrollHeight,
-            anchorOffset: view.lineBlockAtHeight(scrollTop).from,
-            cursorVisible: cursorVisibleCache,
-          });
-        }
+        onUnmountRef.current?.({
+          cursor: head,
+          scrollTop,
+          scrollHeight,
+          anchorOffset: view.lineBlockAtHeight(scrollTop).from,
+          cursorVisible: cursorVisibleCache,
+        });
       }
       view.destroy();
       viewRef.current = null;

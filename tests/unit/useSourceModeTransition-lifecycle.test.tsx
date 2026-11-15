@@ -1,4 +1,5 @@
-import { cleanup, renderHook } from "@testing-library/react";
+import { act, cleanup, renderHook } from "@testing-library/react";
+import { flushSync } from "react-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { editorViewCtx, parserCtx } from "@milkdown/kit/core";
 import { useSourceModeTransition } from "../../src/components/Editor/useSourceModeTransition";
@@ -58,7 +59,7 @@ function makeHarness() {
       tr: transaction,
     },
     dispatch: vi.fn(),
-    coordsAtPos: () => ({ top: 0, bottom: 0 }),
+    coordsAtPos: vi.fn(() => ({ top: 0, bottom: 0 })),
     dom: {
       closest: (selector: string) => (selector === ".editor-scroll" ? scrollEl : null),
     },
@@ -159,8 +160,12 @@ describe("useSourceModeTransition pending restore lifecycle", () => {
     rerender({ filePath: NEW_PATH, sourceMode: false });
     expect(harness.cancelFrame).toHaveBeenCalledWith(pendingId);
     const savesBeforeLateCallback = harness.saveCursorState.mock.calls.length;
-    lateCallback(0);
+    const dispatchesBeforeLateCallback = harness.view.dispatch.mock.calls.length;
+    const measurementsBeforeLateCallback = harness.view.coordsAtPos.mock.calls.length;
+    act(() => lateCallback(0));
     expect(harness.saveCursorState).toHaveBeenCalledTimes(savesBeforeLateCallback);
+    expect(harness.view.dispatch).toHaveBeenCalledTimes(dispatchesBeforeLateCallback);
+    expect(harness.view.coordsAtPos).toHaveBeenCalledTimes(measurementsBeforeLateCallback);
     expect(harness.callbacks.size).toBe(0);
   });
 
@@ -196,8 +201,60 @@ describe("useSourceModeTransition pending restore lifecycle", () => {
     unmount();
     expect(harness.cancelFrame).toHaveBeenCalledWith(pendingId);
     const savesBeforeLateCallback = harness.saveCursorState.mock.calls.length;
-    lateCallback(0);
+    const measurementsBeforeLateCallback = harness.view.coordsAtPos.mock.calls.length;
+    act(() => lateCallback(0));
     expect(harness.saveCursorState).toHaveBeenCalledTimes(savesBeforeLateCallback);
+    expect(harness.view.coordsAtPos).toHaveBeenCalledTimes(measurementsBeforeLateCallback);
     expect(harness.callbacks.size).toBe(0);
+  });
+
+  it("settle 测量期间切文件时不把旧位置写回 workspace", () => {
+    harness = makeHarness();
+    const { result, rerender } = renderHook(
+      ({ filePath, sourceMode }: { filePath: string; sourceMode: boolean }) =>
+        useSourceModeTransition({
+          filePath,
+          sourceMode,
+          value: VALUE,
+          getEditor: harness!.getEditor,
+          lastSyncedRef: { current: VALUE },
+        }),
+      { initialProps: { filePath: OLD_PATH, sourceMode: true } },
+    );
+    result.current.exitSnapshotRef.current = {
+      cursor: 0,
+      scrollTop: 0,
+      scrollHeight: 100,
+      anchorOffset: 0,
+      cursorVisible: false,
+    };
+    rerender({ filePath: OLD_PATH, sourceMode: false });
+    runFirstPendingFrame(harness.callbacks);
+    runFirstPendingFrame(harness.callbacks);
+    const pending = harness.callbacks.entries().next().value as
+      | [number, FrameRequestCallback]
+      | undefined;
+    expect(pending).toBeDefined();
+    const [, settleCallback] = pending!;
+
+    // settle 已通过帧入口校验；在 persist 读取滚动值时同步切文件，验证
+    // 内层本地守卫仍会阻止旧任务写回快照。
+    let fileSwitchedDuringSettle = false;
+    let connectedReads = 0;
+    Object.defineProperty(harness.scrollEl, "isConnected", {
+      configurable: true,
+      get: () => {
+        connectedReads += 1;
+        if (connectedReads === 2) {
+          fileSwitchedDuringSettle = true;
+          flushSync(() => rerender({ filePath: NEW_PATH, sourceMode: false }));
+        }
+        return true;
+      },
+    });
+    act(() => settleCallback(0));
+
+    expect(fileSwitchedDuringSettle).toBe(true);
+    expect(harness.saveCursorState).not.toHaveBeenCalled();
   });
 });

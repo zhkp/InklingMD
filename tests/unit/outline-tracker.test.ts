@@ -972,7 +972,36 @@ describe("outlineTrackerPlugin 整文档替换的同步刷新（#375 首帧）",
     harness.scroller.remove();
   });
 
-  it("销毁时取消初始采样 rAF，切换文档后的迟到回调不发布旧状态", () => {
+  it("销毁时取消初始采样 rAF", () => {
+    const harness = makeHarness();
+    const onChange = vi.fn();
+    const plugin = outlineTrackerPlugin(onChange);
+    const initial = EditorState.create({
+      schema,
+      doc: makeDoc(["一", "二", "三"]),
+      plugins: [plugin],
+    });
+    const asView = (state: EditorState) =>
+      ({
+        dom: harness.editorDom,
+        state,
+        nodeDOM: () => null,
+      }) as unknown as EditorView;
+
+    vi.spyOn(window, "requestAnimationFrame").mockReturnValue(17);
+    const cancelFrame = vi
+      .spyOn(window, "cancelAnimationFrame")
+      .mockImplementation(() => {});
+    const pluginView = plugin.spec.view?.(asView(initial));
+
+    pluginView?.destroy?.();
+    expect(cancelFrame).toHaveBeenCalledWith(17);
+
+    vi.restoreAllMocks();
+    harness.scroller.remove();
+  });
+
+  it("几何缓存建立后丢弃属于旧文档的初始采样帧", () => {
     vi.useFakeTimers();
     const harness = makeHarness();
     const onChange = vi.fn();
@@ -1002,9 +1031,6 @@ describe("outlineTrackerPlugin 整文档替换的同步刷新（#375 首帧）",
       initialSample.current = callback;
       return 17;
     }) as typeof window.requestAnimationFrame);
-    const cancelFrame = vi
-      .spyOn(window, "cancelAnimationFrame")
-      .mockImplementation(() => {});
     const pluginView = plugin.spec.view?.(asView(initial));
     onChange.mockClear();
 
@@ -1013,22 +1039,22 @@ describe("outlineTrackerPlugin 整文档替换的同步刷新（#375 首帧）",
       initial.tr.replaceWith(0, initial.doc.content.size, replacement.content),
       { active: null, anchorPos: null },
     );
-    const next = initial.apply(tr);
-    pluginView?.update?.(asView(next), initial as never);
-    harness.setScrollTop(650);
+    pluginView?.update?.(asView(initial.apply(tr)), initial as never);
+    // 替换后的几何缓存与活动项都已经建立；顶部采样仍是 index 0。
     vi.advanceTimersByTime(200);
-    expect(onChange.mock.calls.at(-1)?.[0]).toEqual(
-      expect.objectContaining({ activeIndex: 2 }),
+    expect(onChange).toHaveBeenLastCalledWith(
+      expect.objectContaining({ activeIndex: 0 }),
     );
     onChange.mockClear();
 
-    // 若初始回调在销毁后仍运行，它会按顶部 scrollTop 把 activeIndex 改回 0。
-    harness.setScrollTop(0);
-    pluginView?.destroy?.();
-    expect(cancelFrame).toHaveBeenCalledWith(17);
+    // 现在旧初始帧若误对当前文档采样，就会把活动项改成 index 2；文档
+    // identity 守卫必须在插件仍挂载、缓存可用时丢弃这条旧帧。
+    harness.setScrollTop(650);
+    expect(initialSample.current).toBeDefined();
     initialSample.current?.(0);
     expect(onChange).not.toHaveBeenCalled();
 
+    pluginView?.destroy?.();
     vi.useRealTimers();
     vi.restoreAllMocks();
     harness.scroller.remove();

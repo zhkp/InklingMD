@@ -391,19 +391,12 @@ export const outlineTrackerPlugin = (
         });
       };
       scroller?.addEventListener("scroll", handleScroll, { passive: true });
-      // 初始按当前滚动位置采样一次（打开文件恢复 scrollTop=0 时无
-      // scroll 事件可触发，靠这里兜底首帧高亮）；初始布局未稳定时由
-      // 停歇路径的 refreshGeometryAndSample 校正。文档在首帧前切换时由
-      // doc identity guard 丢弃旧采样；销毁时取消并由 destroyed guard 兜底。
+      // 首帧快照已由上面的 onChange 同步发布。此 best-effort 采样只有在
+      // 几何缓存已建立时才会更新滚动高亮（空缓存会由 sampleViewport 跳过）；
+      // 文档换代时丢弃旧帧，销毁时取消句柄。
       initialSampleFrame = requestAnimationFrame(() => {
         initialSampleFrame = null;
-        if (
-          destroyed ||
-          !view.dom.isConnected ||
-          currentDoc !== initialSampleDoc
-        ) {
-          return;
-        }
+        if (currentDoc !== initialSampleDoc) return;
         sampleViewport();
       });
 

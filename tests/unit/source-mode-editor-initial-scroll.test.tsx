@@ -293,13 +293,23 @@ describe("SourceModeEditor 初始滚动恢复（#136 方向 B）", () => {
     expect(snap?.cursorVisible).toBe(false);
   });
 
-  it("卸载时取消待执行的 focus rAF，迟到回调不会聚焦已销毁的 view", () => {
+  it("切文件后忽略已取消但迟到的旧 focus rAF", () => {
     const cancelFrame = vi.fn();
-    const focus = vi.spyOn(EditorView.prototype, "focus");
+    const focus = vi
+      .spyOn(EditorView.prototype, "focus")
+      .mockImplementation(() => {});
+    let staleView: EditorView | null = null;
+    const originalDestroy = EditorView.prototype.destroy;
+    const destroy = vi
+      .spyOn(EditorView.prototype, "destroy")
+      .mockImplementation(function (this: EditorView) {
+        staleView = this;
+        originalDestroy.call(this);
+      });
     window.cancelAnimationFrame = cancelFrame;
-    const { unmount } = render(
+    const { rerender } = render(
       <SourceModeEditor
-        filePath="/tmp/focus-frame.md"
+        filePath="/tmp/focus-frame-old.md"
         value={LONG_TEXT}
         onChange={() => {}}
         initialCursor={0}
@@ -311,11 +321,28 @@ describe("SourceModeEditor 初始滚动恢复（#136 方向 B）", () => {
     const lateCallback = rafQueue.at(-1);
     expect(lateCallback).toBeDefined();
 
-    unmount();
+    rerender(
+      <SourceModeEditor
+        filePath="/tmp/focus-frame-new.md"
+        value={LONG_TEXT}
+        onChange={() => {}}
+        initialCursor={0}
+        initialScrollTop={0}
+        spellcheck={false}
+      />,
+    );
 
     expect(cancelFrame).toHaveBeenCalledWith(focusFrame);
+    expect(staleView).not.toBeNull();
+    // 模拟 view 已失效但其 DOM 仍被其他 owner 保留的情况，确保断言检验
+    // isCurrentView，而非仅由 `view.dom.isConnected` 短路。
+    Object.defineProperty(staleView!.dom, "isConnected", {
+      configurable: true,
+      get: () => true,
+    });
     lateCallback?.(0);
     expect(focus).not.toHaveBeenCalled();
+    destroy.mockRestore();
     focus.mockRestore();
   });
 });
