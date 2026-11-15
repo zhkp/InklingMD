@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { CatalogResult, CopyPlanItem } from "../../src/theme/catalog";
+import type { CopyReport } from "../../src/lib/themeFiles";
 
 const {
   buildThemeCatalogMock,
@@ -13,7 +14,7 @@ const {
 } = vi.hoisted(() => ({
   buildThemeCatalogMock: vi.fn(),
   bundledThemesRootMock: vi.fn(async () => "/resources/themes"),
-  copyThemePathMock: vi.fn(async () => undefined),
+  copyThemePathMock: vi.fn(async (): Promise<CopyReport> => ({ files: 0, bytes: 0, skipped: [] })),
   ensureDirMock: vi.fn(async () => undefined),
   readBundledManifestMock: vi.fn(async () => ({ themes: [] })),
   scanThemesDirMock: vi.fn(async () => ({ entries: [], skipped: [], skippedPaths: [], exists: true })),
@@ -74,7 +75,7 @@ describe("theme store missing bundled-source warning count", () => {
     localStorage.clear();
     useTheme.setState({ themeId: "builtin:light", mode: "light", scanIssues: [], scanState: "idle" });
     buildThemeCatalogMock.mockReset().mockResolvedValue(catalogResult());
-    copyThemePathMock.mockReset().mockResolvedValue(undefined);
+    copyThemePathMock.mockReset().mockResolvedValue({ files: 0, bytes: 0, skipped: [] });
     ensureDirMock.mockReset().mockResolvedValue(undefined);
     scanThemesDirMock.mockReset().mockResolvedValue({ entries: [], skipped: [], skippedPaths: [], exists: true });
     showMessageMock.mockReset().mockResolvedValue(undefined);
@@ -166,6 +167,39 @@ describe("theme store missing bundled-source warning count", () => {
     expect(useTheme.getState().scanIssues).toHaveLength(3);
   });
 
+  it("reports symlinks skipped while copying bundled resource directories", async () => {
+    const resourceCopy: CopyPlanItem = {
+      slug: "theme-with-assets",
+      from: "/resources/themes/assets",
+      to: "/app/themes/assets",
+      reason: "运行时缺失",
+    };
+    copyThemePathMock.mockResolvedValueOnce({
+      files: 1,
+      bytes: 4,
+      skipped: [
+        "/resources/themes/assets/fonts/font-link.woff2（符号链接，不跟随）",
+        "/resources/themes/assets/linked-assets（符号链接，不跟随）",
+      ],
+    });
+    buildThemeCatalogMock
+      .mockResolvedValueOnce(catalogResult([], [resourceCopy]))
+      .mockResolvedValueOnce(catalogResult());
+
+    await useTheme.getState().syncThemes();
+
+    expect(buildThemeCatalogMock).toHaveBeenCalledTimes(2);
+    expect(useTheme.getState().scanIssues).toContain(
+      "预装主题资源跳过（theme-with-assets）：/resources/themes/assets/fonts/font-link.woff2（符号链接，不跟随）",
+    );
+    expect(useTheme.getState().scanIssues).toContain(
+      "预装主题资源跳过（theme-with-assets）：/resources/themes/assets/linked-assets（符号链接，不跟随）",
+    );
+    expect(useTheme.getState().scanIssues).toContain(
+      "预装主题已按源副本补齐 1 项（N13：用户改动只落 user:*）",
+    );
+  });
+
   it("preserves mixed supplement results and newly discovered missing paths after rescan", async () => {
     const successfulCopy: CopyPlanItem = {
       slug: "good-theme",
@@ -182,7 +216,7 @@ describe("theme store missing bundled-source warning count", () => {
     const existingMissing = missingSourceIssue("a.css", "alpha");
     const newlyMissing = missingSourceIssue("b.css", "beta");
     copyThemePathMock
-      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce({ files: 1, bytes: 1, skipped: [] })
       .mockRejectedValueOnce(new Error("permission denied"));
     buildThemeCatalogMock
       .mockResolvedValueOnce(catalogResult([existingMissing], [successfulCopy, failedCopy]))

@@ -100,7 +100,7 @@ pub struct CopyReport {
     pub files: usize,
     /// 复制的总字节数
     pub bytes: u64,
-    /// 被跳过的项（符号链接等）
+    /// 被跳过源项的路径（以传入复制根路径为前缀，保留嵌套路径）
     pub skipped: Vec<String>,
 }
 
@@ -138,7 +138,9 @@ fn copy_path_sync(from: &Path, to: &Path) -> Result<CopyReport, String> {
         let child_meta = fs::symlink_metadata(&child).map_err(|e| format!("读取元数据失败: {e}"))?;
         let name = item.file_name().to_string_lossy().into_owned();
         if child_meta.file_type().is_symlink() {
-            report.skipped.push(format!("{}（符号链接，不跟随）", name));
+            report
+                .skipped
+                .push(format!("{}（符号链接，不跟随）", child.display()));
             continue;
         }
         let dest = to.join(&name);
@@ -437,13 +439,52 @@ mod tests {
         let src = temp_dir("copy-src");
         let dest = temp_dir("copy-dest");
         fs::create_dir_all(src.join("vue")).unwrap();
+        fs::create_dir_all(src.join("shared-assets")).unwrap();
         fs::write(src.join("vue.css"), "a{}").unwrap();
         fs::write(src.join("vue").join("f.woff2"), "font").unwrap();
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(
+                src.join("vue.css"),
+                src.join("vue").join("font-link.woff2"),
+            )
+            .unwrap();
+            std::os::unix::fs::symlink(
+                src.join("shared-assets"),
+                src.join("vue").join("linked-assets"),
+            )
+            .unwrap();
+        }
 
         let report = copy_path_sync(&src, &dest.join("themes")).expect("复制成功");
         assert_eq!(report.files, 2);
+        #[cfg(unix)]
+        {
+            assert_eq!(report.skipped.len(), 2);
+            assert!(report.skipped.contains(&format!(
+                "{}（符号链接，不跟随）",
+                src.join("vue").join("font-link.woff2").display()
+            )));
+            assert!(report.skipped.contains(&format!(
+                "{}（符号链接，不跟随）",
+                src.join("vue").join("linked-assets").display()
+            )));
+        }
         assert!(dest.join("themes").join("vue.css").is_file());
         assert!(dest.join("themes").join("vue").join("f.woff2").is_file());
+        #[cfg(unix)]
+        {
+            assert!(!dest
+                .join("themes")
+                .join("vue")
+                .join("font-link.woff2")
+                .exists());
+            assert!(!dest
+                .join("themes")
+                .join("vue")
+                .join("linked-assets")
+                .exists());
+        }
 
         // 覆盖语义：再次复制同名文件（内容更新）
         fs::write(src.join("vue.css"), "b{}").unwrap();

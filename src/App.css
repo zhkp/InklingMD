@@ -396,6 +396,28 @@ button.save-indicator:focus-visible {
   color: var(--text-muted);
   font-size: 0.75rem;
 }
+.theme-scan-issues-details {
+  max-height: 180px;
+  overflow: auto;
+  margin: 2px 4px 5px;
+  padding: 6px 8px 6px 16px;
+  border-left: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+.theme-scan-issues-details:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+.theme-scan-issues-list {
+  margin: 0;
+  padding-left: 1rem;
+}
+.theme-scan-issues-list li + li {
+  margin-top: 0.35rem;
+}
 .export-sep {
   height: 1px;
   background: var(--border);

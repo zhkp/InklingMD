@@ -435,8 +435,12 @@ async function syncThemes(set: SetState, get: GetState): Promise<void> {
     let copied = 0;
     for (const item of catalog.copyPlan) {
       try {
-        await copyThemePath(item.from, item.to);
+        const report = await copyThemePath(item.from, item.to);
         copied += 1;
+        for (const skipped of report.skipped) {
+          const issue = `预装主题资源跳过（${item.slug}）：${skipped}`;
+          if (!issues.includes(issue)) issues.push(issue);
+        }
       } catch (error) {
         // 源副本缺资源目录等情况：登记但不中断其余主题的补齐
         issues.push(`预装主题补齐失败（${item.slug}）：${messageOf(error)}`);
