@@ -9,7 +9,8 @@
 import { expect, test } from "@playwright/test";
 import { PERF_DOC_PATH } from "../inject";
 import { bootWithFiles, openFileInTree } from "../helpers";
-import { countExpectedMathNodes, mathNodeBreakdown } from "../math-nodes";
+import { formulaGate } from "../formula-gate";
+import { countExpectedMathNodes } from "../math-nodes";
 import {
   armTiming,
   createAttributionAggregator,
@@ -51,13 +52,14 @@ for (const tier of ctx.tiers) {
       const expectedFormulaNodes = await countExpectedMathNodes(
         fixture.content,
       );
-      // 计数口径自洽（#375 评审 R5-2）：预期值必须等于 remark-math 的
-      // 块级 + 行内节点之和；这能在启动阶段就抓到「计数实现被改成另一套口径」。
-      const breakdown = await mathNodeBreakdown(fixture.content);
-      expect(
-        expectedFormulaNodes,
-        `${id}：expectedFormulaNodes 与 remark-math 节点拆分不自洽`,
-      ).toBe(breakdown.math + breakdown.inlineMath);
+      // custom 档直接读用户文档：预期值来自只挂 remark-math 的管线，而编辑器
+      // 还挂 GFM 表格与 frontmatter（这两处会吃掉 `$`），实际节点可能少于预期。
+      // 生成档位要求数量精确相等，custom 只要求「真有节点挂载」（#375 评审 R6-1）。
+      // 计数正确性由 `perf-formula-settle.test.ts` 对 remark-math 的边界用例锁定；
+      // 这里不再写 `expected === breakdown.math + inlineMath`——两者同源，是恒真断言。
+      const gate = formulaGate(kind, expectedFormulaNodes);
+      const strictCount = gate.strict;
+      const formulaMinNodes = gate.minNodes;
       const probe = createSessionProbe();
       const attribution = createAttributionAggregator();
       const ttiSamples: number[] = [];
@@ -92,6 +94,9 @@ for (const tier of ctx.tiers) {
         const formula = await page.evaluate(waitFormulaSettled, {
           maxFrames: 1800,
           expectedNodes: expectedFormulaNodes,
+          // 就绪阈值与「预期数」分开：custom 按下界等待，否则口径多算会
+          // 跑满 1800 帧并把整轮判成 UNMEASURED（#375 评审 R6-1）
+          minNodes: formulaMinNodes,
         });
         const observersAfterFormula = await page.evaluate(readObservers);
         const buckets = await page.evaluate(readPerfProbe);
@@ -118,40 +123,27 @@ for (const tier of ctx.tiers) {
           // （#379 评审 R4）：帧预算耗尽时 formula.at 只是超时时刻，拿它当
           // formulaReadyMs 等于把「还没渲染完」记成「渲染耗时」。测量失败就判红
           // ——本轮不落 raw，场景按「未测量」处理（exit 2）。
-          if (expectedFormulaNodes > 0) {
-            // custom 档直接读用户文档（#375 终审 F3）：预期值来自「只挂了
-            // remark-math」的解析管线，而编辑器还挂 GFM 表格与 frontmatter，
-            // 这两处会把 `$` 吃掉（表格跨单元格、frontmatter 内的 `$`）。
-            // 因此 custom 只做下界断言——「有公式标记就必须真的挂载出节点」，
-            // 不要求数量精确相等，避免用户文档被假判 UNMEASURED。
-            const strictCount = kind !== "custom";
-            const lowerBound = strictCount ? expectedFormulaNodes : 1;
+          if (expectedFormulaNodes > 0 && strictCount) {
+            // 生成档位：预期数与编辑器实际挂载必须精确相等（计数低估=漏算，
+            // 高估=假 UNMEASURED）。custom 档不做数量断言——预期值来自只挂
+            // remark-math 的管线，编辑器还挂 GFM 表格与 frontmatter，数量
+            // 差异无法区分「口径」与「漏挂」，只披露不判红（#375 评审 R6-1）。
             expect(
               formula.nodeViews,
               `${id}：预期 ${expectedFormulaNodes} 个公式节点，实际只挂载 ` +
                 `${formula.nodeViews} 个（等待 ${formula.frames} 帧），按 UNMEASURED 处理`,
-            ).toBeGreaterThanOrEqual(lowerBound);
-            // 上界校验（#375 评审 R5-2）：重新从页面里数一遍实际 NodeView。
-            // 生成档位必须与预期精确相等（计数低估=漏算，高估=假 UNMEASURED）；
-            // custom 只要求已挂载（口径差异见上）。
+            ).toBeGreaterThanOrEqual(expectedFormulaNodes);
             const actualFormulaNodes = await page.evaluate(
               () =>
                 document.querySelectorAll(
                   "[data-math-inline], [data-math-display]",
                 ).length,
             );
-            if (strictCount) {
-              expect(
-                expectedFormulaNodes,
-                `${id}：公式节点预期 ${expectedFormulaNodes} 与编辑器实际挂载 ` +
-                  `${actualFormulaNodes} 不一致，计数口径与 remark-math 分叉`,
-              ).toBe(actualFormulaNodes);
-            } else {
-              expect(
-                actualFormulaNodes,
-                `${id}：custom 文档有公式标记，但编辑器一个公式 NodeView 都没挂载`,
-              ).toBeGreaterThan(0);
-            }
+            expect(
+              expectedFormulaNodes,
+              `${id}：公式节点预期 ${expectedFormulaNodes} 与编辑器实际挂载 ` +
+                `${actualFormulaNodes} 不一致，计数口径与 remark-math 分叉`,
+            ).toBe(actualFormulaNodes);
           }
           expect(
             formula.complete,
@@ -162,7 +154,9 @@ for (const tier of ctx.tiers) {
           // custom 档允许「口径多算」：此时 unmeasured 可能为 true，
           // 但那是计数口径差异而非渲染未完成，按「公式归因未测量」披露，
           // 不把整个场景判红（生成档位仍严格要求 false）。
-          if (kind !== "custom") {
+          // 注意：complete 现在就绪阈值用的是 formulaMinNodes，custom 不会
+          // 因为数量差异跑满帧预算，所以这条断言对 custom 也可达且必须为 true。
+          if (strictCount) {
             expect(
               formula.unmeasured,
               `${id}：公式节点未挂载却被判为已完成（UNMEASURED）`,

@@ -536,15 +536,27 @@ export function waitFormulaSettled(opts: {
    * 直接沿用 #376 的测量结论。纯文本档传 0 仍可合法完成。
    */
   expectedNodes?: number;
+  /**
+   * 判定「节点已挂载」的下界（#375 评审 R6-1）。缺省等于 `expectedNodes`。
+   *
+   * custom 档直接读用户文档：预期值来自只挂 remark-math 的管线，而编辑器还挂
+   * GFM 表格与 frontmatter，这两处会吃掉 `$`，实际节点数可能少于预期。此时
+   * 完整 expected 会让等待跑满帧预算并假判 UNMEASURED；传入下界（1）后
+   * 只要真有节点挂载就算 ready，数量差异由 `unmeasured` 单独披露。
+   */
+  minNodes?: number;
 }): Promise<{
   at: number;
   nodeViews: number;
   rendered: number;
   empty: number;
   frames: number;
-  /** 是否真的等到了完成条件；false = 帧预算耗尽（超时） */
+  /** 是否真的等到了完成条件（节点就绪 + 渲染完全）；false = 帧预算耗尽 */
   complete: boolean;
-  /** 预期有公式但节点始终未挂载 → 未测量，不是「渲染耗时」 */
+  /**
+   * 预期有公式但实际节点数少于预期 → 口径差异或未挂载，不是「渲染耗时」。
+   * 与 `complete` 解耦：custom 档可能 complete=true 同时 unmeasured=true。
+   */
   unmeasured: boolean;
 }> {
   /** 逐帧重读 DOM：节点数/KaTeX 输出/空公式都可能在首次采样之后才出现 */
@@ -560,6 +572,13 @@ export function waitFormulaSettled(opts: {
     ).length,
   });
   const expected = Math.max(0, Math.floor(opts.expectedNodes ?? 0));
+  const minNodes = Math.max(
+    0,
+    Math.min(
+      expected,
+      Math.floor(opts.minNodes ?? expected),
+    ),
+  );
   let frames = 0;
   return new Promise<{
     at: number;
@@ -572,11 +591,11 @@ export function waitFormulaSettled(opts: {
   }>((resolve) => {
     const settle = (): void => {
       const dom = readDom();
-      // 纯文本档不要求节点数；含公式档必须等到预期节点真的挂载
-      const nodesReady = expected === 0 || dom.nodeViews >= expected;
+      // 纯文本档不要求节点数；含公式档必须等到 `minNodes` 真的挂载
+      const nodesReady = minNodes === 0 || dom.nodeViews >= minNodes;
       const complete =
         nodesReady &&
-        (expected === 0 || dom.nodeViews > 0) &&
+        (minNodes === 0 || dom.nodeViews > 0) &&
         dom.rendered + dom.empty >= dom.nodeViews;
       // 超时与完成必须区分（#379 评审 P1）：帧预算耗尽时 `at` 只是超时时刻，
       // 拿它当 formulaReadyMs 会把「还没渲染完」记成「渲染耗时」。
@@ -586,8 +605,8 @@ export function waitFormulaSettled(opts: {
           ...dom,
           frames,
           complete,
-          unmeasured:
-            !complete && expected > 0 && dom.nodeViews < expected,
+          // 数量差异独立于完成判定：custom 档可以 complete 但少于预期
+          unmeasured: expected > 0 && dom.nodeViews < expected,
         });
         return;
       }

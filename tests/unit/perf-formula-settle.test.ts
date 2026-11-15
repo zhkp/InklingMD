@@ -6,6 +6,9 @@
 // 这里锁死：超时必须被标成 complete=false，完成才标 true。
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { formulaGate } from "../perf/formula-gate.js";
 import { countExpectedMathNodes } from "../perf/math-nodes.js";
 import { waitFormulaSettled } from "../perf/metrics.js";
 
@@ -122,6 +125,31 @@ describe("waitFormulaSettled 完成条件（#379 评审 P1）", () => {
     expect(result.complete).toBe(false);
     expect(result.unmeasured).toBe(true);
   });
+
+  it("custom 口径多算：minNodes 下界就绪即完成，但 unmeasured 仍披露数量差异（#375 评审 R6-1）", async () => {
+    // 预期 3 个、实际只有 1 个且已渲染：GFM 表格 / frontmatter 吃掉 `$` 的真实形态
+    formulaNode(true);
+    const result = await waitFormulaSettled({
+      maxFrames: 0,
+      expectedNodes: 3,
+      minNodes: 1,
+    });
+    expect(result.nodeViews).toBe(1);
+    expect(result.complete).toBe(true);
+    // 完成 ≠ 数量达标：口径差异必须继续可披露
+    expect(result.unmeasured).toBe(true);
+  });
+
+  it("反向锁：把就绪阈值退回完整 expected（旧守卫）时同场景必红", async () => {
+    // 与上一条同 fixture，仅去掉 minNodes——这正是 R6-1 修复前的行为
+    formulaNode(true);
+    const result = await waitFormulaSettled({
+      maxFrames: 0,
+      expectedNodes: 3,
+    });
+    expect(result.complete).toBe(false);
+    expect(result.unmeasured).toBe(true);
+  });
 });
 
 // #379 评审 R4 / 验收 F5：custom 档直接读用户文档，预期节点数不能把
@@ -158,6 +186,25 @@ describe("countExpectedMathNodes（公式前提计数）", () => {
     expect(await countExpectedMathNodes("\tconst a = $5 + $9;")).toBe(0);
     expect(await countExpectedMathNodes("    $$\n    $x$\n    $$")).toBe(0);
     expect(await countExpectedMathNodes("  ```\n  $x$\n  ```")).toBe(0);
+  });
+
+  it("真实 custom 文档（frontmatter + GFM 表格跨格 $）：计数偏大，但门禁不下数量约束（R6-1）", async () => {
+    // 这份 fixture 就是评审复现用的形态：编辑器把 frontmatter 解析成 yaml、
+    // 把 GFM 表格按单元格拆，两处的 `$` 都不会生成 NodeView；而只挂
+    // remark-math 的计数器会各算 1 个。
+    const md = readFileSync(
+      resolve(__dirname, "../perf/fixtures/custom-math-edge.md"),
+      "utf8",
+    );
+    expect(md).toContain("title: $x + y$"); // frontmatter 里的 $
+    expect(md).toContain("| $a$ | b$ |"); // 表格跨格的 $
+    expect(await countExpectedMathNodes(md)).toBe(4);
+    // 关键：custom 的就绪阈值必须是 0，否则「预期 4 / 实际 2」会跑满帧预算
+    // 并返回 complete=false，把整轮判红——正是评审复现的 exit 2。
+    expect(formulaGate("custom", 4)).toEqual({ strict: false, minNodes: 0 });
+    // 生成档位仍要求数量精确
+    expect(formulaGate("rich", 4)).toEqual({ strict: true, minNodes: 4 });
+    expect(formulaGate("plain", 0)).toEqual({ strict: true, minNodes: 0 });
   });
 
   it("块级边界与 remark-math 完全对账（#375 评审 R5-2）", async () => {
