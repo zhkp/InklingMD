@@ -9,7 +9,7 @@
 import { expect, test } from "@playwright/test";
 import { PERF_DOC_PATH } from "../inject";
 import { bootWithFiles, openFileInTree } from "../helpers";
-import { formulaGate } from "../formula-gate";
+import { formulaGate, formulaWaitOptions } from "../formula-gate";
 import { countExpectedMathNodes } from "../math-nodes";
 import {
   armTiming,
@@ -61,7 +61,6 @@ for (const tier of ctx.tiers) {
       // 这里不再写 `expected === breakdown.math + inlineMath`——两者同源，是恒真断言。
       const gate = formulaGate(kind, expectedFormulaNodes);
       const strictCount = gate.strict;
-      const formulaMinNodes = gate.minNodes;
       const probe = createSessionProbe();
       const attribution = createAttributionAggregator();
       const ttiSamples: number[] = [];
@@ -93,13 +92,13 @@ for (const tier of ctx.tiers) {
 
         // TTI 的既有口径不变（上面已读完判定用观测值）；公式归因在其后单独等待：
         // KaTeX 动态导入可能在 TTI 之后才落地，若不等待就会把「还没渲染」记成「零成本」。
-        const formula = await page.evaluate(waitFormulaSettled, {
-          maxFrames: 1800,
-          expectedNodes: expectedFormulaNodes,
-          // 就绪阈值与「预期数」分开：custom 按下界等待，否则口径多算会
-          // 跑满 1800 帧并把整轮判成 UNMEASURED（#375 评审 R6-1）
-          minNodes: formulaMinNodes,
-        });
+        // 参数统一由 formulaWaitOptions 构造（#375 评审 R8-1）：就地拼盘时
+        // `minNodes` 这一行被删掉也不会被任何单测/CI 场景抓到（默认场景都是
+        // 生成档，minNodes 缺省即等于 expected）。纯函数 + 接线断言把这条锁死。
+        const formula = await page.evaluate(
+          waitFormulaSettled,
+          formulaWaitOptions(kind, expectedFormulaNodes),
+        );
         const observersAfterFormula = await page.evaluate(readObservers);
         const buckets = await page.evaluate(readPerfProbe);
 

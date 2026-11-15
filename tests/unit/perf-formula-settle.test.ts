@@ -8,7 +8,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { formulaGate } from "../perf/formula-gate.js";
+import {
+  FORMULA_MAX_FRAMES,
+  formulaGate,
+  formulaWaitOptions,
+} from "../perf/formula-gate.js";
 import { countExpectedMathNodes } from "../perf/math-nodes.js";
 import { waitFormulaSettled } from "../perf/metrics.js";
 
@@ -154,10 +158,11 @@ describe("waitFormulaSettled 完成条件（#379 评审 P1）", () => {
     expect(result.unmeasured).toBe(true);
   });
 
-  it("反向锁：把就绪阈值退回完整 expected（旧守卫）时同场景必红", async () => {
+  it("这是 wait 层的行为锁（不是 open.spec 接线锁）：缺省 minNodes 等于完整 expected 时必须超时", async () => {
     // 与上面两条同 fixture，仅去掉 minNodes（= expected）——这正是 R6-1 修复前的行为。
-    // 有节点、零节点两种形态都必须失败，否则「删掉 open.spec 的 minNodes 传递」
-    // 不会被任何用例抓到。
+    // 有节点、零节点两种形态都失败，锁定「waitFormulaSettled 的默认值仍是严格守卫」。
+    // 注意：它**不能**证明 open.spec 把 minNodes 传下去了——那条接线由下面的
+    // `formulaWaitOptions` 纯函数测试 + open.spec 源码断言负责（#375 评审 R8-1）。
     formulaNode(true);
     const withNodes = await waitFormulaSettled({
       maxFrames: 0,
@@ -173,6 +178,40 @@ describe("waitFormulaSettled 完成条件（#379 评审 P1）", () => {
     });
     expect(noNodes.complete).toBe(false);
     expect(noNodes.unmeasured).toBe(true);
+  });
+});
+
+// #375 评审 R8-1：`open.spec` 的等待参数必须由 formulaWaitOptions 构造。
+// 就地拼盘的写法里，`minNodes` 那一行被删掉后：formula-gate 单测仍绿、
+// waitFormulaSettled 的默认值单测仍绿、CI 的 18 个生成档场景仍绿，
+// 只有手动跑 custom 才会红——所以这里既锁纯函数，也锁源码接线。
+describe("formulaWaitOptions（生产接线）", () => {
+  it("custom 无数量门禁、生成档位用完整预期", () => {
+    expect(formulaWaitOptions("custom", 4)).toEqual({
+      maxFrames: FORMULA_MAX_FRAMES,
+      expectedNodes: 4,
+      minNodes: 0,
+    });
+    expect(formulaWaitOptions("rich", 76)).toEqual({
+      maxFrames: FORMULA_MAX_FRAMES,
+      expectedNodes: 76,
+      minNodes: 76,
+    });
+    expect(formulaWaitOptions("plain", 0).minNodes).toBe(0);
+  });
+
+  it("open.spec 必须用 formulaWaitOptions 传参，不得就地拼 options", () => {
+    const spec = readFileSync(
+      resolve(__dirname, "../perf/scenarios/open.spec.ts"),
+      "utf8",
+    );
+    // 接线存在：删掉这一行改成字面量对象 / 少传 minNodes 都会让本断言失败
+    expect(spec).toMatch(
+      /waitFormulaSettled,\s*\n\s*formulaWaitOptions\(kind, expectedFormulaNodes\),/,
+    );
+    // 不允许再出现就地拼盘的等待参数（那正是 R8-1 之前可以静默删掉 minNodes 的形态）
+    expect(spec).not.toMatch(/waitFormulaSettled,\s*\{/);
+    expect(spec).not.toContain("minNodes:");
   });
 });
 

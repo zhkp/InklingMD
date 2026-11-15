@@ -29,3 +29,36 @@ export function formulaGate(kind: string, expectedNodes: number): FormulaGate {
     minNodes: strict ? expected : 0,
   };
 }
+
+/** 公式归因等待的帧预算（KaTeX 懒加载 + 逐公式渲染的尾部） */
+export const FORMULA_MAX_FRAMES = 1800;
+
+/** `waitFormulaSettled` 的完整入参 */
+export interface FormulaWaitOptions {
+  maxFrames: number;
+  expectedNodes: number;
+  minNodes: number;
+}
+
+/**
+ * 生产接线唯一入口（#375 评审 R8-1）。
+ *
+ * `open.spec` 只允许 `page.evaluate(waitFormulaSettled, formulaWaitOptions(kind, expected))`，
+ * 不再就地拼 options：就地拼盘时 `minNodes` 这一行可以被删掉而**所有单测仍绿**
+ * （CI 的 18 个默认场景都是生成档，`minNodes` 默认等于 expected，行为不变），
+ * 只有手动跑 custom 才会暴露。抽成纯函数后，参数由单测锁死，接线由
+ * `perf-formula-settle.test.ts` 的源码断言锁死。
+ */
+export function formulaWaitOptions(
+  kind: string,
+  expectedNodes: number,
+): FormulaWaitOptions {
+  const expected = Number.isFinite(expectedNodes)
+    ? Math.max(0, Math.floor(expectedNodes))
+    : 0;
+  return {
+    maxFrames: FORMULA_MAX_FRAMES,
+    expectedNodes: expected,
+    minNodes: formulaGate(kind, expected).minNodes,
+  };
+}
