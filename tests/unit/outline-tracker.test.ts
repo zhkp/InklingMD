@@ -971,4 +971,66 @@ describe("outlineTrackerPlugin 整文档替换的同步刷新（#375 首帧）",
     vi.restoreAllMocks();
     harness.scroller.remove();
   });
+
+  it("销毁时取消初始采样 rAF，切换文档后的迟到回调不发布旧状态", () => {
+    vi.useFakeTimers();
+    const harness = makeHarness();
+    const onChange = vi.fn();
+    const plugin = outlineTrackerPlugin(onChange);
+    const initial = EditorState.create({
+      schema,
+      doc: makeDoc(["一", "二", "三"]),
+      plugins: [plugin],
+    });
+    const positions: number[] = [];
+    initial.doc.descendants((node, pos) => {
+      if (node.type.name === "heading") positions.push(pos);
+      return true;
+    });
+    const asView = (state: EditorState) =>
+      ({
+        dom: harness.editorDom,
+        state,
+        nodeDOM: (pos: number) =>
+          harness.headingEls[positions.indexOf(pos)] ?? null,
+      }) as unknown as EditorView;
+
+    const initialSample: { current: FrameRequestCallback | null } = {
+      current: null,
+    };
+    vi.spyOn(window, "requestAnimationFrame").mockImplementation(((callback) => {
+      initialSample.current = callback;
+      return 17;
+    }) as typeof window.requestAnimationFrame);
+    const cancelFrame = vi
+      .spyOn(window, "cancelAnimationFrame")
+      .mockImplementation(() => {});
+    const pluginView = plugin.spec.view?.(asView(initial));
+    onChange.mockClear();
+
+    const replacement = makeDoc(["甲", "乙", "丙"]);
+    const tr = markOutlineImmediateRefresh(
+      initial.tr.replaceWith(0, initial.doc.content.size, replacement.content),
+      { active: null, anchorPos: null },
+    );
+    const next = initial.apply(tr);
+    pluginView?.update?.(asView(next), initial as never);
+    harness.setScrollTop(650);
+    vi.advanceTimersByTime(200);
+    expect(onChange.mock.calls.at(-1)?.[0]).toEqual(
+      expect.objectContaining({ activeIndex: 2 }),
+    );
+    onChange.mockClear();
+
+    // 若初始回调在销毁后仍运行，它会按顶部 scrollTop 把 activeIndex 改回 0。
+    harness.setScrollTop(0);
+    pluginView?.destroy?.();
+    expect(cancelFrame).toHaveBeenCalledWith(17);
+    initialSample.current?.(0);
+    expect(onChange).not.toHaveBeenCalled();
+
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    harness.scroller.remove();
+  });
 });

@@ -226,6 +226,10 @@ export const outlineTrackerPlugin = (
       // scrollTop 一次性定位（v2.3.4：修复切 tab 后大纲高亮停在顶部、
       // 需手动滚动才恢复——此前重算按选区计算，重灌后选区被钳到文档头）
       let stale = false;
+      let destroyed = false;
+      let currentDoc = view.state.doc;
+      const initialSampleDoc = currentDoc;
+      let initialSampleFrame: number | null = null;
       // 编辑时全文遍历提取标题开销大（万行文档每键 O(n)），防抖到输入停顿后
       let extractTimer: ReturnType<typeof setTimeout> | null = null;
       const scroller = view.dom.closest<HTMLElement>(".editor-scroll");
@@ -266,7 +270,7 @@ export const outlineTrackerPlugin = (
 
       const sampleViewport = () => {
         // 防抖窗口内旧文档的标题集/位置缓存不可用，跳过（见 stale 声明）
-        if (stale) return;
+        if (destroyed || stale) return;
         lastSampleAt = performance.now();
         if (!view.dom.isConnected || !scroller) return;
         // #212：滚动采样路径零几何读取（scrollTop 是滚动状态属性，不触发
@@ -318,15 +322,17 @@ export const outlineTrackerPlugin = (
        */
       let geometryTimer: ReturnType<typeof setTimeout> | null = null;
       const scheduleGeometryRefresh = () => {
-        if (geometryTimer !== null) return;
+        if (destroyed || geometryTimer !== null) return;
         geometryTimer = setTimeout(() => {
           geometryTimer = null;
+          if (destroyed) return;
           refreshGeometryAndSample();
         }, GEO_REFRESH_MS);
       };
 
       /** 滚动停歇后的几何刷新：失效检测 + 批量重建 + 重新采样定位 */
       const refreshGeometryAndSample = () => {
+        if (destroyed) return;
         // 无论谁触发的，几何一旦刷新就取消尚未触发的无条件调度，避免重复重建
         if (geometryTimer !== null) {
           clearTimeout(geometryTimer);
@@ -356,7 +362,7 @@ export const outlineTrackerPlugin = (
       // 停歇后（trailing 200ms），不占滚动帧。
       let restTimer: ReturnType<typeof setTimeout> | null = null;
       const handleScroll = () => {
-        if (!scroller) return;
+        if (destroyed || !scroller) return;
         if (restTimer !== null) clearTimeout(restTimer);
         restTimer = setTimeout(() => {
           restTimer = null;
@@ -365,6 +371,7 @@ export const outlineTrackerPlugin = (
         if (scrollFrame != null) return;
         scrollFrame = requestAnimationFrame(() => {
           scrollFrame = null;
+          if (destroyed) return;
           const elapsed = performance.now() - lastSampleAt;
           if (elapsed >= SAMPLE_MIN_INTERVAL_MS) {
             sampleViewport();
@@ -375,6 +382,7 @@ export const outlineTrackerPlugin = (
             sampleTimer = setTimeout(
               () => {
                 sampleTimer = null;
+                if (destroyed) return;
                 sampleViewport();
               },
               SAMPLE_MIN_INTERVAL_MS - elapsed,
@@ -385,11 +393,24 @@ export const outlineTrackerPlugin = (
       scroller?.addEventListener("scroll", handleScroll, { passive: true });
       // 初始按当前滚动位置采样一次（打开文件恢复 scrollTop=0 时无
       // scroll 事件可触发，靠这里兜底首帧高亮）；初始布局未稳定时由
-      // 停歇路径的 refreshGeometryAndSample 校正
-      requestAnimationFrame(() => sampleViewport());
+      // 停歇路径的 refreshGeometryAndSample 校正。文档在首帧前切换时由
+      // doc identity guard 丢弃旧采样；销毁时取消并由 destroyed guard 兜底。
+      initialSampleFrame = requestAnimationFrame(() => {
+        initialSampleFrame = null;
+        if (
+          destroyed ||
+          !view.dom.isConnected ||
+          currentDoc !== initialSampleDoc
+        ) {
+          return;
+        }
+        sampleViewport();
+      });
 
       return {
         update: (nextView, previousState) => {
+          if (destroyed) return;
+          currentDoc = nextView.state.doc;
           const docChanged = nextView.state.doc !== previousState.doc;
           const selectionChanged = !nextView.state.selection.eq(
             previousState.selection,
@@ -461,7 +482,7 @@ export const outlineTrackerPlugin = (
             if (extractTimer) clearTimeout(extractTimer);
             extractTimer = setTimeout(() => {
               extractTimer = null;
-              if (!view.dom.isConnected) {
+              if (destroyed || !view.dom.isConnected) {
                 stale = false;
                 return;
               }
@@ -494,7 +515,12 @@ export const outlineTrackerPlugin = (
           }
         },
         destroy: () => {
+          destroyed = true;
           scroller?.removeEventListener("scroll", handleScroll);
+          if (initialSampleFrame != null) {
+            cancelAnimationFrame(initialSampleFrame);
+            initialSampleFrame = null;
+          }
           if (scrollFrame != null) cancelAnimationFrame(scrollFrame);
           if (sampleTimer) clearTimeout(sampleTimer);
           if (extractTimer) clearTimeout(extractTimer);

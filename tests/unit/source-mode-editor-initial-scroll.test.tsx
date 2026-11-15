@@ -8,6 +8,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, cleanup } from "@testing-library/react";
+import { EditorView } from "@codemirror/view";
 import { SourceModeEditor } from "../../src/components/Editor/SourceModeEditor";
 import { useSettings } from "../../src/store/settings";
 import { mapScrollTop } from "../../src/lib/source-mode-cursor";
@@ -290,5 +291,31 @@ describe("SourceModeEditor 初始滚动恢复（#136 方向 B）", () => {
     // 现场读数 0 不能覆盖缓存；下游 caretPos 门控也不能被重新打开
     expect(snap?.scrollTop).toBe(500);
     expect(snap?.cursorVisible).toBe(false);
+  });
+
+  it("卸载时取消待执行的 focus rAF，迟到回调不会聚焦已销毁的 view", () => {
+    const cancelFrame = vi.fn();
+    const focus = vi.spyOn(EditorView.prototype, "focus");
+    window.cancelAnimationFrame = cancelFrame;
+    const { unmount } = render(
+      <SourceModeEditor
+        filePath="/tmp/focus-frame.md"
+        value={LONG_TEXT}
+        onChange={() => {}}
+        initialCursor={0}
+        initialScrollTop={0}
+        spellcheck={false}
+      />,
+    );
+    const focusFrame = rafQueue.length;
+    const lateCallback = rafQueue.at(-1);
+    expect(lateCallback).toBeDefined();
+
+    unmount();
+
+    expect(cancelFrame).toHaveBeenCalledWith(focusFrame);
+    lateCallback?.(0);
+    expect(focus).not.toHaveBeenCalled();
+    focus.mockRestore();
   });
 });

@@ -155,6 +155,12 @@ interface SourceModeTransitionOptions {
   getWysiwygTopPos?: () => number;
 }
 
+interface PendingRestoreFrames {
+  filePath: string;
+  cancelled: boolean;
+  frameIds: Set<number>;
+}
+
 /**
  * 管理源码模式的进入/退出过渡。
  * 返回 enterSnapshot（供 SourceModeEditor 挂载时恢复光标）
@@ -181,6 +187,31 @@ export function useSourceModeTransition({
   );
   const getEditorRef = useRef(getEditor);
   getEditorRef.current = getEditor;
+  const currentFilePathRef = useRef(filePath);
+  currentFilePathRef.current = filePath;
+  const currentSourceModeRef = useRef(sourceMode);
+  currentSourceModeRef.current = sourceMode;
+  const mountedRef = useRef(false);
+  const pendingRestoreRef = useRef<PendingRestoreFrames | null>(null);
+  const cancelPendingRestoreRef = useRef<() => void>(() => {});
+  cancelPendingRestoreRef.current = () => {
+    const pending = pendingRestoreRef.current;
+    if (!pending) return;
+    pending.cancelled = true;
+    for (const frameId of pending.frameIds) cancelAnimationFrame(frameId);
+    pending.frameIds.clear();
+    pendingRestoreRef.current = null;
+  };
+
+  // Keep pending exit frames scoped to the mounted file/mode generation. React
+  // runs this cleanup before setting up the next generation and on unmount.
+  useLayoutEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      cancelPendingRestoreRef.current();
+    };
+  }, [filePath, sourceMode]);
 
   useLayoutEffect(() => {
     const prev = prevSourceModeRef.current;
@@ -383,11 +414,44 @@ export function useSourceModeTransition({
           return;
         }
         setEnterSnapshot(null);
-        if (parseOk && snap) {
-          requestAnimationFrame(() => {
-            requestAnimationFrame(() => {
-              const ed = getEditorRef.current();
-              if (!ed) return;
+        if (parseOk && snap && editor) {
+          cancelPendingRestoreRef.current();
+          const task: PendingRestoreFrames = {
+            filePath,
+            cancelled: false,
+            frameIds: new Set(),
+          };
+          pendingRestoreRef.current = task;
+          const isCurrentTask = () =>
+            mountedRef.current &&
+            !task.cancelled &&
+            pendingRestoreRef.current === task &&
+            currentFilePathRef.current === task.filePath &&
+            !currentSourceModeRef.current &&
+            getEditorRef.current() === editor;
+          const finishTask = () => {
+            task.cancelled = true;
+            for (const frameId of task.frameIds) cancelAnimationFrame(frameId);
+            task.frameIds.clear();
+            if (pendingRestoreRef.current === task) {
+              pendingRestoreRef.current = null;
+            }
+          };
+          const scheduleFrame = (callback: () => void) => {
+            const frameId = requestAnimationFrame(() => {
+              task.frameIds.delete(frameId);
+              if (!isCurrentTask()) {
+                finishTask();
+                return;
+              }
+              callback();
+            });
+            task.frameIds.add(frameId);
+          };
+
+          scheduleFrame(() => {
+            scheduleFrame(() => {
+              const ed = editor;
               ed.action((ctx) => {
                 const view = ctx.get(editorViewCtx);
                 const docSize = view.state.doc.content.size;
@@ -422,6 +486,7 @@ export function useSourceModeTransition({
                 // 之后 tab 切走再切回，恢复的是模式切换结束时的位置，
                 // 而非进入源码模式前被容器塌缩钳 0 污染的旧值
                 const persist = (scrollTop: number) => {
+                  if (!isCurrentTask()) return;
                   useWorkspace
                     .getState()
                     .saveCursorState(
@@ -464,7 +529,9 @@ export function useSourceModeTransition({
                     }
                   };
                   const applyScroll = () => {
-                    if (scrollEl.isConnected) scrollEl.scrollTop = computeTarget();
+                    if (isCurrentTask() && scrollEl.isConnected) {
+                      scrollEl.scrollTop = computeTarget();
+                    }
                   };
                   applyScroll();
                   let frames = 0;
@@ -505,22 +572,27 @@ export function useSourceModeTransition({
                     persist(scrollEl.isConnected ? scrollEl.scrollTop : target);
                   };
                   const settle = () => {
-                    if (!scrollEl.isConnected) return;
+                    if (!isCurrentTask() || !scrollEl.isConnected) {
+                      finishTask();
+                      return;
+                    }
                     const target = computeTarget();
                     if (
                       Math.abs(scrollEl.scrollTop - target) < 1 ||
                       ++frames > 30
                     ) {
                       finalize(target);
+                      finishTask();
                       return;
                     }
                     applyScroll();
-                    requestAnimationFrame(settle);
+                    scheduleFrame(settle);
                   };
-                  requestAnimationFrame(settle);
+                  scheduleFrame(settle);
                 } else {
                   // 无滚动容器（罕见）：仍写回源码侧原值，保持记忆与实际一致
                   persist(snap.scrollTop);
+                  finishTask();
                 }
               });
             });
