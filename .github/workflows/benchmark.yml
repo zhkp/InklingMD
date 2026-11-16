@@ -1,9 +1,9 @@
 name: Benchmark
 
-# 独立工作流，刻意不改 build.yml：
-# on: pull_request 作用于整个 workflow，在 build.yml 上加会让每个 PR 触发
-# build-windows / build-linux 的完整 Tauri 双平台打包（每 PR 十几分钟成本），
-# 而仓库现状「PR 不跑 CI」很可能是刻意的成本控制。独立工作流零副作用。
+# 本独立 Benchmark workflow 在 main 目标分支的 PR 上运行；
+# build.yml 对 opened/synchronize/reopened 的 PR 运行，并以 Windows + Linux 矩阵执行 test job。
+# 只有 build-windows / build-linux Tauri 打包 job 用 if 跳过 PR，避免每个 PR 承担打包成本。
+# tests/unit/workflow-triggers.test.ts 静态校验两者的触发条件和打包跳过条件。
 #
 # 测量声明（防「CI 说没回归、用户说卡」的扯皮）：
 # - 运行时 = Playwright chromium + vite dev server（未压缩、含 HMR），绝对值不代表生产构建
