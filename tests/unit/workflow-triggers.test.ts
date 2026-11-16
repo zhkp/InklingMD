@@ -6,6 +6,9 @@ import { describe, expect, it } from "vitest";
 const read = (relativePath: string): string =>
   readFileSync(resolve(process.cwd(), relativePath), "utf8");
 
+const topLevelOnHeaders = (workflow: string): RegExpMatchArray[] =>
+  Array.from(workflow.matchAll(/^on:[ \t]*$/gm));
+
 const eventBlock = (workflow: string, event: string): string => {
   const jobsIndex = workflow.indexOf("\njobs:");
   const triggers = jobsIndex === -1 ? workflow : workflow.slice(0, jobsIndex);
@@ -32,6 +35,12 @@ describe("#413 GitHub Actions PR trigger documentation", () => {
   const benchmark = read(".github/workflows/benchmark.yml");
   const build = read(".github/workflows/build.yml");
 
+  it("requires exactly one valid top-level on key in each workflow", () => {
+    for (const workflow of [benchmark, build]) {
+      expect(topLevelOnHeaders(workflow)).toHaveLength(1);
+    }
+  });
+
   it("compares the Benchmark and Build pull-request filters", () => {
     const benchmarkPR = eventBlock(benchmark, "pull_request");
     const buildPR = eventBlock(build, "pull_request");
@@ -54,7 +63,7 @@ describe("#413 GitHub Actions PR trigger documentation", () => {
   });
 
   it("keeps the benchmark comment from claiming PRs do not run CI", () => {
-    const onHeaders = Array.from(benchmark.matchAll(/^on:[ \t]*$/gm));
+    const onHeaders = topLevelOnHeaders(benchmark);
     expect(onHeaders).toHaveLength(1);
     const onIndex = onHeaders[0]?.index ?? -1;
     expect(onIndex).toBeGreaterThan(0);
