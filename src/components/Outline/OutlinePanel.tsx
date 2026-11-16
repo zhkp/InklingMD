@@ -173,16 +173,13 @@ export function OutlinePanel({ getEditor }: OutlinePanelProps) {
   const setActiveItemRef = useCallback((el: HTMLButtonElement | null) => {
     activeItemRef.current = el;
   }, []);
-  // `getEditor` 由父组件每次渲染新建（内联箭头），不能进 useCallback 依赖：
-  // 否则下面的列表 useMemo 每次都被推翻，等于没缓存。用 ref 延后读取。
-  const getEditorRef = useRef(getEditor);
-  useEffect(() => {
-    getEditorRef.current = getEditor;
-  });
+  // `getEditor` 在 App 侧是 useCallback([]) 的稳定引用（src/App.tsx），
+  // 直接进依赖即可；`currentFile` 必须进依赖，它决定点击滚到哪个文件的编辑器
+  // （#419 评审 B2：之前用 ref 绕开它，真实依赖被藏起来了）。
   const handleClick = useCallback(
     (heading: EditorOutlineHeading) =>
-      scrollToHeading(getEditorRef.current, heading, currentFile),
-    [currentFile],
+      scrollToHeading(getEditor, heading, currentFile),
+    [getEditor, currentFile],
   );
 
   useEffect(() => {
@@ -198,36 +195,45 @@ export function OutlinePanel({ getEditor }: OutlinePanelProps) {
   /**
    * 列表元素缓存（#375 收尾）：两条独立的浪费都要挡掉。
    *
-   * 1. **父级重渲染**：源码模式每键都改内容 → App 重渲染 → `getEditor` 新引用
-   *    → 本面板重渲染。若每次都 `headings.map`，763 个标题的文档每次新建
-   *    763 个 React 元素（dev 下 `jsxDEV` 的元素创建实测吃掉 ~60ms，顶出长任务）。
-   *    用 useMemo 把依赖收到「快照 + 活动项 + 稳定回调」。
+   * 1. **父级重渲染**：源码模式每键都改内容 → App 重渲染 → 本面板重渲染。
+   *    若每次都 `headings.map`，763 个标题的文档每次新建 763 个 React 元素
+   *    （`input-source-L-rich` 实测顶出 ~60ms 长任务）。用 useMemo 把依赖
+   *    收到「快照 + 活动项 + 回调」。
    * 2. **发布引起的整表重建**：大纲发布时 `headings` 是全新对象数组，即便
-   *    文字没变，浅比较也全部失效。这里按 `id` 缓存**元素本身**：标题内容与
-   *    active 都没变时复用同一个 React 元素对象——引用相同，React 直接跳过
-   *    该子树的协调与渲染，只新建真正变化的那几项。DOM 结构仍是完整列表，
-   *    不影响滚动定位与既有断言。
+   *    文字没变，浅比较也全部失效。这里按 `id` 缓存**元素本身**：标题内容、
+   *    active 与回调身份都没变时复用同一个 React 元素对象——引用相同，
+   *    React 直接跳过该子树的协调与渲染，只新建真正变化的那几项。
+   *
+   * 回调身份必须参与命中判定（#419 评审 B1）：`handleClick` 闭包了
+   * `currentFile`，而大纲 id 是 `h-<index>-<slug>`、不含文件路径——两个同构
+   * 文档的 id 逐字段相同，只按标题字段命中的话，换文件后点击会走旧文件的
+   * 滚动处理器（旧文件处理器已注销 → 点了没反应）。
    */
   const elementCache = useRef(new Map<string, CachedOutlineItem>());
+  const callbacks = useMemo(
+    () => ({ onClick: handleClick, activeRef: setActiveItemRef }),
+    [handleClick, setActiveItemRef],
+  );
   const items = useMemo(() => {
     const { elements, cache } = reuseOutlineItems(
       elementCache.current,
       headings,
       activeIndex,
-      (heading, active) => (
+      callbacks,
+      (heading, active, bound) => (
         <OutlineItem
           key={heading.id}
           heading={heading}
           active={active}
-          activeRef={setActiveItemRef}
-          onClick={handleClick}
+          activeRef={bound.activeRef}
+          onClick={bound.onClick}
         />
       ),
     );
     // 只保留当前文档的缓存，切文件不会累积
     elementCache.current = cache;
     return elements;
-  }, [headings, activeIndex, handleClick, setActiveItemRef]);
+  }, [headings, activeIndex, callbacks]);
 
   return (
     <aside className="outline-panel">
