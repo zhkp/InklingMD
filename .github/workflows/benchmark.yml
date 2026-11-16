@@ -2,7 +2,8 @@ name: Benchmark
 
 # 本独立 Benchmark workflow 在 main 目标分支的 PR 上运行；
 # build.yml 对 opened/synchronize/reopened 的 PR 运行，并以 Windows + Linux 矩阵执行 test job。
-# 只有 build-windows / build-linux Tauri 打包 job 用 if 跳过 PR，避免每个 PR 承担打包成本。
+# build-windows / build-linux 两个 Tauri 打包 job 显式排除 PR，避免每个 PR 承担打包成本；
+# release-guard / release 仍只在 tag 上执行。
 # tests/unit/workflow-triggers.test.ts 静态校验两者的触发条件和打包跳过条件。
 #
 # 测量声明（防「CI 说没回归、用户说卡」的扯皮）：

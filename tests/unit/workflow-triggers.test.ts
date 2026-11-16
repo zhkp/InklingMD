@@ -54,10 +54,18 @@ describe("#413 GitHub Actions PR trigger documentation", () => {
     expect(testJob).not.toMatch(/^    if:.*pull_request/im);
   });
 
-  it("skips only the two Tauri packaging jobs for pull requests", () => {
+  it("explicitly excludes pull requests from both Tauri packaging jobs", () => {
     for (const job of ["build-windows", "build-linux"]) {
       expect(jobBlock(build, job)).toMatch(
         /^    if: github\.event_name != 'pull_request'\s*$/m,
+      );
+    }
+  });
+
+  it("keeps release jobs restricted to tag pushes", () => {
+    for (const job of ["release-guard", "release"]) {
+      expect(jobBlock(build, job)).toMatch(
+        /^    if: startsWith\(github\.ref, 'refs\/tags\/'\)\s*$/m,
       );
     }
   });
