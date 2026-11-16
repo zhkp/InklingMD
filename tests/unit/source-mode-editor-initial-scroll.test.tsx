@@ -8,6 +8,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, cleanup } from "@testing-library/react";
+import { EditorView } from "@codemirror/view";
 import { SourceModeEditor } from "../../src/components/Editor/SourceModeEditor";
 import { useSettings } from "../../src/store/settings";
 import { mapScrollTop } from "../../src/lib/source-mode-cursor";
@@ -290,5 +291,58 @@ describe("SourceModeEditor 初始滚动恢复（#136 方向 B）", () => {
     // 现场读数 0 不能覆盖缓存；下游 caretPos 门控也不能被重新打开
     expect(snap?.scrollTop).toBe(500);
     expect(snap?.cursorVisible).toBe(false);
+  });
+
+  it("切文件后忽略已取消但迟到的旧 focus rAF", () => {
+    const cancelFrame = vi.fn();
+    const focus = vi
+      .spyOn(EditorView.prototype, "focus")
+      .mockImplementation(() => {});
+    let staleView: EditorView | null = null;
+    const originalDestroy = EditorView.prototype.destroy;
+    const destroy = vi
+      .spyOn(EditorView.prototype, "destroy")
+      .mockImplementation(function (this: EditorView) {
+        staleView = this;
+        originalDestroy.call(this);
+      });
+    window.cancelAnimationFrame = cancelFrame;
+    const { rerender } = render(
+      <SourceModeEditor
+        filePath="/tmp/focus-frame-old.md"
+        value={LONG_TEXT}
+        onChange={() => {}}
+        initialCursor={0}
+        initialScrollTop={0}
+        spellcheck={false}
+      />,
+    );
+    const focusFrame = rafQueue.length;
+    const lateCallback = rafQueue.at(-1);
+    expect(lateCallback).toBeDefined();
+
+    rerender(
+      <SourceModeEditor
+        filePath="/tmp/focus-frame-new.md"
+        value={LONG_TEXT}
+        onChange={() => {}}
+        initialCursor={0}
+        initialScrollTop={0}
+        spellcheck={false}
+      />,
+    );
+
+    expect(cancelFrame).toHaveBeenCalledWith(focusFrame);
+    expect(staleView).not.toBeNull();
+    // 模拟 view 已失效但其 DOM 仍被其他 owner 保留的情况，确保断言检验
+    // isCurrentView，而非仅由 `view.dom.isConnected` 短路。
+    Object.defineProperty(staleView!.dom, "isConnected", {
+      configurable: true,
+      get: () => true,
+    });
+    lateCallback?.(0);
+    expect(focus).not.toHaveBeenCalled();
+    destroy.mockRestore();
+    focus.mockRestore();
   });
 });
