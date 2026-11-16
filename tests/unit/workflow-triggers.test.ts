@@ -43,15 +43,32 @@ describe("#413 GitHub Actions PR trigger documentation", () => {
     expect(buildPR).not.toMatch(/^\s{4}branches:/m);
   });
 
+  it("guards both workflows' push filters and manual triggers", () => {
+    for (const workflow of [benchmark, build]) {
+      const push = eventBlock(workflow, "push");
+      expect(push).toMatch(/^\s{4}branches:\s*\[main\]\s*$/m);
+      expect(push).toMatch(/^\s{4}tags:\s*\[\"v\*\"\]\s*$/m);
+      expect(eventBlock(workflow, "workflow_dispatch")).not.toBe("");
+    }
+    expect(eventBlock(benchmark, "workflow_dispatch")).toContain("profile:");
+  });
+
   it("keeps the benchmark comment from claiming PRs do not run CI", () => {
-    const header = benchmark.slice(0, benchmark.indexOf("\non:"));
-    expect(header).not.toMatch(/PR.{0,16}不跑.{0,16}CI/);
+    const onHeaders = Array.from(benchmark.matchAll(/^on:[ \t]*$/gm));
+    expect(onHeaders).toHaveLength(1);
+    const onIndex = onHeaders[0]?.index ?? -1;
+    expect(onIndex).toBeGreaterThan(0);
+    const header = benchmark.slice(0, onIndex);
+    expect(header).toContain("main 目标分支的 PR");
+    expect(header).not.toMatch(
+      /(?:PR.{0,16}不(?:会)?(?:跑|运行|执行)|不(?:会)?(?:跑|运行|执行).{0,16}PR|不触发|不在\s*PR\s*上(?:运行|执行))/,
+    );
   });
 
   it("keeps the Build test job active on PRs with its Windows/Linux matrix", () => {
     const testJob = jobBlock(build, "test");
     expect(testJob).toContain("os: [windows-latest, ubuntu-latest]");
-    expect(testJob).not.toMatch(/^    if:.*pull_request/im);
+    expect(testJob).not.toMatch(/^ {4}if:/m);
   });
 
   it("explicitly excludes pull requests from both Tauri packaging jobs", () => {
