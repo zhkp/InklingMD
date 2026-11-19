@@ -149,6 +149,24 @@ describe("imageUploadPlugin 粘贴图片", () => {
     );
   });
 
+  it("文档已不在原处：提示图片未插入，编辑区不留下图片节点（#392）", async () => {
+    // Rust 侧锚点校验的 wire 形态：文档被删除/卷卸载后拒绝落盘
+    writeBinaryFileMock.mockRejectedValueOnce("TARGET_MISSING: 目标文件已不存在: /docs/note.md");
+    const plugin = imageUploadPlugin("/docs/note.md");
+    const file = new File([new Uint8Array([1, 2])], "gone.png", {
+      type: "image/png",
+    });
+    (plugin.props.handlePaste as any)(view, makePasteEvent(file));
+    await flushAsync();
+
+    expect(showMessageMock).toHaveBeenCalledWith(
+      expect.stringContaining("文档已不在原处，图片未插入"),
+      { kind: "error" },
+    );
+    // 直接拒绝并保留编辑器内容：不插入指向不存在文件的图片节点
+    expect(view.state.doc.firstChild?.content.firstChild?.type.name).toBe("text");
+  });
+
   it("未保存草稿粘贴超过 512KB 大图给出提示 (#134)", async () => {
     const largeBuffer = new Uint8Array(600 * 1024);
     const file = new File([largeBuffer], "big.png", {

@@ -726,7 +726,7 @@ mod tests {
         let bin_data = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
         let bin_data_base64 =
             base64::engine::general_purpose::STANDARD.encode(&bin_data);
-        write_binary_file_sync(bin_file_str.clone(), bin_data_base64, false).unwrap();
+        write_binary_file_sync(bin_file_str.clone(), bin_data_base64, false, None).unwrap();
         let read_bin = fs::read(&bin_file).unwrap();
         assert_eq!(read_bin, bin_data);
 
@@ -1206,21 +1206,51 @@ mod tests {
         let doc_dir = temp.path.join("docs");
         fs::create_dir(&doc_dir).unwrap();
         let asset = doc_dir.join("assets/x.png");
-        write_binary_file_sync(asset.to_string_lossy().to_string(), png.clone(), true).unwrap();
+        write_binary_file_sync(asset.to_string_lossy().to_string(), png.clone(), true, None).unwrap();
         assert!(asset.is_file());
 
         // 未请求建目录：缺失即报错
         let other = doc_dir.join("other/x.png");
-        let err =
-            write_binary_file_sync(other.to_string_lossy().to_string(), png.clone(), false)
-                .unwrap_err();
+        let err = write_binary_file_sync(other.to_string_lossy().to_string(), png.clone(), false, None)
+            .unwrap_err();
         assert!(err.starts_with(WRITE_ERROR_PARENT_MISSING), "{err}");
 
         // 文档目录本身已被删除：即便请求建目录也不得连带重建
         let gone = temp.path.join("gone/assets/x.png");
-        let err = write_binary_file_sync(gone.to_string_lossy().to_string(), png, true).unwrap_err();
+        let err =
+            write_binary_file_sync(gone.to_string_lossy().to_string(), png, true, None).unwrap_err();
         assert!(err.starts_with(WRITE_ERROR_PARENT_MISSING), "{err}");
         assert!(!temp.path.join("gone").exists());
+    }
+
+    #[test]
+    fn write_binary_rejects_missing_anchor_before_creating_dirs() {
+        let temp = TestDir::new("write_binary_anchor");
+        let png = base64::engine::general_purpose::STANDARD.encode([0x89u8, 0x50, 0x4E, 0x47]);
+
+        // 外接卷卸载后的形态：挂载点（文档所在目录）是系统盘上的空目录，文档本身已不在
+        let mount = temp.path.join("media/usb");
+        fs::create_dir_all(&mount).unwrap();
+        let doc = mount.join("note.md");
+        let asset = mount.join("assets/x.png");
+        let asset_str = asset.to_string_lossy().to_string();
+        let anchor = doc.to_string_lossy().to_string();
+
+        // 锚点存在：正常建一层 assets/ 并写入
+        fs::write(&doc, "A").unwrap();
+        write_binary_file_sync(asset_str.clone(), png.clone(), true, Some(anchor.clone())).unwrap();
+        assert!(asset.is_file());
+
+        // 模拟卷卸载后重新挂载点为空：文档与 assets/ 同时消失
+        fs::remove_dir_all(mount.join("assets")).unwrap();
+        fs::remove_file(&doc).unwrap();
+
+        let err = write_binary_file_sync(asset_str, png, true, Some(anchor)).unwrap_err();
+        assert!(err.starts_with(WRITE_ERROR_TARGET_MISSING), "{err}");
+        assert!(
+            !mount.join("assets").exists(),
+            "锚点缺失时必须先拒绝，不得留下 assets/ 目录"
+        );
     }
 
     #[test]
@@ -1245,14 +1275,14 @@ mod tests {
         let bin_file_str = bin_file.to_string_lossy().to_string();
         let bin_data = vec![0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0];
         let bin_base64 = base64::engine::general_purpose::STANDARD.encode(&bin_data);
-        write_binary_file_sync(bin_file_str.clone(), bin_base64, false).unwrap();
+        write_binary_file_sync(bin_file_str.clone(), bin_base64, false, None).unwrap();
         assert_eq!(fs::read(&bin_file).unwrap(), bin_data);
 
         // 覆盖二进制文件
         let bin_data_updated = vec![0xfe, 0xdc, 0xba, 0x98];
         let bin_base64_updated =
             base64::engine::general_purpose::STANDARD.encode(&bin_data_updated);
-        write_binary_file_sync(bin_file_str.clone(), bin_base64_updated, false).unwrap();
+        write_binary_file_sync(bin_file_str.clone(), bin_base64_updated, false, None).unwrap();
         assert_eq!(fs::read(&bin_file).unwrap(), bin_data_updated);
 
         // 验证没有残留的 .tmp 临时文件
@@ -1267,7 +1297,7 @@ mod tests {
         // 写入非法 base64 应失败且不触碰/创建无效文件
         let invalid_file = temp.path.join("deep/sub/dir/invalid.bin");
         let invalid_file_str = invalid_file.to_string_lossy().to_string();
-        let err = write_binary_file_sync(invalid_file_str, "not-valid-base64!@#$".into(), false)
+        let err = write_binary_file_sync(invalid_file_str, "not-valid-base64!@#$".into(), false, None)
             .unwrap_err();
         assert!(err.contains("Base64 解码失败"));
         assert!(!invalid_file.exists());
@@ -1363,7 +1393,7 @@ mod tests {
 
         // 与 write_binary_file 的传输格式互通：读出的 Base64 能原样写回
         let copy = temp.path.join("copy.png");
-        write_binary_file_sync(copy.to_string_lossy().to_string(), encoded.clone(), false)
+        write_binary_file_sync(copy.to_string_lossy().to_string(), encoded.clone(), false, None)
             .expect("写回应成功");
         assert_eq!(fs::read(&copy).unwrap(), bytes);
     }
@@ -1513,7 +1543,8 @@ fn ensure_parent_dir(parent: &Path, create_parents: bool) -> Result<(), String> 
 }
 
 /// 写入前校验目标：已存在的非普通文件一律拒绝；must_exist 下目标缺失拒绝。
-/// fs::metadata 跟随符号链接：悬空链接按「目标缺失」处理
+/// fs::metadata 跟随符号链接：悬空链接按「目标缺失」处理。
+/// 同一套判定也用于二进制落盘的锚点文档（#392）：锚点缺失即 TARGET_MISSING。
 fn check_write_target(path: &Path, must_exist: bool) -> Result<(), String> {
     match fs::metadata(path) {
         Ok(meta) if meta.is_file() => Ok(()),
@@ -1855,10 +1886,11 @@ pub async fn write_binary_file(
     file_path: String,
     data: String,
     create_parent_dir: Option<bool>,
+    anchor_path: Option<String>,
 ) -> Result<(), String> {
     let create_parent_dir = create_parent_dir.unwrap_or(false);
     tauri::async_runtime::spawn_blocking(move || {
-        write_binary_file_sync(file_path, data, create_parent_dir)
+        write_binary_file_sync(file_path, data, create_parent_dir, anchor_path)
     })
     .await
     .map_err(|e| format!("二进制写入任务失败: {e}"))?
@@ -1866,11 +1898,21 @@ pub async fn write_binary_file(
 
 /// create_parent_dir：父目录缺失时只建「一层」（图片落到文档旁的 assets/），
 /// 且要求上一级目录仍存在——文档所在目录已被删除时不得连带重建（issue #363）
+///
+/// anchor_path：落盘锚点（该资源所属文档）。图片是**新建文件**，没有 must_exist 语义，
+/// 于是外接卷卸载后挂载点退化为系统盘上的空目录时，「祖父目录是目录」仍然成立，
+/// assets/ 会被建到系统盘、卷重新挂载后引用失效（issue #392）。因此锚点必须仍是普通
+/// 文件，缺失即 TARGET_MISSING，且在**创建目录之前**校验——拒绝时要保证什么都没留下。
 fn write_binary_file_sync(
     file_path: String,
     data_base64: String,
     create_parent_dir: bool,
+    anchor_path: Option<String>,
 ) -> Result<(), String> {
+    if let Some(anchor) = anchor_path.as_deref() {
+        check_write_target(Path::new(anchor), true)?;
+    }
+
     let decoded = base64::engine::general_purpose::STANDARD
         .decode(data_base64.trim())
         .map_err(|e| format!("Base64 解码失败: {e}"))?;

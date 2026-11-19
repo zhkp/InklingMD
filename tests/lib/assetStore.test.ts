@@ -1,6 +1,7 @@
 // 图片资源落盘 / 远程下载的前端 IO 层单测（#220）
 //
-// - assetStore.saveImageAsset：内容哈希查重命中复用、未命中写入、查重失败不阻断
+// - assetStore.saveImageAsset：内容哈希查重命中复用、未命中写入、查重失败不阻断、
+//   锚点文档缺失时转成图片场景文案（#392）
 // - lib/fs 桌面分支：download_remote_image / find_asset_by_hash 的 IPC 契约与错误映射
 // - 动态 asset ACL：落盘后的 assets/ 相对路径在渲染时会触发 allow_asset_dir 放行该目录
 //   （#64 的运行时白名单在下载场景下同样生效，#220「放行确认」）
@@ -37,6 +38,7 @@ import {
   resolveImageSrc,
 } from "../../src/lib/fs";
 import { extensionForMime, genAssetName, saveImageAsset, sha256Hex } from "../../src/lib/assetStore";
+import { writeErrorCode } from "../../src/lib/writeErrors";
 
 const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 1, 2, 3]);
 
@@ -86,6 +88,8 @@ describe("saveImageAsset：落盘前按内容查重", () => {
       data: expect.any(String),
       // #363：只允许补建 assets/ 这一层
       createParentDir: true,
+      // #392：锚点文档必须仍在原处，由 Rust 侧校验
+      anchorPath: "/docs/sub/note.md",
     });
   });
 
@@ -105,6 +109,18 @@ describe("saveImageAsset：落盘前按内容查重", () => {
       return null;
     });
     await expect(saveImageAsset("/docs/note.md", PNG, "n.png")).rejects.toThrow("disk full");
+  });
+
+  it("锚点文档已不在原处：抛 TARGET_MISSING 并换成图片场景文案（#392）", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "find_asset_by_hash") return null;
+      // Rust write_binary_file 的 wire 形态：锚点校验失败带 TARGET_MISSING 前缀
+      if (cmd === "write_binary_file") throw "TARGET_MISSING: 目标文件已不存在: /docs/note.md";
+      return undefined;
+    });
+    const err = await saveImageAsset("/docs/note.md", PNG, "n.png").catch((e) => e);
+    expect(writeErrorCode(err)).toBe("TARGET_MISSING");
+    expect(err.message).toBe("文档已不在原处，图片未插入");
   });
 });
 

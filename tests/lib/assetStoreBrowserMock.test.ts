@@ -12,6 +12,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 import { downloadRemoteImage, RemoteImageError, writeBinaryFile } from "../../src/lib/fs";
 import { MOCK_BINARY_FILES, findMockBinaryByHash } from "../../src/lib/mockFs";
 import { saveImageAsset, sha256Hex } from "../../src/lib/assetStore";
+import { writeErrorCode } from "../../src/lib/writeErrors";
 
 const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 7]);
 
@@ -42,6 +43,15 @@ describe("mock 二进制表", () => {
     expect(first).toBe("assets/1.png");
     expect(second).toBe("assets/1.png");
     expect(MOCK_BINARY_FILES.size).toBe(1);
+  });
+
+  it("锚点文档已不在原处：拒绝写入（与 Rust 侧同语义，#392）", async () => {
+    const err = await writeBinaryFile("assets/x.png", PNG, {
+      createParentDir: true,
+      anchorPath: "/mock-workspace/notes/gone.md",
+    }).catch((e) => e);
+    expect(writeErrorCode(err)).toBe("TARGET_MISSING");
+    expect(MOCK_BINARY_FILES.has("assets/x.png")).toBe(false);
   });
 });
 

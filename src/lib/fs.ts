@@ -488,18 +488,33 @@ export function uint8ArrayToBase64(data: Uint8Array): string {
   return btoa(binary);
 }
 
+export interface WriteBinaryOptions {
+  /**
+   * 父目录缺失时只补建一层（如文档旁的 assets/），且要求上一级目录仍存在；
+   * 默认不建目录（issue #363）
+   */
+  createParentDir?: boolean;
+  /**
+   * 落盘锚点：该资源所属文档的完整路径，给了就要求它仍是普通文件。
+   *
+   * 图片是新建文件、没有 `mustExist` 语义，而外接卷卸载后挂载点只是系统盘上的空目录，
+   * 「上一级目录仍存在」照样成立 → assets/ 会被建到系统盘，卷重新挂载后引用失效
+   * （issue #392）。锚点校验由 Rust 侧在**建目录之前**完成，这里不做前端预检，
+   * 避免出现两套判定。
+   */
+  anchorPath?: string;
+}
+
 /**
  * 写入二进制文件（图片等）。
  * 桌面端将数据编码为 base64 后调用 Rust write_binary_file 命令（避免 JSON 数字数组导致的 IPC 膨胀）；
  * 浏览器端无真实 fs，仅返回成功（mock 无法持久化二进制）。
  * @param data 字节数组
- * @param options.createParentDir 父目录缺失时只补建一层（如文档旁的 assets/），
- *   且要求上一级目录仍存在；默认不建目录（issue #363）
  */
 export async function writeBinaryFile(
   filePath: string,
   data: Uint8Array,
-  options: { createParentDir?: boolean } = {},
+  options: WriteBinaryOptions = {},
 ): Promise<void> {
   if (isTauri()) {
     try {
@@ -512,8 +527,12 @@ export async function writeBinaryFile(
       throw mapWriteError(e);
     }
   }
-  // 浏览器 mock：记录到内存二进制表（供 assets 去重与 E2E 断言）
-  const { MOCK_BINARY_FILES } = await import("./mockFs");
+  // 浏览器 mock：记录到内存二进制表（供 assets 去重与 E2E 断言）。
+  // 锚点语义与 Rust 侧一致（#392），否则 E2E 会掩盖「文档已不在原处仍落盘」。
+  const { MOCK_BINARY_FILES, MOCK_FILE_CONTENT } = await import("./mockFs");
+  if (options.anchorPath && !Object.prototype.hasOwnProperty.call(MOCK_FILE_CONTENT, options.anchorPath)) {
+    throw new WriteError("TARGET_MISSING");
+  }
   MOCK_BINARY_FILES.set(filePath, data.slice());
 }
 

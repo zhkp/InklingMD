@@ -8,7 +8,8 @@
 //   父目录或祖先被普通文件占据 → PARENT_NOT_DIR；
 //   目标存在但不是普通文件 → NOT_A_FILE；mustExist=true 且目标缺失 → TARGET_MISSING；
 //   写临时文件 + rename 原子替换
-// - write_binary_file：父目录缺失时仅在 createParentDir=true 且祖父目录存在时建一层
+// - write_binary_file：父目录缺失时仅在 createParentDir=true 且祖父目录存在时建一层；
+//   anchorPath（图片所属文档）必须仍是普通文件，且在**建目录之前**校验（#392）
 // - file_mtime / read_text_file：Path::exists 跟随符号链接，不存在即报错；
 //   file_mtime 对非普通文件（如同名目录）报 NOT_A_FILE
 
@@ -116,7 +117,10 @@ export function createRealFsBackend() {
       checkTarget(filePath, !!mustExist);
       atomicWrite(filePath, Buffer.from(content, "utf8"));
     },
-    write_binary_file: ({ filePath, data, createParentDir }) => {
+    write_binary_file: ({ filePath, data, createParentDir, anchorPath }) => {
+      // #392：锚点（图片所属文档）已不在原处时先拒绝——与 Rust 一致，校验在建目录之前，
+      // 否则外接卷卸载后的空挂载点会留下一个系统盘上的 assets/
+      if (anchorPath) checkTarget(anchorPath, true);
       const parent = nodePath.dirname(filePath);
       if (!isDir(parent)) {
         if (parentBlockedByFile(parent)) {

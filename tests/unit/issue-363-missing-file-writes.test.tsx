@@ -1,5 +1,7 @@
 // issue #363：文件在磁盘上已不存在（外部删除 / 改名 / 目录被删 / 应用内改名或删目录）时，
 // 任何写盘入口（自动保存、Ctrl+S、切回 tab、退出、粘贴图片）都不得静默把它写回磁盘。
+// issue #392：图片是新建文件，额外要求「锚点文档仍在原处」——目录还在但文档没了
+// （外接卷卸载后挂载点退化为空目录）时同样不得落盘。
 // 真实 store + useAutoSave + useFileWatcher + useExitHandler，invoke 接真实临时目录
 // （tests/fixtures/realFsTauriBackend.ts），断言最终磁盘状态与 tab 状态。
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
@@ -52,6 +54,7 @@ import { useAutoSave } from "../../src/lib/useAutoSave";
 import { useFileWatcher } from "../../src/lib/useFileWatcher";
 import { useExitHandler } from "../../src/lib/useExitHandler";
 import { saveImageAsset } from "../../src/lib/assetStore";
+import { writeErrorCode } from "../../src/lib/writeErrors";
 
 let root: string;
 const W = (...p: string[]) => nodePath.join(root, ...p);
@@ -451,7 +454,7 @@ describe("issue #363 / #366：应用内改名、删除目录后的子文件 tab"
   });
 });
 
-describe("issue #363：图片资源写入", () => {
+describe("issue #363 / #392：图片资源写入", () => {
   it("文档所在目录已被删除：粘贴图片失败，不重建目录", async () => {
     nodeFs.mkdirSync(W("dir"));
     nodeFs.writeFileSync(W("dir/a.md"), "A");
@@ -471,5 +474,36 @@ describe("issue #363：图片资源写入", () => {
       saveImageAsset(W("dir/a.md"), new Uint8Array([137, 80, 78, 71]), "x.png"),
     ).resolves.toBe("assets/x.png");
     expect(nodeFs.existsSync(W("dir/assets/x.png"))).toBe(true);
+  });
+
+  it("文档已被删除但目录仍在（外接卷卸载后的空挂载点）：拒绝写入，不创建 assets/（#392）", async () => {
+    // 卷卸载后 /media/usb 退化为系统盘上的空目录：文档与卷上的 assets/ 一起消失
+    nodeFs.mkdirSync(W("media/usb"), { recursive: true });
+    nodeFs.writeFileSync(W("media/usb/note.md"), "A");
+    nodeFs.rmSync(W("media/usb/note.md"));
+
+    const err = await saveImageAsset(
+      W("media/usb/note.md"),
+      new Uint8Array([137, 80, 78, 71]),
+      "x.png",
+    ).catch((e) => e);
+
+    expect(writeErrorCode(err)).toBe("TARGET_MISSING");
+    expect(err.message).toBe("文档已不在原处，图片未插入");
+    expect(nodeFs.existsSync(W("media/usb/assets"))).toBe(false);
+    // 文档本身不得被这次图片写入「复活」，挂载点也不得留下其它产物
+    expect(nodeFs.existsSync(W("media/usb/note.md"))).toBe(false);
+    expect(nodeFs.readdirSync(W("media/usb"))).toEqual([]);
+  });
+
+  it("文档已删除、assets/ 仍在：不走进「目录已存在」捷径，同样拒绝（#392）", async () => {
+    nodeFs.mkdirSync(W("docs/assets"), { recursive: true });
+    nodeFs.writeFileSync(W("docs/a.md"), "A");
+    nodeFs.rmSync(W("docs/a.md"));
+
+    await expect(
+      saveImageAsset(W("docs/a.md"), new Uint8Array([137, 80, 78, 71]), "x.png"),
+    ).rejects.toThrow("文档已不在原处，图片未插入");
+    expect(nodeFs.readdirSync(W("docs/assets"))).toEqual([]);
   });
 });
