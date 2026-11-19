@@ -16,6 +16,10 @@ const { resolvePathFromDocumentMock, writeBinaryFileMock, showMessageMock } = vi
 vi.mock("../../src/lib/fs", () => ({
   resolvePathFromDocument: resolvePathFromDocumentMock,
   writeBinaryFile: writeBinaryFileMock,
+  // #392：复用既有资源前要确认文档仍在原处；本文件只测粘贴插入链路，
+  // 给一个「文档存在 + 查重未命中」的固定前提，锚点语义在 assetStore 单测里覆盖
+  findAssetByHash: async () => null,
+  fileStat: async () => ({ mtimeUs: 1, size: 1 }),
 }));
 
 vi.mock("../../src/lib/dialogs", () => ({

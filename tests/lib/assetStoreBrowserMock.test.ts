@@ -53,6 +53,28 @@ describe("mock 二进制表", () => {
     expect(writeErrorCode(err)).toBe("TARGET_MISSING");
     expect(MOCK_BINARY_FILES.has("assets/x.png")).toBe(false);
   });
+
+  it("空串锚点按「缺失」拒绝，与 Rust Some(\"\") 同判（#392 复核 F3）", async () => {
+    const err = await writeBinaryFile("assets/x.png", PNG, { anchorPath: "" }).catch((e) => e);
+    expect(writeErrorCode(err)).toBe("TARGET_MISSING");
+    expect(MOCK_BINARY_FILES.has("assets/x.png")).toBe(false);
+  });
+
+  it("目录型锚点报 NOT_A_FILE，与 check_write_target 分类一致（#392 复核 F3）", async () => {
+    const err = await writeBinaryFile("assets/x.png", PNG, {
+      anchorPath: "/mock-workspace/notes",
+    }).catch((e) => e);
+    expect(writeErrorCode(err)).toBe("NOT_A_FILE");
+    expect(MOCK_BINARY_FILES.has("assets/x.png")).toBe(false);
+  });
+
+  it("查重命中但文档已不在原处：不返回复用路径（#392 复核 F1）", async () => {
+    await saveImageAsset("/mock-workspace/notes/readme.md", PNG, "1.png");
+    const err = await saveImageAsset("/mock-workspace/notes/gone.md", PNG, "2.png").catch((e) => e);
+    expect(writeErrorCode(err)).toBe("TARGET_MISSING");
+    expect(MOCK_BINARY_FILES.size).toBe(1);
+    expect(MOCK_BINARY_FILES.has("assets/2.png")).toBe(false);
+  });
 });
 
 describe("mock 远程下载（fetch，no-referrer）", () => {

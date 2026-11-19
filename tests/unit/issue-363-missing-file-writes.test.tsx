@@ -506,4 +506,21 @@ describe("issue #363 / #392：图片资源写入", () => {
     ).rejects.toThrow("文档已不在原处，图片未插入");
     expect(nodeFs.readdirSync(W("docs/assets"))).toEqual([]);
   });
+
+  it("文档已删除、assets/ 里有同内容图片：查重不得绕过锚点（#392 复核 F1）", async () => {
+    // 先正常落盘一张图，再模拟卷卸载后「系统盘挂载点上残留旧文件 + 文档消失」
+    const png = new Uint8Array([137, 80, 78, 71]);
+    nodeFs.mkdirSync(W("docs"));
+    nodeFs.writeFileSync(W("docs/a.md"), "A");
+    await expect(saveImageAsset(W("docs/a.md"), png, "x.png")).resolves.toBe("assets/x.png");
+    nodeFs.rmSync(W("docs/a.md"));
+
+    // 同一张图再粘贴：查重会命中 docs/assets/x.png，但文档已不在原处，必须拒绝而不是复用
+    const err = await saveImageAsset(W("docs/a.md"), png, "y.png").catch((e) => e);
+    expect(writeErrorCode(err)).toBe("TARGET_MISSING");
+    expect(err.message).toBe("文档已不在原处，图片未插入");
+    // 拒绝路径不得产生新副本（y.png 不应落盘）
+    expect(nodeFs.existsSync(W("docs/assets/y.png"))).toBe(false);
+    expect(nodeFs.readdirSync(W("docs/assets"))).toEqual(["x.png"]);
+  });
 });

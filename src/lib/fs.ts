@@ -499,8 +499,8 @@ export interface WriteBinaryOptions {
    *
    * 图片是新建文件、没有 `mustExist` 语义，而外接卷卸载后挂载点只是系统盘上的空目录，
    * 「上一级目录仍存在」照样成立 → assets/ 会被建到系统盘，卷重新挂载后引用失效
-   * （issue #392）。锚点校验由 Rust 侧在**建目录之前**完成，这里不做前端预检，
-   * 避免出现两套判定。
+   * （issue #392）。写入路径上的锚点校验由 Rust 侧在**建目录之前**完成，前端不重复判定；
+   * 复用既有资源（不写盘）那条路径由 `assetStore` 自行补一次判定。
    */
   anchorPath?: string;
 }
@@ -508,7 +508,8 @@ export interface WriteBinaryOptions {
 /**
  * 写入二进制文件（图片等）。
  * 桌面端将数据编码为 base64 后调用 Rust write_binary_file 命令（避免 JSON 数字数组导致的 IPC 膨胀）；
- * 浏览器端无真实 fs，仅返回成功（mock 无法持久化二进制）。
+ * 浏览器 mock 记录到 `MOCK_BINARY_FILES`（供 assets 去重与 E2E 断言），并复刻锚点语义：
+ * 给了 `anchorPath` 但它不在 mock 内容表里时抛 `TARGET_MISSING`。
  * @param data 字节数组
  */
 export async function writeBinaryFile(
@@ -528,10 +529,15 @@ export async function writeBinaryFile(
     }
   }
   // 浏览器 mock：记录到内存二进制表（供 assets 去重与 E2E 断言）。
-  // 锚点语义与 Rust 侧一致（#392），否则 E2E 会掩盖「文档已不在原处仍落盘」。
-  const { MOCK_BINARY_FILES, MOCK_FILE_CONTENT } = await import("./mockFs");
-  if (options.anchorPath && !Object.prototype.hasOwnProperty.call(MOCK_FILE_CONTENT, options.anchorPath)) {
-    throw new WriteError("TARGET_MISSING");
+  // 锚点语义与 Rust 侧一致（#392），否则 E2E 会掩盖「文档已不在原处仍落盘」：
+  // - `!== undefined` 而非真值判断：空串在 Rust 侧是 Some("") → 元数据取不到 → 拒绝；
+  // - 目录型锚点映射为 NOT_A_FILE，与 check_write_target 的分类对齐。
+  const { MOCK_BINARY_FILES, MOCK_FILE_CONTENT, MOCK_TREE, findNode } = await import("./mockFs");
+  if (options.anchorPath !== undefined) {
+    const anchor = options.anchorPath;
+    if (!Object.prototype.hasOwnProperty.call(MOCK_FILE_CONTENT, anchor)) {
+      throw new WriteError(findNode(MOCK_TREE, anchor)?.is_dir ? "NOT_A_FILE" : "TARGET_MISSING");
+    }
   }
   MOCK_BINARY_FILES.set(filePath, data.slice());
 }

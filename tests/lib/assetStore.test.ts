@@ -77,6 +77,22 @@ describe("saveImageAsset：落盘前按内容查重", () => {
       size: PNG.byteLength,
       sha256: await sha256Hex(PNG),
     });
+    // #392：复用不写盘，锚点只能在这一条路径上单独确认
+    expect(invokeMock).toHaveBeenCalledWith("file_stat", { filePath: "/docs/note.md" });
+    expect(invokeMock).not.toHaveBeenCalledWith("write_binary_file", expect.anything());
+  });
+
+  it("命中但文档已不在原处：不返回复用路径，抛 TARGET_MISSING（#392 复核 F1）", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "find_asset_by_hash") return "old-shot.png";
+      // 卷卸载 / 文档被删：file_stat 走读路径的 notFound
+      if (cmd === "file_stat") throw { code: "notFound", message: "文件不存在: /docs/note.md" };
+      return undefined;
+    });
+    const err = await saveImageAsset("/docs/note.md", PNG, "new.png").catch((e) => e);
+    expect(writeErrorCode(err)).toBe("TARGET_MISSING");
+    expect(err.message).toBe("文档已不在原处，图片未插入");
+    // 不得「复用一个卷重挂后并不存在的引用」，也不得退化成新写一份
     expect(invokeMock).not.toHaveBeenCalledWith("write_binary_file", expect.anything());
   });
 

@@ -10,9 +10,12 @@
 //   写临时文件 + rename 原子替换
 // - write_binary_file：父目录缺失时仅在 createParentDir=true 且祖父目录存在时建一层；
 //   anchorPath（图片所属文档）必须仍是普通文件，且在**建目录之前**校验（#392）
+// - find_asset_by_hash：按大小 + SHA-256 在目录直接子文件中查找，目录不存在返回 null
+//   （#220 去重的真实语义，让「查重命中」分支也能在真实磁盘上被测到）
 // - file_mtime / read_text_file：Path::exists 跟随符号链接，不存在即报错；
 //   file_mtime 对非普通文件（如同名目录）报 NOT_A_FILE
 
+import * as nodeCrypto from "node:crypto";
 import * as nodeFs from "node:fs";
 import * as nodePath from "node:path";
 
@@ -119,8 +122,9 @@ export function createRealFsBackend() {
     },
     write_binary_file: ({ filePath, data, createParentDir, anchorPath }) => {
       // #392：锚点（图片所属文档）已不在原处时先拒绝——与 Rust 一致，校验在建目录之前，
-      // 否则外接卷卸载后的空挂载点会留下一个系统盘上的 assets/
-      if (anchorPath) checkTarget(anchorPath, true);
+      // 否则外接卷卸载后的空挂载点会留下一个系统盘上的 assets/。
+      // 用 `!== undefined` 而非真值判断：空串在 Rust 侧是 Some("")，元数据取不到 → 拒绝
+      if (anchorPath !== undefined) checkTarget(anchorPath, true);
       const parent = nodePath.dirname(filePath);
       if (!isDir(parent)) {
         if (parentBlockedByFile(parent)) {
@@ -204,7 +208,17 @@ export function createRealFsBackend() {
     },
     rename_path: ({ from, to }) => nodeFs.renameSync(from, to),
     delete_path: ({ path }) => nodeFs.rmSync(path, { recursive: true }),
-    find_asset_by_hash: () => null,
+    find_asset_by_hash: ({ dirPath, size, sha256 }) => {
+      if (!isDir(dirPath)) return null;
+      for (const name of nodeFs.readdirSync(dirPath)) {
+        const file = nodePath.join(dirPath, name);
+        const stat = nodeFs.statSync(file);
+        if (!stat.isFile() || stat.size !== size) continue;
+        const digest = nodeCrypto.createHash("sha256").update(nodeFs.readFileSync(file)).digest("hex");
+        if (digest === sha256) return name;
+      }
+      return null;
+    },
     list_dir: ({ dirPath }) => ({
       name: nodePath.basename(dirPath),
       path: dirPath,

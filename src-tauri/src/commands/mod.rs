@@ -1245,12 +1245,23 @@ mod tests {
         fs::remove_dir_all(mount.join("assets")).unwrap();
         fs::remove_file(&doc).unwrap();
 
-        let err = write_binary_file_sync(asset_str, png, true, Some(anchor)).unwrap_err();
+        let err = write_binary_file_sync(asset_str, png.clone(), true, Some(anchor)).unwrap_err();
         assert!(err.starts_with(WRITE_ERROR_TARGET_MISSING), "{err}");
         assert!(
             !mount.join("assets").exists(),
             "锚点缺失时必须先拒绝，不得留下 assets/ 目录"
         );
+
+        // 空串锚点与「缺失」同判：前端传 Some("") 时不得因为「路径是空的」而放行
+        let err = write_binary_file_sync(
+            mount.join("assets/z.png").to_string_lossy().to_string(),
+            png,
+            true,
+            Some(String::new()),
+        )
+        .unwrap_err();
+        assert!(err.starts_with(WRITE_ERROR_TARGET_MISSING), "{err}");
+        assert!(!mount.join("assets").exists());
     }
 
     #[test]
