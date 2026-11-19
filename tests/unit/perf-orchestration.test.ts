@@ -40,6 +40,9 @@ const HASH = "orch294";
 const PERF_FILES = [
   "benchmark.mjs",
   "report.mjs",
+  // #420：report.mjs 的基线路径逻辑抽到了这个模块，漏拷会让沙箱里的
+  // report 直接 MODULE_NOT_FOUND（表现为 exit=2，而不是判定失败）
+  "baseline-path.mjs",
   "judgment.js",
   "comparability.js",
   "pw-coverage.js",

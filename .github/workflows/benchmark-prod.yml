@@ -1,0 +1,106 @@
+name: Benchmark (prod build)
+
+# 生产构建口径的性能基准（#420 / Epic #387）
+#
+# 为什么单独一个工作流：dev server 带 React 开发期插桩（`jsxDEV` /
+# `addValueToProperties`），会把开发期开销算进长任务，Epic #387 的
+# 「单次 Long Task ≤ 50ms」必须在这份**用户实际运行的代码**上判定。
+# dev 通道（benchmark.yml）保持不变；两套基线按 `detectEnv()` 的 `prod-*`
+# 命名空间隔离，互不覆盖。
+#
+# 只在手动触发时运行：构建 + 预览服务会让每个 PR 多几分钟，而且 prod 基线
+# 播种之前没有对照价值。跑法见下方 Run benchmark 步骤。
+
+on:
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: "档位（quick = 1k/5k 行；full = 含 2 万行，长任务判定用 full）"
+        required: false
+        default: "quick"
+        type: choice
+        options:
+          - quick
+          - full
+      scenario:
+        description: "只跑指定场景（逗号分隔；空 = 该档位全量场景）"
+        required: false
+        default: ""
+        type: string
+      update_baseline:
+        description: "用本次结果重建 prod 基线（首次启用 / fixture 变更后需要；首播那次不计回归）"
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+# 与 dev 通道共用同一测量队列：两组并发会互相抢 CPU，让长任务测量失真。
+concurrency:
+  group: benchmark
+  queue: max
+  cancel-in-progress: false
+
+jobs:
+  benchmark-prod:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v5
+        with:
+          version: 10
+
+      - name: Setup Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install frontend deps
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Playwright browsers
+        run: pnpm exec playwright install chromium
+
+      - name: Install Playwright system deps
+        shell: bash
+        # sudo 会重置 PATH 导致找不到 pnpm，用 sudo env 透传（与 benchmark.yml 一致）
+        run: sudo env "PATH=$PATH" pnpm exec playwright install-deps chromium
+
+      # `PERF_BUILD=prod` 让 playwright.perf.config.ts 走 `npm run build &&
+      # npm run preview`（webServer），并把基线写进 `prod-ci-ubuntu` 命名空间；
+      # 构建期 vite `define` 注入 `__PERF_MOCK__`，`main.tsx` 把 mock 文件内容
+      # 挂到 window，基准才能在静态产物上注入测试文档。
+      - name: Run benchmark (prod build)
+        env:
+          PERF_BUILD: prod
+          PERF_PROFILE: ${{ inputs.profile }}
+          PERF_SCENARIO: ${{ inputs.scenario }}
+          PERF_UPDATE_BASELINE: ${{ inputs.update_baseline && '1' || '0' }}
+          CI: "true"
+        run: pnpm run benchmark
+
+      - name: 列出本次产出的 prod 基线
+        if: ${{ inputs.update_baseline }}
+        shell: bash
+        run: |
+          echo "### 本次播种的 prod 基线" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          find .perf-baseline -path "*prod-*" -name "*.json" | sort | tee -a "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "把上面的文件提交回仓库后，prod 通道才有可比基线（首播当次不计回归）。" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload perf output
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-prod-${{ inputs.profile }}-${{ github.run_id }}
+          path: |
+            .perf-output
+            .perf-baseline
+          retention-days: 14
+          if-no-files-found: warn

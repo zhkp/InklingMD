@@ -24,12 +24,33 @@ export async function injectFile(
   path: string,
   content: string,
 ): Promise<void> {
+  // 生产构建口径：mock 内容由 main.tsx 动态 import 后异步挂到 window，
+  // 页面 load 与它完成之间没有顺序保证——先等它到位再注入（dev 下没有该全局，
+  // 走 `/src/lib/mockFs.ts` 同步可用，不必等）。
+  if (process.env.PERF_BUILD === "prod") {
+    await page.waitForFunction(
+      () =>
+        (window as unknown as { __perfMockFs?: unknown }).__perfMockFs !==
+        undefined,
+      undefined,
+      { timeout: 15_000 },
+    );
+  }
   await page.evaluate(
     async (arg: { path: string; content: string }) => {
-      const { MOCK_FILE_CONTENT } = (await import(
-        // @ts-ignore Vite dev 专用绝对模块路径（运行时可用，TS 无对应声明）
-        "/src/lib/mockFs.ts"
-      )) as { MOCK_FILE_CONTENT: Record<string, string> };
+      // 生产构建口径（#420）：`main.tsx` 在 `PERF_BUILD=prod` 的构建里把 mock
+      // 内容挂到 window；dev server 下没有这个全局，回落到 Vite 的绝对模块路径。
+      const fromWindow = (
+        window as unknown as { __perfMockFs?: Record<string, string> }
+      ).__perfMockFs;
+      const MOCK_FILE_CONTENT =
+        fromWindow ??
+        (
+          (await import(
+            // @ts-ignore Vite dev 专用绝对模块路径（运行时可用，TS 无对应声明）
+            "/src/lib/mockFs.ts"
+          )) as { MOCK_FILE_CONTENT: Record<string, string> }
+        ).MOCK_FILE_CONTENT;
       MOCK_FILE_CONTENT[arg.path] = arg.content;
     },
     { path, content },

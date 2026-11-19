@@ -66,3 +66,20 @@ if (import.meta.env.DEV) {
     window.__triggerConflict = (conflict: any) => useConflict.getState().openConflict(conflict);
   });
 }
+
+/**
+ * 性能基准的生产构建口径（#420）：把 mock 文件内容挂到 `window`，
+ * 让 `tests/perf/inject.ts` 在 `vite preview` 下也能注入文档——dev 下走的是
+ * `/src/lib/mockFs.ts` 绝对模块路径，生产构建里没有这个 URL。
+ *
+ * `__PERF_MOCK__` 是 vite `define` 注入的构建常量：只有 `PERF_BUILD=prod`
+ * 的基准构建为 true，正式发布产物恒为 false，整段会被 Rollup 摇掉。
+ */
+declare const __PERF_MOCK__: boolean;
+if (__PERF_MOCK__) {
+  void import("./lib/mockFs").then(({ MOCK_FILE_CONTENT }) => {
+    (
+      window as unknown as { __perfMockFs?: Record<string, string> }
+    ).__perfMockFs = MOCK_FILE_CONTENT;
+  });
+}

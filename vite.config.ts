@@ -51,9 +51,20 @@ function themeBaseLayerPlugin(): PluginOption {
   };
 }
 
+// 性能基准的生产构建口径（#420）：`PERF_BUILD=prod` 时把 mock 文件内容在构建期
+// 打进去，让 `tests/perf/inject.ts` 不必依赖 Vite dev 专用的
+// `/src/lib/mockFs.ts` 模块路径。release 构建不设该变量，常量恒为 false，
+// `main.tsx` 里的分支会被 Rollup 摇掉。
+// @ts-expect-error process is a nodejs global
+const perfMock = process.env.PERF_BUILD === "prod";
+
 // https://vite.dev/config/
 export default defineConfig(async () => ({
   plugins: [react(), themeBaseLayerPlugin()],
+
+  define: {
+    __PERF_MOCK__: JSON.stringify(perfMock),
+  },
 
   build: {
     rollupOptions: {

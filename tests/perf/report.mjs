@@ -35,6 +35,7 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { resolve, join } from "node:path";
 import { baselineComparability, MODE_FALLBACK, ROUNDS_FALLBACK } from "./comparability.js";
+import { baselinePath as baselinePathFor } from "./baseline-path.mjs";
 import {
   ATTRIBUTION_METRICS,
   COMPARED_SCALARS,
@@ -181,10 +182,9 @@ function readPwReport() {
  * 所以它不进路径，由 comparability 的指纹校验负责。
  */
 function baselinePath(env, profile, id, mode, rounds) {
-  const envPrefix = env === "local" ? "local/" : "";
-  const modeSegment = mode ?? MODE_FALLBACK;
-  const roundsSegment = `r${rounds ?? ROUNDS_FALLBACK}`;
-  return resolve(BASE_DIR, `${envPrefix}${profile}/${modeSegment}/${roundsSegment}/${id}.json`);
+  // 路径规则见 `baseline-path.mjs`（#420）：`prod-*` 环境有自己的命名空间，
+  // 不会把生产口径的数值写进 dev 基线目录。抽成纯函数是为了让单测直接锁住。
+  return baselinePathFor(BASE_DIR, env, profile, id, mode, rounds);
 }
 
 function readBaseline(env, profile, id, mode, rounds) {
