@@ -174,9 +174,16 @@ export async function fileStat(filePath: string): Promise<FileStat> {
       throw new CmdError(formatCmdError(e));
     }
   }
-  const { MOCK_FILE_STAT } = await import("./mockFs");
+  const { MOCK_FILE_STAT, MOCK_TREE, findNode } = await import("./mockFs");
   const stat = MOCK_FILE_STAT[filePath];
-  if (!stat) throw new CmdError({ code: "notFound", message: `文件不存在: ${filePath}` });
+  if (!stat) {
+    // 与 Rust `file_stat_sync` 同判（#392 复核 F2）：目录节点报 notAFile，其余按缺失。
+    // 否则「锚点是目录」在浏览器侧会被归成 notFound，与桌面端的 NOT_A_FILE 分叉。
+    if (findNode(MOCK_TREE, filePath)?.is_dir) {
+      throw new CmdError({ code: "notAFile", message: `目标路径不是普通文件: ${filePath}` });
+    }
+    throw new CmdError({ code: "notFound", message: `文件不存在: ${filePath}` });
+  }
   return { ...stat };
 }
 
@@ -509,7 +516,8 @@ export interface WriteBinaryOptions {
  * 写入二进制文件（图片等）。
  * 桌面端将数据编码为 base64 后调用 Rust write_binary_file 命令（避免 JSON 数字数组导致的 IPC 膨胀）；
  * 浏览器 mock 记录到 `MOCK_BINARY_FILES`（供 assets 去重与 E2E 断言），并复刻锚点语义：
- * 给了 `anchorPath` 但它不在 mock 内容表里时抛 `TARGET_MISSING`。
+ * 给了 `anchorPath` 但它不在 mock 内容表里时抛 `TARGET_MISSING`，是目录时抛 `NOT_A_FILE`
+ * （与 `check_write_target` 的分类一致）。
  * @param data 字节数组
  */
 export async function writeBinaryFile(

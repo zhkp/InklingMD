@@ -4,14 +4,17 @@
 // 这正是 macOS / 部分浏览器复制图片时的真实剪贴板形态（此前 handlePaste 对
 // files.length === 0 直接 return false，图片永不落盘）。
 //
-// lib/fs 用内存实现替身：resolvePathFromDocument / findAssetByHash / writeBinaryFile 行为与
-// 桌面端一致（按目录 + 内容哈希查重），downloadRemoteImage 由各用例控制。
+// lib/fs 用内存实现替身：resolvePathFromDocument / findAssetByHash / writeBinaryFile / fileStat
+// 行为与桌面端一致（按目录 + 内容哈希查重；写入要求锚点文档仍在原处，#392），
+// downloadRemoteImage 由各用例控制。
 // 这样 assetStore（查重 + 写盘）、remote-image（位置跟踪 + 替换）、smart-paste（接线）都跑真实代码。
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const { files, downloadMock, showMessageMock } = vi.hoisted(() => ({
+const { files, docs, downloadMock, showMessageMock } = vi.hoisted(() => ({
   files: new Map<string, Uint8Array>(),
+  /** 磁盘上仍存在的文档（#392 锚点判定的输入） */
+  docs: new Set<string>(),
   downloadMock: vi.fn(),
   showMessageMock: vi.fn(),
 }));
@@ -28,8 +31,17 @@ vi.mock("../../src/lib/fs", async (importOriginal) => {
     resolvePathFromDocument: vi.fn(async (doc: string, ...paths: string[]) =>
       join(doc.slice(0, doc.lastIndexOf("/")), ...paths),
     ),
-    writeBinaryFile: vi.fn(async (path: string, data: Uint8Array) => {
+    writeBinaryFile: vi.fn(async (path: string, data: Uint8Array, options?: { anchorPath?: string }) => {
+      // #392：与 Rust 同判——锚点文档必须在原处，否则拒绝落盘
+      if (options?.anchorPath !== undefined && !docs.has(options.anchorPath)) {
+        throw new CmdError({ code: "notFound", message: `文件不存在: ${options.anchorPath}` });
+      }
       files.set(path, data.slice());
+    }),
+    fileStat: vi.fn(async (path: string) => {
+      // 复用分支（查重命中、不写盘）的锚点判定
+      if (!docs.has(path)) throw new CmdError({ code: "notFound", message: `文件不存在: ${path}` });
+      return { mtimeUs: 1, size: 1 };
     }),
     findAssetByHash: vi.fn(async (dir: string, size: number, hash: string) => {
       for (const [path, data] of [...files].sort(([a], [b]) => a.localeCompare(b))) {
@@ -53,6 +65,7 @@ import {
   type RemoteImageDeps,
 } from "../../src/components/Editor/remote-image";
 import { createHarness, type Harness } from "../fixtures/smartPasteHarness";
+import { CmdError } from "../../src/lib/cmd-error";
 
 const DOC = "/docs/note.md";
 const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3]);
@@ -61,6 +74,8 @@ const JPG = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 9, 9]);
 let h: Harness;
 
 async function setup(documentPath = DOC, deps: Partial<RemoteImageDeps> = {}, markdown = "") {
+  // 锚点默认存在；需要「文档已不在原处」的用例自行 docs.delete()
+  docs.add(documentPath);
   h = await createHarness({
     markdown,
     plugins: (parse) => [
@@ -90,6 +105,7 @@ async function settle() {
 
 beforeEach(() => {
   files.clear();
+  docs.clear();
   downloadMock.mockReset();
   showMessageMock.mockReset();
   vi.mocked(writeBinaryFile).mockClear();
@@ -145,6 +161,11 @@ describe("远程图片落盘：成功路径", () => {
     expect(imageSrcs()[1]).toBe(imageSrcs()[0]);
     expect(files.size).toBe(1);
     expect(writeBinaryFile).toHaveBeenCalledTimes(1);
+    // #392：远程图片与文件型粘贴共用同一落盘入口，锚点必须一路透传到写盘命令
+    expect(vi.mocked(writeBinaryFile).mock.calls[0][2]).toEqual({
+      createParentDir: true,
+      anchorPath: DOC,
+    });
   });
 
   it("下载期间用户在图片前输入文字：位置随编辑映射，仍替换到正确节点", async () => {
@@ -294,6 +315,19 @@ describe("远程图片落盘：降级路径（保留远程 URL + 明确提示，
     await settle();
     expect(showMessageMock).toHaveBeenCalledTimes(1);
     expect(showMessageMock.mock.calls[0][0]).toMatch(/^3 张远程图片/);
+  });
+
+  it("文档已不在原处（卷卸载 / 被删）：保留远程链接并提示，不写 assets/（#392）", async () => {
+    downloadMock.mockResolvedValue({ data: PNG, mime: "image/png" });
+    await setup();
+    docs.delete(DOC); // 外接卷卸载后挂载点退化：文档已不在原处
+    pasteHtml('<p><img src="https://a.example/x.png"></p>');
+    await vi.waitFor(() => expect(showMessageMock).toHaveBeenCalledTimes(1));
+
+    expect(files.size).toBe(0);
+    expect(imageSrcs()).toEqual(["https://a.example/x.png"]);
+    expect(showMessageMock.mock.calls[0][0]).toContain("文档已不在原处，图片未插入");
+    expect(h.markdown()).toContain("](https://a.example/x.png)");
   });
 
   it("部分成功部分失败：成功的替换、失败的保留", async () => {

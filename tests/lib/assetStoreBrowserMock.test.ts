@@ -75,6 +75,13 @@ describe("mock 二进制表", () => {
     expect(MOCK_BINARY_FILES.size).toBe(1);
     expect(MOCK_BINARY_FILES.has("assets/2.png")).toBe(false);
   });
+
+  it("查重命中但锚点是目录：报 NOT_A_FILE，与 file_stat 分类一致（#392 复核 F2）", async () => {
+    await saveImageAsset("/mock-workspace/notes/readme.md", PNG, "1.png");
+    const err = await saveImageAsset("/mock-workspace/notes", PNG, "2.png").catch((e) => e);
+    expect(writeErrorCode(err)).toBe("NOT_A_FILE");
+    expect(MOCK_BINARY_FILES.size).toBe(1);
+  });
 });
 
 describe("mock 远程下载（fetch，no-referrer）", () => {

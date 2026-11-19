@@ -10,8 +10,9 @@
 //   写临时文件 + rename 原子替换
 // - write_binary_file：父目录缺失时仅在 createParentDir=true 且祖父目录存在时建一层；
 //   anchorPath（图片所属文档）必须仍是普通文件，且在**建目录之前**校验（#392）
-// - find_asset_by_hash：按大小 + SHA-256 在目录直接子文件中查找，目录不存在返回 null
-//   （#220 去重的真实语义，让「查重命中」分支也能在真实磁盘上被测到）
+// - find_asset_by_hash：按大小 + SHA-256 在目录直接子文件中查找（跳过 `.` 临时文件、
+//   取字典序最小、不跟随符号链接），目录不存在返回 null——#220 去重的真实语义，
+//   让「查重命中」分支也能在真实磁盘上被测到
 // - file_mtime / read_text_file：Path::exists 跟随符号链接，不存在即报错；
 //   file_mtime 对非普通文件（如同名目录）报 NOT_A_FILE
 
@@ -210,12 +211,26 @@ export function createRealFsBackend() {
     delete_path: ({ path }) => nodeFs.rmSync(path, { recursive: true }),
     find_asset_by_hash: ({ dirPath, size, sha256 }) => {
       if (!isDir(dirPath)) return null;
-      for (const name of nodeFs.readdirSync(dirPath)) {
-        const file = nodePath.join(dirPath, name);
-        const stat = nodeFs.statSync(file);
-        if (!stat.isFile() || stat.size !== size) continue;
-        const digest = nodeCrypto.createHash("sha256").update(nodeFs.readFileSync(file)).digest("hex");
-        if (digest === sha256) return name;
+      // 与 assets.rs 的 find_asset_by_hash_sync 同判（#392 复核 F4）：
+      // lstat 不跟随符号链接、跳过 `.` 开头的原子写临时文件、多个同内容副本时
+      // 稳定返回字典序最小的那个，非法 sha 直接报错
+      const wanted = String(sha256).trim().toLowerCase();
+      if (!/^[0-9a-f]{64}$/.test(wanted)) throw `非法的 SHA-256: ${sha256}`;
+      const candidates = nodeFs
+        .readdirSync(dirPath)
+        .filter((name) => !name.startsWith("."))
+        .sort()
+        .map((name) => ({ name, path: nodePath.join(dirPath, name) }))
+        .filter((candidate) => {
+          const stat = nodeFs.lstatSync(candidate.path);
+          return stat.isFile() && stat.size === size;
+        });
+      for (const candidate of candidates) {
+        const digest = nodeCrypto
+          .createHash("sha256")
+          .update(nodeFs.readFileSync(candidate.path))
+          .digest("hex");
+        if (digest === wanted) return candidate.name;
       }
       return null;
     },

@@ -68,9 +68,10 @@ async function assertDocumentInPlace(documentPath: string): Promise<void> {
  * 把图片字节写入文档同目录的 assets/，返回 markdown 用的相对路径（assets/xxx.png）。
  * 目录里已有相同内容的文件时直接复用其文件名，不再写入。
  *
- * 文档已不在原处（被删除 / 改名，或所在外接卷已卸载）时**拒绝**并抛
- * `WriteError(TARGET_MISSING)`：否则图片会写进系统盘上的空挂载点，卷重新挂载后引用失效
- * （issue #392）。
+ * 文档已不在原处（被删除 / 改名 / 所在外接卷已卸载）或被同名目录占位时**拒绝**：
+ * 复用既有资源的分支抛 `WriteError(TARGET_MISSING | NOT_A_FILE)`；写入分支由 Rust 侧
+ * 拒绝（缺失 → `TARGET_MISSING`）。否则图片会写进系统盘上的空挂载点，卷重新挂载后
+ * 引用失效（issue #392）。
  * @param documentPath 当前 Markdown 文件完整路径（调用方保证不是未命名草稿）
  * @param fileName 无可复用文件时新文件使用的文件名
  */
