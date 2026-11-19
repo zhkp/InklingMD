@@ -6,7 +6,8 @@
 //   2. `findRecoverableDrafts()`：上次不是正常退出 → 把草稿读出来交给用户决定；
 //   3. `applyRecovery()`：把草稿恢复成 tab，并从 checkpoint 取回光标/滚动（#378）；
 //   4. `cleanupExpiredDrafts()`：只清「已归档会话里被用户处理过」且超 7 天的；
-//      本次会话的、未处理过的崩溃副本、pinned 一律保留。
+//      本次会话的、未处理过的崩溃副本、pinned 一律保留；同时回收
+//      `fullyHandled=true` 且超 7 天的旧 `crashed-*.json`（#409 第一片）。
 //
 // 恢复入口**不自动恢复**：用户必须明确选择「恢复 / 丢弃」，否则一份过期草稿会
 // 悄悄覆盖他已经改过的文件。
@@ -56,6 +57,13 @@ export interface CrashedSession {
   fullyHandled: boolean;
 }
 
+interface RecoveryDirEntry {
+  name: string;
+  isDir: boolean;
+  /** 文件 mtime（微秒）：旧归档缺 `archivedAt` 时用它判龄。size 属配额片，本片不取 */
+  mtimeUs?: number;
+}
+
 export interface RecoveryIo {
   appDataDir(): Promise<string>;
   readTextFile(path: string): Promise<string>;
@@ -64,7 +72,7 @@ export interface RecoveryIo {
     content: string,
     options?: { createParents?: boolean; durability?: "sync" | "none" },
   ): Promise<void>;
-  listDir(path: string): Promise<Array<{ name: string; isDir: boolean }>>;
+  listDir(path: string): Promise<RecoveryDirEntry[]>;
   deletePath(path: string): Promise<void>;
 }
 
@@ -82,7 +90,7 @@ const defaultIo: RecoveryIo = {
     // `list_dir_files` 只列一层，正好是草稿目录需要的粒度（`drafts/*.json`）
     const { listDirFiles } = await import("./fs");
     const entries = await listDirFiles(path);
-    return entries.map((e) => ({ name: e.name, isDir: e.isDir }));
+    return entries.map((e) => ({ name: e.name, isDir: e.isDir, mtimeUs: e.mtimeUs }));
   },
   async deletePath(path) {
     const { deletePath } = await import("./fs");
@@ -164,11 +172,13 @@ export async function beginSession(now = Date.now()): Promise<SessionMarker | nu
   return previous;
 }
 
-async function crashedFiles(): Promise<Array<{ file: string; data: CrashedSession }>> {
+async function crashedFiles(): Promise<
+  Array<{ file: string; data: CrashedSession; mtimeUs: number }>
+> {
   try {
     const { dir } = await sessionPaths();
     const sep = sepOf(dir);
-    const out: Array<{ file: string; data: CrashedSession }> = [];
+    const out: Array<{ file: string; data: CrashedSession; mtimeUs: number }> = [];
     for (const entry of await io.listDir(dir)) {
       if (entry.isDir || !entry.name.startsWith("crashed-") || !entry.name.endsWith(".json")) {
         continue;
@@ -180,6 +190,7 @@ async function crashedFiles(): Promise<Array<{ file: string; data: CrashedSessio
         if (!raw || typeof raw.sessionId !== "string") continue;
         out.push({
           file,
+          mtimeUs: Number.isFinite(entry.mtimeUs) ? Number(entry.mtimeUs) : 0,
           data: {
             version: 1,
             sessionId: raw.sessionId,
@@ -502,6 +513,10 @@ export function mergeDraftIntoExistingTab(
  * 本次会话的草稿永不自动清；已归档但**未处理**的崩溃副本也永不自动清
  * ——否则「很久没打开」就等于自动丢用户内容。`pinned` 一律豁免。
  * `exclude` 是本次刚恢复的 path（内容此刻只在编辑器里）。
+ *
+ * 另外按设计 §8.3 回收旧归档：`fullyHandled=true` 且超 TTL 的 `crashed-*.json`
+ * 才删；未 fullyHandled 的归档是「哪些草稿已处理」的唯一账本，删了会让草稿变孤儿。
+ * 返回删除的**草稿**条数，归档回收不计入。
  */
 export async function cleanupExpiredDrafts(
   now = Date.now(),
@@ -509,8 +524,9 @@ export async function cleanupExpiredDrafts(
   options: { exclude?: Set<string> } = {},
 ): Promise<number> {
   const drafts = await listDrafts();
+  const crashes = await crashedFiles();
   const archived = new Map<string, CrashedSession>();
-  for (const { data } of await crashedFiles()) archived.set(data.sessionId, data);
+  for (const { data } of crashes) archived.set(data.sessionId, data);
   const current = currentSessionId();
 
   const expired = drafts.filter((d) => {
@@ -524,6 +540,25 @@ export async function cleanupExpiredDrafts(
     // 有归档：只在「用户已处理这条」时清
     return (crash.handledDraftIds ?? []).includes(d.tabPath);
   });
-  if (expired.length === 0) return 0;
-  return discardDrafts(expired);
+  const removed = expired.length === 0 ? 0 : await discardDrafts(expired);
+
+  // 旧归档只在「全部草稿都处理过」且超 TTL 时回收（设计 §8.3）。
+  // `archivedAt` 缺失（旧版本 / 半写）时用文件 mtime 兜底；两者都没有则保留，
+  // 绝不因为「时间戳是 0」就把刚写的归档当成 7 天前的文件删掉。
+  for (const { file, data, mtimeUs } of crashes) {
+    if (!data.fullyHandled) continue;
+    const stampedAt = data.archivedAt > 0
+      ? data.archivedAt
+      : mtimeUs > 0
+        ? Math.floor(mtimeUs / 1000)
+        : 0;
+    if (stampedAt <= 0 || now - stampedAt <= ttlMs) continue;
+    try {
+      await io.deletePath(file);
+    } catch (err) {
+      // 删不掉就留到下次；清理是尽力而为，但不能静默吞掉
+      console.warn("[recovery] 旧归档删除失败，保留到下次清理:", file, err);
+    }
+  }
+  return removed;
 }
