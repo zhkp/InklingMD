@@ -28,9 +28,11 @@ on:
         default: ""
         type: string
       update_baseline:
-        description: "用本次结果重建 prod 基线（首次启用 / fixture 变更后需要；首播那次不计回归）"
+        # 默认 false：常规跑必须保留既有基线。若默认 true，任何一次 dispatch 都会
+        # 用本次结果重写基线，反复播种会把回归慢慢「正常化」进对照历史。
+        description: "用本次结果重建 prod 基线（仅首次启用 / fixture 变更时手动打勾；首播那次不计回归）"
         required: false
-        default: true
+        default: false
         type: boolean
 
 permissions:
@@ -94,13 +96,18 @@ jobs:
           echo '```' >> "$GITHUB_STEP_SUMMARY"
           echo "把上面的文件提交回仓库后，prod 通道才有可比基线（首播当次不计回归）。" >> "$GITHUB_STEP_SUMMARY"
 
+      # `.perf-output` / `.perf-baseline` 都是**隐藏目录**：upload-artifact 默认
+      # 跳过隐藏文件，必须显式 `include-hidden-files: true`。配 `if-no-files-found:
+      # error` 而不是 warn——否则「什么都没传上去」也会绿，播种产物就静默丢了
+      # （与 benchmark.yml 的上传步保持一致）。
       - name: Upload perf output
-        if: ${{ always() }}
-        uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
         with:
           name: perf-prod-${{ inputs.profile }}-${{ github.run_id }}
           path: |
-            .perf-output
-            .perf-baseline
+            .perf-output/
+            .perf-baseline/
+          include-hidden-files: true
           retention-days: 14
-          if-no-files-found: warn
+          if-no-files-found: error

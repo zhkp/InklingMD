@@ -39,4 +39,24 @@ describe("benchmark-prod 工作流契约", () => {
     expect(WORKFLOW).toContain("actions/upload-artifact");
     expect(WORKFLOW).not.toMatch(/git push/);
   });
+
+  it("artifact 必须带上隐藏目录，且传不上去要报错（#421 评审 P1）", () => {
+    // `.perf-output/` 与 `.perf-baseline/` 都是点目录；upload-artifact 默认跳过
+    // 隐藏文件，漏了 include-hidden-files 就是「绿着但什么都没传」。
+    // 断言 YAML 值本身，而不是注释里的字样（注释也写着 true，toContain 会假绿）
+    expect(WORKFLOW).toMatch(/^\s+include-hidden-files: true$/m);
+    expect(WORKFLOW).not.toMatch(/include-hidden-files:\s*false/);
+    expect(WORKFLOW).toMatch(/^\s+if-no-files-found: error$/m);
+    expect(WORKFLOW).toMatch(/path:\s*\|\s*\n\s*\.perf-output\/\s*\n\s*\.perf-baseline\//);
+  });
+
+  it("播种必须显式打勾，默认不重写既有基线（#421 评审 P2）", () => {
+    // 默认 true 会让常规 dispatch 把本次结果写进基线，反复播种会把回归
+    // 慢慢「正常化」进对照历史。
+    const block = WORKFLOW.slice(
+      WORKFLOW.indexOf("update_baseline:"),
+      WORKFLOW.indexOf("permissions:"),
+    );
+    expect(block).toContain("default: false");
+  });
 });
