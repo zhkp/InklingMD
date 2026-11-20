@@ -1265,6 +1265,128 @@ mod tests {
     }
 
     #[test]
+    fn write_boundary_anchor_recheck_rolls_back_created_dir() {
+        let temp = TestDir::new("write_boundary_anchor");
+        let mount = temp.path.join("media/usb");
+        fs::create_dir_all(&mount).unwrap();
+        let assets = mount.join("assets");
+        let doc = mount.join("note.md");
+
+        // 入口判定通过之后文档才消失（等价于「判定与写盘之间卷被卸载」）：
+        // 写盘边界必须拒绝，并撤掉本次补建的那一层
+        fs::write(&doc, "A").unwrap();
+        check_write_target(&doc, true).unwrap();
+        fs::create_dir(&assets).unwrap();
+        fs::remove_file(&doc).unwrap();
+
+        let err = ensure_anchor_at_write_boundary(Some(&doc), None, Some(&assets)).unwrap_err();
+        assert!(err.starts_with(WRITE_ERROR_TARGET_MISSING), "{err}");
+        assert!(!assets.exists(), "拒绝时必须撤掉本次补建的目录");
+
+        // 临时文件已经写好：先删临时文件再撤目录，两者都不留
+        fs::create_dir(&assets).unwrap();
+        let tmp = assets.join(".x.png.tmp-1");
+        fs::write(&tmp, b"partial").unwrap();
+        let err =
+            ensure_anchor_at_write_boundary(Some(&doc), Some(&tmp), Some(&assets)).unwrap_err();
+        assert!(err.starts_with(WRITE_ERROR_TARGET_MISSING), "{err}");
+        assert!(
+            !tmp.exists() && !assets.exists(),
+            "拒绝时必须连临时文件与补建的目录一起清掉"
+        );
+
+        // 文档被恢复（卷重挂）后放行；没补建目录时不得撤别人的目录
+        fs::write(&doc, "A").unwrap();
+        fs::create_dir(&assets).unwrap();
+        ensure_anchor_at_write_boundary(Some(&doc), None, None).unwrap();
+        assert!(assets.is_dir(), "没补建目录时不得撤掉已有目录");
+
+        // 没有锚点（导出等场景）时完全放行
+        ensure_anchor_at_write_boundary(None, None, None).unwrap();
+    }
+
+    /// 竞态夹具：挂载点（文档所在目录）在系统盘上是空目录，文档在**入口判定之后**才消失。
+    /// 返回 (临时目录持有者, mount, doc, asset, png)——持有者必须留在调用方，否则目录被回收。
+    fn anchor_race_fixture(name: &str) -> (TestDir, PathBuf, PathBuf, PathBuf, String) {
+        let temp = TestDir::new(name);
+        let mount = temp.path.join("media/usb");
+        fs::create_dir_all(&mount).unwrap();
+        let doc = mount.join("note.md");
+        fs::write(&doc, "A").unwrap();
+        let png = base64::engine::general_purpose::STANDARD.encode([0x89u8, 0x50, 0x4E, 0x47]);
+        (temp, mount.clone(), doc, mount.join("assets/x.png"), png)
+    }
+
+    #[test]
+    fn write_boundary_recheck_rejects_anchor_lost_before_temp() {
+        let (_temp, mount, doc, asset, png) = anchor_race_fixture("write_boundary_before_temp");
+
+        // 入口判定通过之后卷被卸载：写临时文件之前必须拒绝，并撤掉刚补建的 assets/
+        let mut visited: Vec<u8> = Vec::new();
+        let err = write_binary_file_with_hook(
+            asset.to_string_lossy().to_string(),
+            png,
+            true,
+            Some(doc.to_string_lossy().to_string()),
+            &mut |stage| {
+                visited.push(stage);
+                if stage == 1 {
+                    fs::remove_file(&doc).unwrap();
+                }
+            },
+        )
+        .unwrap_err();
+
+        // 只走到第 1 道边界。变异验证：只删 `ensure_anchor_at_write_boundary` 那次复核
+        // → 临时文件写出、钩子 2 记录 → 这里是 [1, 2]；连 `before_boundary_check(1)`
+        // 一起删 → 钩子不在阶段 1 触发（文档不消失），写入直接成功、`unwrap_err` panic
+        assert_eq!(visited, vec![1], "第一道边界拒绝后不得继续写盘");
+        assert!(err.starts_with(WRITE_ERROR_TARGET_MISSING), "{err}");
+        assert!(
+            !mount.join("assets").exists(),
+            "拒绝时不得留下本次补建的 assets/"
+        );
+        assert!(!asset.exists());
+    }
+
+    #[test]
+    fn write_boundary_recheck_removes_temp_and_dir_before_rename() {
+        let (_temp, mount, doc, asset, png) = anchor_race_fixture("write_boundary_before_rename");
+
+        // 入口与第一道边界都通过，写临时文件期间卷被卸载：rename 前必须拒绝，
+        // 并把临时文件与本次补建的目录一起清掉
+        let mut visited: Vec<u8> = Vec::new();
+        let err = write_binary_file_with_hook(
+            asset.to_string_lossy().to_string(),
+            png,
+            true,
+            Some(doc.to_string_lossy().to_string()),
+            &mut |stage| {
+                visited.push(stage);
+                if stage == 2 {
+                    fs::remove_file(&doc).unwrap();
+                }
+            },
+        )
+        .unwrap_err();
+
+        // 两道边界都要执行。变异验证：只删 rename 前那次 `ensure_anchor_at_write_boundary`
+        // → 钩子 2 仍记录、rename 成功，`unwrap_err` 先 panic（visited 为 [1, 2]，走不到这里）；
+        // 连 `before_boundary_check(2)` 一起删 → 钩子 2 不触发、visited 只剩 [1]，同样写入成功
+        assert_eq!(visited, vec![1, 2], "两道边界都必须执行");
+        assert!(err.starts_with(WRITE_ERROR_TARGET_MISSING), "{err}");
+        assert!(!asset.exists(), "拒绝时目标文件不得落盘");
+        let leftovers: Vec<_> = fs::read_dir(&mount)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "拒绝时临时文件与补建的目录都要撤掉，实际残留: {leftovers:?}"
+        );
+    }
+
+    #[test]
     fn test_atomic_write_safety() {
         let temp = TestDir::new("atomic_write");
         let file = temp.path.join("doc.md");
@@ -1907,6 +2029,38 @@ pub async fn write_binary_file(
     .map_err(|e| format!("二进制写入任务失败: {e}"))?
 }
 
+/// #392 写盘边界的锚点校验（Codex 复审 P2）：入口那次判定与真正写盘之间夹着 Base64 解码、
+/// 补建 `assets/` 与写临时文件，这期间文档可能被删除、外接卷可能被卸载——只判一次仍然会把
+/// 图片写进系统盘上的空挂载点。因此每次落盘动作前都要再确认锚点。
+///
+/// 拒绝时把本次调用留下的产物清干净：先删临时文件（`temp_path` 为 None 表示还没建），
+/// 再撤本次补建的那一层目录（`created_parent` 为 None 表示没建）。目录里已有别人的东西时
+/// `remove_dir` 会失败，保持原样——绝不递归删除。
+fn ensure_anchor_at_write_boundary(
+    anchor: Option<&Path>,
+    temp_path: Option<&Path>,
+    created_parent: Option<&Path>,
+) -> Result<(), String> {
+    let Some(anchor) = anchor else { return Ok(()) };
+    match check_write_target(anchor, true) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            if let Some(temp) = temp_path {
+                let _ = fs::remove_file(temp);
+            }
+            if let Some(dir) = created_parent {
+                let _ = fs::remove_dir(dir);
+            }
+            Err(e)
+        }
+    }
+}
+
+/// 写盘边界钩子：生产恒传空闭包（`write_binary_file_sync`）。单测用它模拟「入口判定通过
+/// 之后卷才被卸载」这个竞态，参数是即将执行的边界序号（1 = 写临时文件前，2 = rename 前）；
+/// 没有它就只能直接调 `ensure_anchor_at_write_boundary`，接线（两处调用点）将失去回归网。
+type BeforeBoundaryCheck<'a> = &'a mut dyn FnMut(u8);
+
 /// create_parent_dir：父目录缺失时只建「一层」（图片落到文档旁的 assets/），
 /// 且要求上一级目录仍存在——文档所在目录已被删除时不得连带重建（issue #363）
 ///
@@ -1914,14 +2068,27 @@ pub async fn write_binary_file(
 /// 于是外接卷卸载后挂载点退化为系统盘上的空目录时，「祖父目录是目录」仍然成立，
 /// assets/ 会被建到系统盘、卷重新挂载后引用失效（issue #392）。因此锚点必须仍是普通
 /// 文件，缺失即 TARGET_MISSING，且在**创建目录之前**校验——拒绝时要保证什么都没留下。
+/// 入口判定之后、写盘之前还要再确认两次（见 `ensure_anchor_at_write_boundary`）。
 fn write_binary_file_sync(
     file_path: String,
     data_base64: String,
     create_parent_dir: bool,
     anchor_path: Option<String>,
 ) -> Result<(), String> {
-    if let Some(anchor) = anchor_path.as_deref() {
-        check_write_target(Path::new(anchor), true)?;
+    write_binary_file_with_hook(file_path, data_base64, create_parent_dir, anchor_path, &mut |_| {})
+}
+
+fn write_binary_file_with_hook(
+    file_path: String,
+    data_base64: String,
+    create_parent_dir: bool,
+    anchor_path: Option<String>,
+    before_boundary_check: BeforeBoundaryCheck<'_>,
+) -> Result<(), String> {
+    let anchor = anchor_path.as_deref().map(Path::new);
+    // 入口先判一次：锚点不在原处时连 payload 都不必解码
+    if let Some(a) = anchor {
+        check_write_target(a, true)?;
     }
 
     let decoded = base64::engine::general_purpose::STANDARD
@@ -1930,15 +2097,21 @@ fn write_binary_file_sync(
 
     let path = Path::new(&file_path);
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let mut created_parent = false;
     if !parent.is_dir() {
         let grandparent_exists = parent.parent().is_some_and(Path::is_dir);
         if create_parent_dir && !parent.exists() && grandparent_exists {
             fs::create_dir(parent).map_err(|e| format!("创建目录失败: {}", e))?;
+            created_parent = true;
         } else {
             ensure_parent_dir(parent, false)?;
         }
     }
     check_write_target(path, false)?;
+    // 解码 + 补建 assets/ 这段窗口里文档可能已被删除、外接卷可能已卸载：
+    // 写临时文件之前必须再判一次锚点（Codex 复审 P2）
+    before_boundary_check(1);
+    ensure_anchor_at_write_boundary(anchor, None, created_parent.then_some(parent))?;
 
     let file_name = path
         .file_name()
@@ -1957,6 +2130,11 @@ fn write_binary_file_sync(
         return Err(format!("临时文件物理落盘(sync_all)失败 {}: {}", temp_path.display(), e));
     }
     drop(temp_file);
+
+    // 改名之前再确认一次：写临时文件的这段时间里同样可能发生卷卸载，
+    // 否则临时文件会被 rename 进那个空挂载点（Codex 复审 P2）
+    before_boundary_check(2);
+    ensure_anchor_at_write_boundary(anchor, Some(&temp_path), created_parent.then_some(parent))?;
 
     // 重命名原子替换目标文件
     if let Err(e) = fs::rename(&temp_path, path) {

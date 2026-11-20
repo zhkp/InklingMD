@@ -1,5 +1,7 @@
 // 浏览器 mock 分支（pnpm dev / E2E）的图片落盘与远程下载（#220）
 // 与桌面端同语义：写入记录到内存二进制表、按目录 + 内容哈希查重、fetch 结果按 Rust 端规则判定。
+// 锚点（图片所属文档）不在原处或被同名目录占位时**拒绝写入**，分别抛 TARGET_MISSING / NOT_A_FILE，
+// 查重命中也要先确认锚点（#392）——否则 E2E 会掩盖「文档已不在原处仍落盘」。
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -81,6 +83,15 @@ describe("mock 二进制表", () => {
     const err = await saveImageAsset("/mock-workspace/notes", PNG, "2.png").catch((e) => e);
     expect(writeErrorCode(err)).toBe("NOT_A_FILE");
     expect(MOCK_BINARY_FILES.size).toBe(1);
+  });
+
+  it("写入分支（查重未命中）锚点是目录：同一条件同一文案（#392 复核）", async () => {
+    // 换内容让查重必然未命中，走 writeBinaryFile 的锚点校验（而不是复用前的 fileStat）
+    const other = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 8, 8]);
+    const err = await saveImageAsset("/mock-workspace/notes", other, "2.png").catch((e) => e);
+    expect(writeErrorCode(err)).toBe("NOT_A_FILE");
+    expect(err.message).toBe("文档已不在原处，图片未插入");
+    expect(MOCK_BINARY_FILES.size).toBe(0);
   });
 });
 

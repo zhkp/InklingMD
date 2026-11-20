@@ -1,7 +1,8 @@
 // 图片资源落盘 / 远程下载的前端 IO 层单测（#220）
 //
 // - assetStore.saveImageAsset：内容哈希查重命中复用、未命中写入、查重失败不阻断、
-//   锚点文档缺失时转成图片场景文案（#392）
+//   锚点文档不在原处时统一转成图片场景文案（缺失 → TARGET_MISSING，被同名目录占位 →
+//   NOT_A_FILE；写入与复用两条分支同文案，#392）
 // - lib/fs 桌面分支：download_remote_image / find_asset_by_hash 的 IPC 契约与错误映射
 // - 动态 asset ACL：落盘后的 assets/ 相对路径在渲染时会触发 allow_asset_dir 放行该目录
 //   （#64 的运行时白名单在下载场景下同样生效，#220「放行确认」）
@@ -136,6 +137,19 @@ describe("saveImageAsset：落盘前按内容查重", () => {
     });
     const err = await saveImageAsset("/docs/note.md", PNG, "n.png").catch((e) => e);
     expect(writeErrorCode(err)).toBe("TARGET_MISSING");
+    expect(err.message).toBe("文档已不在原处，图片未插入");
+  });
+
+  it("写入分支锚点被同名目录占位：NOT_A_FILE 也给同一条图片场景文案（#392 复核）", async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "find_asset_by_hash") return null;
+      // check_write_target：已存在的非普通文件 → NOT_A_FILE（文档路径被同名目录占据）
+      if (cmd === "write_binary_file") throw "NOT_A_FILE: 目标路径不是普通文件: /docs/note.md";
+      return undefined;
+    });
+    const err = await saveImageAsset("/docs/note.md", PNG, "n.png").catch((e) => e);
+    // 错误码保留（调用方仍能分流），文案与复用分支一致：都指向文档而不是图片
+    expect(writeErrorCode(err)).toBe("NOT_A_FILE");
     expect(err.message).toBe("文档已不在原处，图片未插入");
   });
 });

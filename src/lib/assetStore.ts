@@ -68,9 +68,10 @@ async function assertDocumentInPlace(documentPath: string): Promise<void> {
  * 把图片字节写入文档同目录的 assets/，返回 markdown 用的相对路径（assets/xxx.png）。
  * 目录里已有相同内容的文件时直接复用其文件名，不再写入。
  *
- * 文档已不在原处（被删除 / 改名 / 所在外接卷已卸载）或被同名目录占位时**拒绝**：
- * 复用既有资源的分支抛 `WriteError(TARGET_MISSING | NOT_A_FILE)`；写入分支由 Rust 侧
- * 拒绝（缺失 → `TARGET_MISSING`）。否则图片会写进系统盘上的空挂载点，卷重新挂载后
+ * 文档已不在原处（被删除 / 改名 / 所在外接卷已卸载）或被同名目录占位时**拒绝**，
+ * 两条路径同条件同文案：复用既有资源的分支用 `fileStat` 自己判定，写入分支由 Rust 侧
+ * 判定（缺失 → `TARGET_MISSING`，被目录占位 → `NOT_A_FILE`），错误码原样保留、文案统一
+ * 换成「文档已不在原处，图片未插入」。否则图片会写进系统盘上的空挂载点，卷重新挂载后
  * 引用失效（issue #392）。
  * @param documentPath 当前 Markdown 文件完整路径（调用方保证不是未命名草稿）
  * @param fileName 无可复用文件时新文件使用的文件名
@@ -100,10 +101,14 @@ export async function saveImageAsset(
   try {
     await writeBinaryFile(fullPath, data, { createParentDir: true, anchorPath: documentPath });
   } catch (e) {
-    // 图片是新文件，这个码在当前调用里只可能来自锚点校验；换成图片场景的文案再抛，
-    // 调用方（粘贴 / 远程图片）原样展示 e.message 即可
-    if (writeErrorCode(e) === "TARGET_MISSING") {
-      throw new WriteError("TARGET_MISSING", ASSET_DOC_MISSING_MESSAGE);
+    // 图片是新文件：TARGET_MISSING 只可能来自锚点校验（目标路径按 must_exist=false 判），
+    // NOT_A_FILE 则来自「文档路径被同名目录占位」——assets/ 的目标名是时间戳 + 随机串，
+    // 不会与该目录撞名。对用户是同一个事实「文档不在了」，必须与复用分支给出同一条文案，
+    // 否则同一条件会因「assets/ 里是否恰好有同内容图片」而显示两套提示，且 NOT_A_FILE 的
+    // 通用文案（原路径已被其他内容占用）指不出问题出在文档上（#392 复核）
+    const code = writeErrorCode(e);
+    if (code === "TARGET_MISSING" || code === "NOT_A_FILE") {
+      throw new WriteError(code, ASSET_DOC_MISSING_MESSAGE);
     }
     throw e;
   }
