@@ -134,8 +134,12 @@ pub fn prepare_portable_session(
     }
     match app.path().app_data_dir() {
         Ok(legacy) if legacy != data_dir => {
+            // 先填来源：即使本次什么都没迁（已结算 / 全部失败），弹窗里的「来源」也得有值
+            report.from = legacy.display().to_string();
             let migration = migrate_legacy_data(&legacy, data_dir);
-            report.from = migration.from;
+            if !migration.from.is_empty() {
+                report.from = migration.from;
+            }
             report.copied = migration.copied;
             report.failed = migration.failed;
             report.skipped = migration.skipped;
@@ -198,50 +202,89 @@ fn destination_state(path: &Path) -> DestState {
     }
 }
 
+/// 迁移状态的落地形态（[`MIGRATION_MARKER`] 的内容）。
+///
+/// `settled` 是**逐子目录**的结算状态：已经有结论的子目录下次启动静默跳过，
+/// 没有条目的（旧位置当时是空目录、或上次失败）下次仍会检查。
+/// 单文件 + 逐子目录状态，才能同时满足两件互相拉扯的事：
+/// 「迁过就别再迁」（否则用户删掉的主题会被旧位置复活）与
+/// 「当时没数据就别把门关死」（否则用户之后用安装版产生数据就永远迁不过来）。
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+struct MigrationMarker {
+    #[serde(default)]
+    from: String,
+    #[serde(default)]
+    to: String,
+    #[serde(default)]
+    at: u64,
+    /// 子目录名 → `copied` / `skipped:<原因>`
+    #[serde(default)]
+    settled: std::collections::BTreeMap<String, String>,
+}
+
+fn read_migration_marker(target: &Path) -> MigrationMarker {
+    std::fs::read(target.join(MIGRATION_MARKER))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default()
+}
+
 /// 把旧数据根里需要随包走的两类目录**复制**到便携数据根。
 ///
 /// 语义刻意是复制而不是移动，且只在目标缺失/为空时复制：
 /// - 复制：旧位置无人清理时用户还能回滚，不存在「搬一半丢了」的窗口；
 /// - 目标已有内容就跳过（不合并、不覆盖）：两次运行叠加出互相矛盾的两套数据，
-///   比少迁一次更难收拾。跳过会进 `skipped` 让用户看见，并用标记文件抑制重复提示。
-///
-/// 完成（`failed` 为空且旧位置确有数据）后写 [`MIGRATION_MARKER`]：此后不再尝试迁移，
-/// 否则用户在便携目录里删掉的主题会被旧位置重新「复活」。
-/// 旧位置完全没数据时不写标记，等用户之后装过安装版再来仍能迁移。
+///   比少迁一次更难收拾。跳过会进 `skipped` 让用户看见，并结算成 `skipped:*`，
+///   由 [`MIGRATION_MARKER`] 抑制重复提示。
 pub fn migrate_legacy_data(legacy: &Path, target: &Path) -> PortableMigration {
     let mut report = PortableMigration {
         from: legacy.display().to_string(),
         to: target.display().to_string(),
         ..Default::default()
     };
-    if target.join(MIGRATION_MARKER).exists() {
-        // 已经迁过：不重复、不提示（迁移结果早就在上一轮告知过）
-        return PortableMigration::default();
-    }
-    let mut has_legacy_data = false;
+    let mut marker = read_migration_marker(target);
+    marker.from = report.from.clone();
+    marker.to = report.to.clone();
+    let mut marker_dirty = false;
     for name in MIGRATED_SUBDIRS {
+        if marker.settled.contains_key(name) {
+            // 这个子目录已有结论（迁过 / 判定为不可迁）：不再迁、也不再提示
+            continue;
+        }
         let source = legacy.join(name);
         let destination = target.join(name);
         match source_kind(&source) {
             SourceKind::Missing => continue,
             SourceKind::Symlink => {
-                has_legacy_data = true;
                 report.skipped.push(format!(
                     "{name}: 旧位置是符号链接，未跟随复制（如需搬走请直接复制链接目标）"
                 ));
+                marker
+                    .settled
+                    .insert(name.to_string(), "skipped:symlink".to_string());
+                marker_dirty = true;
                 continue;
             }
             SourceKind::NotDir => {
-                has_legacy_data = true;
                 report.skipped.push(format!("{name}: 旧位置同名项不是目录"));
+                marker
+                    .settled
+                    .insert(name.to_string(), "skipped:not-dir".to_string());
+                marker_dirty = true;
                 continue;
             }
             SourceKind::Error(e) => {
-                has_legacy_data = true;
+                // 读不到不等于没有：不结算，下次启动重试
                 report.failed.push(format!("{name}: 读取旧位置失败 {e}"));
                 continue;
             }
-            SourceKind::Dir => has_legacy_data = true,
+            SourceKind::Dir => {
+                if !dir_has_entries(&source) {
+                    // 旧位置是空目录：现在没什么可搬。**不能结算** ——
+                    // 否则用户之后真往里放东西，就永远不会再迁了
+                    continue;
+                }
+            }
         }
         match destination_state(&destination) {
             DestState::Missing => {}
@@ -258,6 +301,10 @@ pub fn migrate_legacy_data(legacy: &Path, target: &Path) -> PortableMigration {
                 report.skipped.push(format!(
                     "{name}: 便携目录已有数据，未合并（需要的话请手动复制旧位置的内容）"
                 ));
+                marker
+                    .settled
+                    .insert(name.to_string(), "skipped:non-empty".to_string());
+                marker_dirty = true;
                 continue;
             }
             DestState::Error(e) => {
@@ -268,35 +315,45 @@ pub fn migrate_legacy_data(legacy: &Path, target: &Path) -> PortableMigration {
             }
         }
         match copy_tree_atomically(&source, &destination, &mut report.skipped) {
-            Ok(()) => report.copied.push(name.to_string()),
+            Ok(()) => {
+                report.copied.push(name.to_string());
+                marker.settled.insert(name.to_string(), "copied".to_string());
+                marker_dirty = true;
+            }
             Err(e) => report.failed.push(format!("{name}: 复制失败 {e}")),
         }
     }
-    // 有失败时不写标记：下次启动重试并重新提示（数据没搬过来这件事不能被静默吞掉）
-    if report.failed.is_empty() && has_legacy_data {
-        write_migration_marker(target, &report);
+    if marker_dirty {
+        marker.at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        if let Err(e) = write_migration_marker(target, &marker) {
+            // 标记写不进去 = 下次启动会重新检查迁移状态；这本身不是数据问题，
+            // 但「为什么之后又弹出一次迁移提示」必须能从界面上查到
+            report.warnings.push(format!(
+                "迁移状态标记写入失败（下次启动会重新检查迁移状态）: {e}"
+            ));
+        }
     }
     report
 }
 
-/// 写迁移标记。失败不阻断启动：最坏结果是下次启动重复迁移（`DestState::NonEmpty`
-/// 会把它挡掉并再提示一次），不会丢数据。
-fn write_migration_marker(target: &Path, report: &PortableMigration) {
+/// 目录里是否有任何条目（不递归：空目录 / 只有空子目录都算「没内容」）
+fn dir_has_entries(path: &Path) -> bool {
+    std::fs::read_dir(path)
+        .map(|mut entries| entries.next().is_some())
+        .unwrap_or(false)
+}
+
+fn write_migration_marker(target: &Path, marker: &MigrationMarker) -> Result<(), String> {
     // 生产路径上 `resolve_app_data_dir` 已经建好目录；这里兜一次是为了让
     // 「标记一定和迁移结果同时落地」不依赖调用顺序
-    let _ = std::fs::create_dir_all(target);
-    let marker = target.join(MIGRATION_MARKER);
-    let payload = serde_json::json!({
-        "from": report.from,
-        "to": report.to,
-        "copied": report.copied,
-        "skipped": report.skipped,
-        "at": std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0),
-    });
-    let _ = std::fs::write(marker, payload.to_string());
+    std::fs::create_dir_all(target)
+        .map_err(|e| format!("建目录失败 {}: {e}", target.display()))?;
+    let body = serde_json::to_vec(marker).map_err(|e| format!("序列化失败: {e}"))?;
+    std::fs::write(target.join(MIGRATION_MARKER), body)
+        .map_err(|e| format!("写入失败 {}: {e}", target.join(MIGRATION_MARKER).display()))
 }
 
 /// 先整树复制到同级临时目录，成功后再改名，避免「复制到一半中断」留下半份主题目录，
@@ -315,7 +372,12 @@ fn copy_tree_atomically(
     if staging.exists() {
         std::fs::remove_dir_all(&staging)?;
     }
-    copy_dir_recursive(source, &staging, skipped)?;
+    // 复制失败同样清掉半成品：否则 data/ 下会留下一个既没结算、也不在白名单里的
+    // `.themes.migrating`，用户拷走便携包时带上一份不完整数据
+    if let Err(e) = copy_dir_recursive(source, &staging, skipped) {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(e);
+    }
     if let Err(e) = std::fs::rename(&staging, destination) {
         let _ = std::fs::remove_dir_all(&staging);
         return Err(e);
@@ -535,6 +597,46 @@ mod tests {
         assert_eq!(report.copied, vec!["themes".to_string(), "recovery".to_string()]);
         assert!(report.failed.is_empty(), "{:?}", report.failed);
         assert!(portable.join("themes/aurora/aurora.css").is_file());
+    }
+
+    #[test]
+    fn empty_legacy_dir_does_not_settle_migration() {
+        // 安装版首启就会 ensureDir 出 themes/，所以「旧位置有 themes 但空」是常态。
+        // 这一刻没东西可搬，但绝不能结算：否则用户之后放进来的主题永远迁不过来
+        let root = TempDir::new("emptysource");
+        let legacy = root.path().join("roaming");
+        let portable = root.path().join("data");
+        fs::create_dir_all(legacy.join("themes")).expect("建空的旧主题目录");
+
+        let nothing = migrate_legacy_data(&legacy, &portable);
+        assert!(!nothing.has_report(), "没内容可搬时不该有报告: {nothing:?}");
+        assert!(
+            !portable.join(MIGRATION_MARKER).exists(),
+            "空源目录不得结算（否则之后放进来的主题永远不迁）"
+        );
+
+        // 之后旧位置真有主题了 → 必须迁移
+        fs::write(legacy.join("themes/late.css"), "late").expect("写主题");
+        let later = migrate_legacy_data(&legacy, &portable);
+        assert_eq!(later.copied, vec!["themes".to_string()]);
+        assert_eq!(
+            fs::read_to_string(portable.join("themes/late.css")).expect("应迁入"),
+            "late"
+        );
+    }
+
+    #[test]
+    fn settled_migration_keeps_source_path_for_the_report() {
+        // 「来源」是弹窗里唯一告诉用户旧数据在哪的字段：结算后再次调用不能把它清成空串
+        let root = TempDir::new("settled");
+        let (legacy, portable) = seed_legacy(root.path());
+        migrate_legacy_data(&legacy, &portable);
+
+        let again = migrate_legacy_data(&legacy, &portable);
+
+        assert!(!again.has_report(), "已结算不应重复报告: {again:?}");
+        assert_eq!(again.from, legacy.display().to_string());
+        assert_eq!(again.to, portable.display().to_string());
     }
 
     #[test]

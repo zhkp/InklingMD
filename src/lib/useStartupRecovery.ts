@@ -55,7 +55,12 @@ export function useStartupRecovery(): void {
       // 报告是**一次性**的（Rust 侧 take 即清空），所以取到就立刻显示，
       // 不能先取后放：中途 `return` / 组件卸载 / StrictMode 双跑都会让它永久丢失。
       // 这里刻意不看 `cancelled`：这是一次性启动提示，与组件存活无关。
-      const migration = await takePortableMigration().catch(() => null);
+      const migration = await takePortableMigration().catch((error: unknown) => {
+        // 取走前 Rust 已清空状态：这里再失败就等于这份提示永久丢失，
+        // 至少要留痕（否则「迁移了但没提示」无从查起）
+        console.warn("[portable] 取迁移结果失败：", error);
+        return null;
+      });
       if (migration) await reportPortableMigration(migration);
       // 先取旧标记再写新标记：`beginSession()` 会把同一个文件覆盖成 cleanExit:false，
       // 之后再读就永远读到 false（「上次正常退出不提示」会变成死代码）

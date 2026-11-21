@@ -4,6 +4,8 @@
 // `resolve_app_data_dir` 同源，否则便携包的数据仍写系统目录（issue 的原始症状），
 // 或前端算出的路径被 `write_recovery_file` 的守卫判成越界。
 
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const { invokeMock, isTauriMock } = vi.hoisted(() => ({
@@ -128,18 +130,30 @@ describe("#404 便携迁移提示", () => {
     expect(text.split("\n")[0]).toBe("便携模式数据迁移部分失败。");
   });
 
-  it("目标已有数据（未合并）→ warning，首句说明本次未复制", () => {
+  it("一个字节都没复制（已有数据不合并）→ warning，首句不替原因下结论", () => {
     const { text, kind } = portableMigrationMessage({
       ...EMPTY_REPORT,
       skipped: ["themes: 便携目录已有数据，未合并（需要的话请手动复制旧位置的内容）"],
     });
 
     expect(kind).toBe("warning");
-    expect(text.split("\n")[0]).toBe("便携模式：便携目录已有数据，本次未复制。");
+    expect(text.split("\n")[0]).toBe("便携模式：本次没有复制任何数据。");
     expect(text).toContain("未合并");
   });
 
-  it("只有启动警告（如 asset scope 放行失败）→ warning，且警告正文可见", () => {
+  it("没复制的原因是符号链接 → 首句仍只说「没有复制」，不得谎称「已有数据」", () => {
+    const { text, kind } = portableMigrationMessage({
+      ...EMPTY_REPORT,
+      skipped: ["themes: 旧位置是符号链接，未跟随复制（如需搬走请直接复制链接目标）"],
+    });
+
+    expect(kind).toBe("warning");
+    expect(text.split("\n")[0]).toBe("便携模式：本次没有复制任何数据。");
+    expect(text.split("\n")[0]).not.toContain("已有数据");
+    expect(text).toContain("符号链接");
+  });
+
+  it("复制成功但有启动警告（如 asset scope 放行失败）→ warning，首句仍是「已复制」", () => {
     const { text, kind } = portableMigrationMessage({
       ...EMPTY_REPORT,
       copied: ["themes"],
@@ -147,8 +161,46 @@ describe("#404 便携迁移提示", () => {
     });
 
     expect(kind).toBe("warning");
+    // 启动问题不是「数据没搬」，首句不能这么说
+    expect(text.split("\n")[0]).toBe("便携模式：已把系统目录的应用数据复制到便携目录。");
     expect(text).toContain("主题目录未加入 asset 白名单");
-    // 有复制成功的事实也要照样说清
-    expect(text.split("\n")[0]).toContain("有部分数据没有带过来");
+  });
+
+  it("只有启动问题（什么都没迁）→ warning，首句与「数据迁移」区分开", () => {
+    const { text, kind } = portableMigrationMessage({
+      ...EMPTY_REPORT,
+      warnings: ["主题目录未加入 asset 白名单，主题里的图片/字体将无法加载"],
+    });
+
+    expect(kind).toBe("warning");
+    expect(text.split("\n")[0]).toBe("便携模式已启动，但有以下启动问题。");
+    expect(text).toContain("asset 白名单");
+  });
+});
+
+// 报告形状是 Rust → IPC → TS 的跨语言契约：任何一侧改名都必须在测试里红，
+// 否则前端会把 undefined 静默当成空数组（弹窗少一行，没人发现）
+describe("#404 迁移报告字段契约（Rust ↔ TS 逐字同名）", () => {
+  const FIELDS = ["from", "to", "copied", "failed", "skipped", "warnings"];
+
+  it("Rust PortableMigration 的字段与 TS 接口一致", () => {
+    const rustSource = readFileSync(
+      resolve(process.cwd(), "src-tauri/src/app_paths.rs"),
+      "utf8",
+    );
+    const structBody =
+      rustSource.match(/pub struct PortableMigration \{([\s\S]*?)\n\}/)?.[1] ?? "";
+    const rustFields = [...structBody.matchAll(/^\s*pub (\w+):/gm)].map((match) => match[1]);
+
+    const tsSource = readFileSync(resolve(process.cwd(), "src/lib/appDataRoot.ts"), "utf8");
+    const interfaceBody =
+      tsSource.match(/export interface PortableMigration \{([\s\S]*?)\n\}/)?.[1] ?? "";
+    const tsFields = [...interfaceBody.matchAll(/^\s{2}(\w+)\??:/gm)].map((match) => match[1]);
+
+    // 解析失败要显式失败，不能「两个空数组相等」蒙过去
+    expect(rustFields.length).toBeGreaterThan(0);
+    expect(tsFields.length).toBeGreaterThan(0);
+    expect([...rustFields].sort()).toEqual([...FIELDS].sort());
+    expect([...tsFields].sort()).toEqual([...FIELDS].sort());
   });
 });

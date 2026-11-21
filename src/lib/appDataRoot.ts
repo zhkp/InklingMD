@@ -26,7 +26,9 @@ export interface PortableMigration {
 /**
  * 应用数据根（Rust 侧解析，两条分支都保证目录已存在）。
  *
- * **只在桌面端调用**：其余调用方都先判 `isTauri()`（浏览器预览没有 Tauri IPC）。
+ * 本函数**不判** `isTauri()`（浏览器预览没有 Tauri IPC）：调用方要么自己先判
+ * `isTauri()`（`themesRoot` / `beginSession` 等），要么 try/catch 兜住并回落
+ * （`store/theme.ts` 的 `assetRoot`）。新增调用方必须照做。
  */
 export async function appDataRoot(): Promise<string> {
   return invoke<string>("app_data_root");
@@ -63,15 +65,22 @@ export function portableMigrationMessage(migration: PortableMigration): {
   if (failed.length > 0) {
     headline = copied.length > 0 ? "便携模式数据迁移部分失败。" : "便携模式数据迁移未完成。";
     kind = "error";
-  } else if (skipped.length > 0 || warnings.length > 0) {
+  } else if (copied.length > 0) {
+    // 复制成功过：首句说复制，未复制/启动问题放在后面的清单里
     headline =
-      copied.length > 0
-        ? "便携模式数据迁移完成，但有部分数据没有带过来。"
-        : "便携模式：便携目录已有数据，本次未复制。";
+      skipped.length > 0
+        ? "便携模式：已复制应用数据，但有部分条目没有复制。"
+        : "便携模式：已把系统目录的应用数据复制到便携目录。";
+    kind = skipped.length > 0 || warnings.length > 0 ? "warning" : "info";
+  } else if (skipped.length > 0) {
+    // 一个字节都没复制：原因可能是「已有数据不合并」「符号链接」等，
+    // 首句不能替它们下结论（旧版在这里恒说「便携目录已有数据」，符号链接场景就是假陈述）
+    headline = "便携模式：本次没有复制任何数据。";
     kind = "warning";
   } else {
-    headline = "便携模式：已把系统目录的应用数据复制到便携目录。";
-    kind = "info";
+    // 只剩启动问题（asset 白名单放行失败、取旧目录失败等）：与「数据没搬」不是一回事
+    headline = "便携模式已启动，但有以下启动问题。";
+    kind = "warning";
   }
 
   const lines = [headline, `来源：${migration.from}`, `目标：${migration.to}`];
