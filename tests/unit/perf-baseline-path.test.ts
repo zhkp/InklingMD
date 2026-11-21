@@ -4,6 +4,7 @@
 // `.perf-baseline/quick/headless/r2/` —— 实测把 dev 的 CI 基线覆盖了一次。
 // 这组断言就是防它回归的：新环境必须有自己的目录。
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { baselinePath, envDirPrefix } from "../perf/baseline-path.mjs";
 
@@ -46,5 +47,15 @@ describe("baselinePath", () => {
     // comparability.js: MODE_FALLBACK=headless、ROUNDS_FALLBACK=1
     const p = baselinePath(BASE, "ci-ubuntu", "full", "id", undefined, undefined);
     expect(p).toBe(join(BASE, "full", "headless", "r1", "id.json"));
+  });
+
+  it("本机口径目录必须被 .gitignore 忽略，CI 基线必须能进仓库（#421 评审 5）", () => {
+    // 契约：入库的只有 CI 基线。本机 prod 播种写到 `.perf-baseline/prod-local/`，
+    // 不忽略的话一次 `git add -A` 就会把本机数值混进提交。
+    const gitignore = readFileSync(".gitignore", "utf8");
+    expect(gitignore).toMatch(/^\.perf-baseline\/local\/$/m);
+    expect(gitignore).toMatch(/^\.perf-baseline\/prod-local\/$/m);
+    // 不能整目录忽略，否则 CI 基线也进不了仓库
+    expect(gitignore).not.toMatch(/^\.perf-baseline\/$/m);
   });
 });

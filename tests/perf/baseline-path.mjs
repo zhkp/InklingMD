@@ -2,8 +2,10 @@
 //
 // 路径 = **测量配置** 的函数：`<BASE_DIR>/<envPrefix><profile>/<mode>/r<rounds>/<id>.json`
 //
-// `envPrefix` 的规则见 envDirPrefix：只有 `prod-*` 这类新口径必须独立命名空间，
-// 否则会像 #420 首版那样把生产口径的数值写进 dev 的 CI 基线目录（实测覆盖过一次）。
+// `envPrefix` 的规则见 envDirPrefix：**白名单**式——只有 `local` 与两个既有的
+// CI 环境占用历史目录，其余任何 env（`prod-*`、将来的 `ci-macos` 等）都有自己的
+// 命名空间。首版反过来做（只给 `local` 加前缀）时，`prod-local` 被当成 CI 默认
+// 环境、把生产口径的数值直接写进 dev 的 CI 基线目录（实测覆盖过一次）。
 
 import { resolve } from "node:path";
 import { MODE_FALLBACK, ROUNDS_FALLBACK } from "./comparability.js";
