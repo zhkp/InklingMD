@@ -35,6 +35,8 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { resolve, join } from "node:path";
 import { baselineComparability, MODE_FALLBACK, ROUNDS_FALLBACK } from "./comparability.js";
+import { baselinePath as baselinePathFor } from "./baseline-path.mjs";
+import { runtimeDescription } from "./report-header.mjs";
 import {
   ATTRIBUTION_METRICS,
   COMPARED_SCALARS,
@@ -166,9 +168,13 @@ function readPwReport() {
   }
 }
 
-/** baseline 路径：本地基线隔离在 local/ 下，避免与 CI 基线互相污染 */
 /**
- * 基线文件路径 = **测量配置** 的函数：`<BASE_DIR>/[local/]<profile>/<mode>/r<rounds>/<id>.json`
+ * 基线文件路径 = **测量配置** 的函数：
+ * `<BASE_DIR>/[<env>/]<profile>/<mode>/r<rounds>/<id>.json`
+ *
+ * 前缀是白名单式的（见 `baseline-path.mjs` 的 envDirPrefix）：`local` 与
+ * `ci-ubuntu` / `ci-windows` 以外的任何 env（prod-*、将来的 ci-macos 等）都带
+ * 自己的目录，避免新口径静默写进历史共享目录。
  *
  * 为什么把 mode / rounds 放进路径（而不是只靠 comparability 拦截）：
  * 它们是**测量配置**，不同配置的绝对值不可比。放在路径里，headless 日常回归与
@@ -181,10 +187,9 @@ function readPwReport() {
  * 所以它不进路径，由 comparability 的指纹校验负责。
  */
 function baselinePath(env, profile, id, mode, rounds) {
-  const envPrefix = env === "local" ? "local/" : "";
-  const modeSegment = mode ?? MODE_FALLBACK;
-  const roundsSegment = `r${rounds ?? ROUNDS_FALLBACK}`;
-  return resolve(BASE_DIR, `${envPrefix}${profile}/${modeSegment}/${roundsSegment}/${id}.json`);
+  // 路径规则见 `baseline-path.mjs`（#420）：`prod-*` 环境有自己的命名空间，
+  // 不会把生产口径的数值写进 dev 基线目录。抽成纯函数是为了让单测直接锁住。
+  return baselinePathFor(BASE_DIR, env, profile, id, mode, rounds);
 }
 
 function readBaseline(env, profile, id, mode, rounds) {
@@ -1031,9 +1036,9 @@ function main() {
   const lines = [];
   lines.push("# 性能 Benchmark 报告");
   lines.push("");
-  lines.push(
-    `> 运行时：Playwright chromium + vite dev server（未压缩、含 HMR）。**绝对值不代表生产构建**，仅用于同环境纵向对比。`,
-  );
+  // 运行时描述必须跟着口径走（#421 评审 4）：prod 通道跑的是 `vite build` 产物 +
+  // `vite preview`，写「dev server / 绝对值不代表生产构建」会与整份报告的目的相反。
+  lines.push(runtimeDescription(payload.env));
   lines.push("");
   lines.push(`- env：${payload.env}　profile：${payload.profile}　生成时间：${payload.generatedAt}`);
   if (runMeta) {

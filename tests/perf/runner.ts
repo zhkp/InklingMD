@@ -219,8 +219,10 @@ export function fixtureFor(
  */
 export function detectEnv(): string {
   const ci = process.env.CI === "true" || process.env.GITHUB_ACTIONS === "true";
-  if (!ci) return "local";
-  return process.platform === "win32" ? "ci-windows" : "ci-ubuntu";
+  const base = !ci ? "local" : process.platform === "win32" ? "ci-windows" : "ci-ubuntu";
+  // 构建口径也是环境（#420）：dev server 带 React 开发期插桩（`jsxDEV` /
+  // `addValueToProperties`），长任务的绝对值与生产构建不可比，基线必须分开。
+  return process.env.PERF_BUILD === "prod" ? `prod-${base}` : base;
 }
 
 export interface RawFile {

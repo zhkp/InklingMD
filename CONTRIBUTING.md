@@ -439,6 +439,50 @@ CI 上 Benchmark **不阻断合并**，只上传 `.perf-output/` 产物并写入
   真正会命中并触发重建的通常是 fixture。报告里会显式列出
   `未参与相对判定：FIXTURE_CHANGED(...)` 之类的原因。
 
+### prod 构建口径（`benchmark-prod.yml`，#420）
+
+dev server 带 React 开发期插桩（`jsxDEV` / `addValueToProperties`），长任务的绝对值会
+把开发期开销算进去。需要「在生产代码上判定」时走这条通道：它跑 `vite build` 产物 +
+`vite preview`，基线独立存放在 `prod-*` 命名空间，与 dev 通道互不覆盖。
+
+**跑法**（只有手动触发；不随 PR 运行）：
+
+```bash
+gh workflow run benchmark-prod.yml -f profile=quick      # 常规对照
+gh workflow run benchmark-prod.yml -f profile=full       # 含 2 万行档
+gh workflow run benchmark-prod.yml -f profile=quick -f absolute=true   # 绝对判定（按 uncapped 跑）
+gh workflow run benchmark-prod.yml -f profile=quick -f update_baseline=true   # 播种
+```
+
+也可在 Actions → **Benchmark (prod build)** → Run workflow 里点选。
+
+**基线落点**：`.perf-baseline/prod-ci-<os>/<profile>/<mode>/r<rounds>/`
+（如 `prod-ci-ubuntu/quick/headless/r2/`）。本机跑 `PERF_BUILD=prod` 时落在
+`prod-local/…`，该目录已 gitignore，**不要提交**。
+
+**首次/组合变化要先各自播种**：基线身份 = 测量配置，以下组合没有基线就会是「覆盖 0/N」，
+那是正常的，不是回归也不是 infra 故障：
+
+| 组合 | 何时需要播一次 |
+|---|---|
+| `profile=quick` + `mode=headless` | 首次启用 prod 通道 |
+| `profile=full` | 首次用 full 档跑 prod |
+| `absolute=true`（`mode=uncapped`） | 首次启用绝对判定 |
+| fixture 变更（指纹不匹配） | 换了压测文档后 |
+
+**播种步骤**：勾 `update_baseline` 跑完 → 从 **Job Summary** 看该取哪个 artifacts
+（无嫌疑取 `perf-prod-<profile>`；起了复测取 `-retest`；起了确认轮取 `-retest2`；
+取错＝本次播种静默丢失）→ 把其中的 `.perf-baseline/prod-*/` 提交回仓库。
+
+**判定口径**：常规跑（`update_baseline` 未勾）会下发 `PERF_REQUIRE_COMPARISON=1`，
+覆盖不足时 `report` 以 exit 2 收尾，Job Summary 会写明「本次未与任何基线比较，结论
+不构成性能验证」；播种那次豁免该门禁。三段 job（`benchmark` → `retest` → `retest2`）
+与 dev 通道同构，FAIL 必须由第三个独立 runner 确认。
+
+**调试钩子**：`force_suspects` / `force_suspects2` 可以把指定场景强制当成「疑似回归 /
+确认轮候选」，用来确定性演练三段路径与 artifact 传递——prod 通道不随 PR 运行，
+这是它在首次真回归之前唯一的验证手段。
+
 ### 发版验证（tag 运行）
 
 > 发版的五阶段流程与「发版检查清单」见 [`docs/发布流程.md`](./docs/发布流程.md)；本节只覆盖 tag 运行的性能验证口径。
