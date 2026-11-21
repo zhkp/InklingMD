@@ -36,6 +36,13 @@
     "allow-copy-path",
     "allow-extract-zip",
     "allow-resource-themes-dir",
-    "allow-take-pending-file"
+    "allow-take-pending-file",
+    "allow-app-data-root",
+    "allow-take-portable-migration",
+    "allow-list-dir-files",
+    "allow-file-stat",
+    "allow-read-document",
+    "allow-save-document",
+    "allow-write-recovery-file"
   ]
 }
