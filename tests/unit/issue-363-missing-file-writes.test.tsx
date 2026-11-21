@@ -1,5 +1,7 @@
 // issue #363：文件在磁盘上已不存在（外部删除 / 改名 / 目录被删 / 应用内改名或删目录）时，
 // 任何写盘入口（自动保存、Ctrl+S、切回 tab、退出、粘贴图片）都不得静默把它写回磁盘。
+// issue #392：图片是新建文件，额外要求「锚点文档仍在原处」——目录还在但文档没了
+// （外接卷卸载后挂载点退化为空目录）时同样不得落盘。
 // 真实 store + useAutoSave + useFileWatcher + useExitHandler，invoke 接真实临时目录
 // （tests/fixtures/realFsTauriBackend.ts），断言最终磁盘状态与 tab 状态。
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
@@ -52,6 +54,7 @@ import { useAutoSave } from "../../src/lib/useAutoSave";
 import { useFileWatcher } from "../../src/lib/useFileWatcher";
 import { useExitHandler } from "../../src/lib/useExitHandler";
 import { saveImageAsset } from "../../src/lib/assetStore";
+import { writeErrorCode } from "../../src/lib/writeErrors";
 
 let root: string;
 const W = (...p: string[]) => nodePath.join(root, ...p);
@@ -451,7 +454,7 @@ describe("issue #363 / #366：应用内改名、删除目录后的子文件 tab"
   });
 });
 
-describe("issue #363：图片资源写入", () => {
+describe("issue #363 / #392：图片资源写入", () => {
   it("文档所在目录已被删除：粘贴图片失败，不重建目录", async () => {
     nodeFs.mkdirSync(W("dir"));
     nodeFs.writeFileSync(W("dir/a.md"), "A");
@@ -471,5 +474,96 @@ describe("issue #363：图片资源写入", () => {
       saveImageAsset(W("dir/a.md"), new Uint8Array([137, 80, 78, 71]), "x.png"),
     ).resolves.toBe("assets/x.png");
     expect(nodeFs.existsSync(W("dir/assets/x.png"))).toBe(true);
+  });
+
+  it("文档已被删除但目录仍在（外接卷卸载后的空挂载点）：拒绝写入，不创建 assets/（#392）", async () => {
+    // 卷卸载后 /media/usb 退化为系统盘上的空目录：文档与卷上的 assets/ 一起消失
+    nodeFs.mkdirSync(W("media/usb"), { recursive: true });
+    nodeFs.writeFileSync(W("media/usb/note.md"), "A");
+    nodeFs.rmSync(W("media/usb/note.md"));
+
+    const err = await saveImageAsset(
+      W("media/usb/note.md"),
+      new Uint8Array([137, 80, 78, 71]),
+      "x.png",
+    ).catch((e) => e);
+
+    expect(writeErrorCode(err)).toBe("TARGET_MISSING");
+    expect(err.message).toBe("文档已不在原处，图片未插入");
+    expect(nodeFs.existsSync(W("media/usb/assets"))).toBe(false);
+    // 文档本身不得被这次图片写入「复活」，挂载点也不得留下其它产物
+    expect(nodeFs.existsSync(W("media/usb/note.md"))).toBe(false);
+    expect(nodeFs.readdirSync(W("media/usb"))).toEqual([]);
+  });
+
+  it("文档已删除、assets/ 仍在：不走进「目录已存在」捷径，同样拒绝（#392）", async () => {
+    nodeFs.mkdirSync(W("docs/assets"), { recursive: true });
+    nodeFs.writeFileSync(W("docs/a.md"), "A");
+    nodeFs.rmSync(W("docs/a.md"));
+
+    await expect(
+      saveImageAsset(W("docs/a.md"), new Uint8Array([137, 80, 78, 71]), "x.png"),
+    ).rejects.toThrow("文档已不在原处，图片未插入");
+    expect(nodeFs.readdirSync(W("docs/assets"))).toEqual([]);
+  });
+
+  it("文档路径被同名目录占位、查重未命中：写入分支同样抛文档缺失文案（#392 复核）", async () => {
+    // 系统盘上的挂载点被一个与文档同名的目录占住（check_write_target → NOT_A_FILE）；
+    // 查重未命中，所以走的是写入分支（Rust 侧判定），而不是复用分支的 fileStat 判定
+    nodeFs.mkdirSync(W("docs/note.md"), { recursive: true });
+
+    const err = await saveImageAsset(
+      W("docs/note.md"),
+      new Uint8Array([137, 80, 78, 71]),
+      "x.png",
+    ).catch((e) => e);
+
+    // 错误码保留后端分类，文案必须与复用分支一致：同一条件不能有两套用户可见提示
+    expect(writeErrorCode(err)).toBe("NOT_A_FILE");
+    expect(err.message).toBe("文档已不在原处，图片未插入");
+    expect(nodeFs.existsSync(W("docs/assets"))).toBe(false);
+  });
+
+  it("锚点判定通过后文档才消失（写盘途中卷被卸载）：不落盘、不留下 assets/（#392 复核 P2）", async () => {
+    nodeFs.mkdirSync(W("media/usb"), { recursive: true });
+    nodeFs.writeFileSync(W("media/usb/note.md"), "A");
+    let anchorChecks = 0;
+    // 入口判定放行之后、真正写盘之前卷被卸载：文档随卷一起消失
+    h.backend = createRealFsBackend({
+      afterBinaryAnchorCheck: () => {
+        anchorChecks += 1;
+        nodeFs.rmSync(W("media/usb/note.md"));
+      },
+    });
+
+    const err = await saveImageAsset(
+      W("media/usb/note.md"),
+      new Uint8Array([137, 80, 78, 71]),
+      "x.png",
+    ).catch((e) => e);
+
+    expect(anchorChecks).toBe(1); // 确认撞上了「判定之后才消失」这个窗口
+    expect(writeErrorCode(err)).toBe("TARGET_MISSING");
+    expect(err.message).toBe("文档已不在原处，图片未插入");
+    // 拒绝路径零残留：补建的 assets/ 必须撤掉，临时文件也不得留下
+    expect(nodeFs.existsSync(W("media/usb/assets"))).toBe(false);
+    expect(nodeFs.readdirSync(W("media/usb"))).toEqual([]);
+  });
+
+  it("文档已删除、assets/ 里有同内容图片：查重不得绕过锚点（#392 复核 F1）", async () => {
+    // 先正常落盘一张图，再模拟卷卸载后「系统盘挂载点上残留旧文件 + 文档消失」
+    const png = new Uint8Array([137, 80, 78, 71]);
+    nodeFs.mkdirSync(W("docs"));
+    nodeFs.writeFileSync(W("docs/a.md"), "A");
+    await expect(saveImageAsset(W("docs/a.md"), png, "x.png")).resolves.toBe("assets/x.png");
+    nodeFs.rmSync(W("docs/a.md"));
+
+    // 同一张图再粘贴：查重会命中 docs/assets/x.png，但文档已不在原处，必须拒绝而不是复用
+    const err = await saveImageAsset(W("docs/a.md"), png, "y.png").catch((e) => e);
+    expect(writeErrorCode(err)).toBe("TARGET_MISSING");
+    expect(err.message).toBe("文档已不在原处，图片未插入");
+    // 拒绝路径不得产生新副本（y.png 不应落盘）
+    expect(nodeFs.existsSync(W("docs/assets/y.png"))).toBe(false);
+    expect(nodeFs.readdirSync(W("docs/assets"))).toEqual(["x.png"]);
   });
 });

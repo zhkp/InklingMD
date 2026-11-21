@@ -8,10 +8,21 @@
 //   父目录或祖先被普通文件占据 → PARENT_NOT_DIR；
 //   目标存在但不是普通文件 → NOT_A_FILE；mustExist=true 且目标缺失 → TARGET_MISSING；
 //   写临时文件 + rename 原子替换
-// - write_binary_file：父目录缺失时仅在 createParentDir=true 且祖父目录存在时建一层
+// - write_binary_file：父目录缺失时仅在 createParentDir=true 且祖父目录存在时建一层；
+//   anchorPath（图片所属文档）必须仍是普通文件，且在**建目录之前**校验，写盘前再校验一次
+//   （拒绝时撤掉本次补建的目录，与 Rust `ensure_anchor_at_write_boundary` 同判，#392）。
+//   未复刻（由 commands/mod.rs 的单测覆盖）：rename 前的第二道复核（含「先删临时文件再撤目录」）、
+//   Windows 上 rename 冲突的重试替换（`replace_file_with_retry`）、Base64 解码校验（非法 payload
+//   在这里被 `Buffer.from` 静默忽略）
+// - save_document：#362 的替换语义与 notFound / conflict / written 三态；半失败（内容只留在临时
+//   文件、`temp-kept` 登记）未复刻，夹具的 conflict 恒不带 tempPath
+// - find_asset_by_hash：按大小 + SHA-256 在目录直接子文件中查找（跳过 `.` 临时文件、
+//   取字典序最小、不跟随符号链接），目录不存在返回 null——#220 去重的真实语义，
+//   让「查重命中」分支也能在真实磁盘上被测到
 // - file_mtime / read_text_file：Path::exists 跟随符号链接，不存在即报错；
 //   file_mtime 对非普通文件（如同名目录）报 NOT_A_FILE
 
+import * as nodeCrypto from "node:crypto";
 import * as nodeFs from "node:fs";
 import * as nodePath from "node:path";
 
@@ -98,7 +109,16 @@ function checkTarget(filePath: string, mustExist: boolean): void {
   }
 }
 
-export function createRealFsBackend() {
+interface RealFsBackendOptions {
+  /**
+   * test-only 钩子：`write_binary_file` 在建目录与目标判定之后、写盘之前调用，用来模拟
+   * 「入口判定通过之后文档被删 / 卷被卸载」的竞态（对齐 Rust 第 1 道边界，见
+   * `ensure_anchor_at_write_boundary`，#392 复核 P2）。生产代码里没有这个钩子。
+   */
+  afterBinaryAnchorCheck?: () => void;
+}
+
+export function createRealFsBackend(options: RealFsBackendOptions = {}) {
   const calls: InvokeCall[] = [];
   const handlers: Record<string, (a: Record<string, any>) => unknown> = {
     write_text_file: ({ filePath, content, mustExist, createParents }) => {
@@ -116,19 +136,43 @@ export function createRealFsBackend() {
       checkTarget(filePath, !!mustExist);
       atomicWrite(filePath, Buffer.from(content, "utf8"));
     },
-    write_binary_file: ({ filePath, data, createParentDir }) => {
+    write_binary_file: ({ filePath, data, createParentDir, anchorPath }) => {
+      // #392：锚点（图片所属文档）已不在原处时先拒绝——与 Rust 一致，校验在建目录之前，
+      // 否则外接卷卸载后的空挂载点会留下一个系统盘上的 assets/。
+      // 用 `!== undefined` 而非真值判断：空串在 Rust 侧是 Some("")，元数据取不到 → 拒绝
+      if (anchorPath !== undefined) checkTarget(anchorPath, true);
       const parent = nodePath.dirname(filePath);
+      let createdParent = false;
       if (!isDir(parent)) {
         if (parentBlockedByFile(parent)) {
           throw `${WRITE_ERROR_PARENT_NOT_DIR}: 所在文件夹路径已被文件占用: ${parent}`;
         }
         if (createParentDir && isDir(nodePath.dirname(parent))) {
           nodeFs.mkdirSync(parent);
+          createdParent = true;
         } else {
           throw `${WRITE_ERROR_PARENT_MISSING}: 所在目录已不存在: ${parent}`;
         }
       }
       checkTarget(filePath, false);
+      // 探针位置与 Rust 第 1 道边界对齐：建目录 + 目标判定之后、写盘之前
+      options.afterBinaryAnchorCheck?.();
+      // 写盘边界重校验（与 Rust 的 ensure_anchor_at_write_boundary 同判）：
+      // 入口判定与这里之间夹着解码 + 建目录，期间文档可能已被删、卷可能已卸载
+      if (anchorPath !== undefined) {
+        try {
+          checkTarget(anchorPath, true);
+        } catch (e) {
+          if (createdParent) {
+            try {
+              nodeFs.rmdirSync(parent); // 非空（有并发写入）时失败，保持原样
+            } catch {
+              /* 目录非空：不撤 */
+            }
+          }
+          throw e;
+        }
+      }
       atomicWrite(filePath, Buffer.from(data, "base64"));
     },
     read_text_file: ({ filePath }) => {
@@ -147,7 +191,8 @@ export function createRealFsBackend() {
     },
     file_stat: ({ filePath }) => toFileStat(statOfFile(filePath)),
     // #362 写路径：替换语义 + 回执。语义必须与 Rust `save_document` 一致，
-    // 否则「删除后保存」「外部改动」这些真实 FS 用例会变成伪断言
+    // 否则「删除后保存」「外部改动」这些真实 FS 用例会变成伪断言。
+    // 例外：半失败（内容只留在临时文件 + `temp-kept` 登记）未复刻，conflict 恒不带 tempPath
     save_document: (a: Record<string, any>) => {
       const { filePath, content, expected, createParentDirs, overwriteExisting } = a as {
         filePath: string;
@@ -200,7 +245,31 @@ export function createRealFsBackend() {
     },
     rename_path: ({ from, to }) => nodeFs.renameSync(from, to),
     delete_path: ({ path }) => nodeFs.rmSync(path, { recursive: true }),
-    find_asset_by_hash: () => null,
+    find_asset_by_hash: ({ dirPath, size, sha256 }) => {
+      if (!isDir(dirPath)) return null;
+      // 与 assets.rs 的 find_asset_by_hash_sync 同判（#392 复核 F4）：
+      // lstat 不跟随符号链接、跳过 `.` 开头的原子写临时文件、多个同内容副本时
+      // 稳定返回字典序最小的那个，非法 sha 直接报错
+      const wanted = String(sha256).trim().toLowerCase();
+      if (!/^[0-9a-f]{64}$/.test(wanted)) throw `非法的 SHA-256: ${sha256}`;
+      const candidates = nodeFs
+        .readdirSync(dirPath)
+        .filter((name) => !name.startsWith("."))
+        .sort()
+        .map((name) => ({ name, path: nodePath.join(dirPath, name) }))
+        .filter((candidate) => {
+          const stat = nodeFs.lstatSync(candidate.path);
+          return stat.isFile() && stat.size === size;
+        });
+      for (const candidate of candidates) {
+        const digest = nodeCrypto
+          .createHash("sha256")
+          .update(nodeFs.readFileSync(candidate.path))
+          .digest("hex");
+        if (digest === wanted) return candidate.name;
+      }
+      return null;
+    },
     list_dir: ({ dirPath }) => ({
       name: nodePath.basename(dirPath),
       path: dirPath,
