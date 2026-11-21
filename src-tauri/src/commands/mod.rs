@@ -2370,12 +2370,9 @@ pub async fn write_recovery_file(
     content: String,
     durability: Option<String>,
 ) -> Result<(), String> {
-    use tauri::Manager as _;
-    let root = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| format!("取应用数据目录失败: {e}"))?
-        .join("recovery");
+    // #404：守卫根必须与应用数据根同源（便携模式下是 exe 同级 data/）；
+    // 这里若继续写死 `app_data_dir()`，便携模式前端算出的路径会被判「恢复区之外」
+    let root = crate::app_paths::resolve_app_data_dir(&app)?.join("recovery");
     validate_recovery_path(&path, &root)?;
     let durability = match durability.as_deref() {
         Some("sync") => write_engine::Durability::Sync,

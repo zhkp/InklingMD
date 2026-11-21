@@ -31,11 +31,12 @@ export interface CursorIo {
 }
 
 const defaultIo: CursorIo = {
-  // 延迟取：部分测试的 `@tauri-apps/api/path` mock 只提供 join，
+  // 延迟取：部分测试的 Tauri mock 只提供部分 API，
   // 顶层静态导入会让整个测试文件在收集阶段就失败
+  // #404：与应用数据根同源（便携模式为 exe 同级 data/）
   async appDataDir() {
-    const { appDataDir } = await import("@tauri-apps/api/path");
-    return appDataDir();
+    const { appDataRoot } = await import("./appDataRoot");
+    return appDataRoot();
   },
   async readTextFile(path) {
     const { readTextFile } = await import("./fs");

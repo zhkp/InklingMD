@@ -9,8 +9,8 @@
  */
 import { create } from "zustand";
 import { convertFileSrc, invoke, isTauri } from "@tauri-apps/api/core";
-import { appDataDir } from "@tauri-apps/api/path";
 import { open, message } from "@tauri-apps/plugin-dialog";
+import { appDataRoot } from "../lib/appDataRoot";
 import { loadJSON, writeJSON } from "../lib/storage";
 import {
   deleteThemeEntry,
@@ -516,10 +516,11 @@ async function loadThemeFromDisk(set: SetState, themeId: string): Promise<void> 
   const theme = getTheme(themeId);
   if (!theme || theme.css?.kind !== "file") return;
   try {
-    // `assetRoot` = assetProtocol.scope 的根（应用数据目录）；浏览器/E2E 无 Tauri path API → 回落主题目录
+    // `assetRoot` = assetProtocol.scope 的根（应用数据根；便携模式为 exe 同级 data/，#404）；
+    // 浏览器/E2E 无 Tauri 命令 → 回落主题目录
     let assetRoot: string;
     try {
-      assetRoot = normalizePath(await appDataDir());
+      assetRoot = normalizePath(await appDataRoot());
     } catch {
       assetRoot = dirNameOf(theme.css.path);
     }

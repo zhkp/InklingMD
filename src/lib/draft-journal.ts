@@ -94,8 +94,9 @@ const defaultIo: JournalIo = {
     return invoke<string>("read_text_file", { filePath: path });
   },
   async appDataDir() {
-    const { appDataDir } = await import("@tauri-apps/api/path");
-    return appDataDir();
+    // #404：与应用数据根同源（便携模式下去掉 `@tauri-apps/api/path` 的系统目录假设）
+    const { appDataRoot } = await import("./appDataRoot");
+    return appDataRoot();
   },
   async removeFile(path) {
     // 命令名必须与 Rust 注册表 / `fs.deletePath` 一致（`delete_path`）；

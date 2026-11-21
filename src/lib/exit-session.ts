@@ -10,7 +10,7 @@
 // - `markUncleanExit()`：保留草稿，只把 `cleanExit` 写成 false —— 下次启动据此弹恢复。
 
 import { isTauri } from "@tauri-apps/api/core";
-import { appDataDir } from "@tauri-apps/api/path";
+import { appDataRoot } from "./appDataRoot";
 import { writeRecoveryFile } from "./fs";
 import { flushCursorCheckpoint } from "./cursor-checkpoint";
 import { useWorkspace } from "../store/workspace";
@@ -95,7 +95,8 @@ async function recoveryDir(): Promise<string> {
   // 必须先等 label 就绪：干净退出路径不会写任何草稿，ensureWindowLabel 没人调过，
   // 直接用 currentWindowLabel() 会写进 recovery/main/ 并覆盖主窗口的标记
   await ensureWindowLabel();
-  const base = await appDataDir();
+  // #404：与 write_recovery_file 的守卫根同源（便携模式为 exe 同级 data/）
+  const base = await appDataRoot();
   const sep = base.includes("\\") ? "\\" : "/";
   return `${base.replace(/[\\/]+$/, "")}${sep}recovery${sep}${currentWindowLabel()}`;
 }

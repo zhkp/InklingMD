@@ -155,7 +155,7 @@ jobs:
           # 便携版 resource_dir() 指向 exe 同目录，主题源副本必须位于 themes/。
           Copy-Item -Path "src-tauri/resources/themes" -Destination "$portableDir/themes" -Recurse
           # 便携模式标记文件：存在则启用绿色模式，数据写入同目录 data 文件夹
-          Set-Content -Path "$portableDir/portable.txt" -Value "This marker file enables portable mode. Keep it next to InklingMD.exe. App data will be stored in the 'data' folder beside the exe."
+          Set-Content -Path "$portableDir/portable.txt" -Value "This marker file enables portable mode. Keep it next to InklingMD.exe. All app data (themes, recovery, WebView2 cache) is stored in the 'data' folder beside the exe. Remove this file to fall back to the system AppData location."
           $portableZip = "src-tauri/target/release/InklingMD-${version}-portable.zip"
           Compress-Archive -Path "$portableDir/*" -DestinationPath $portableZip -Force
           Write-Host "Portable zip: $portableZip"
@@ -170,14 +170,19 @@ jobs:
           & node "scripts/check-bundled-theme-artifact.mjs" $portableAuditDir $expectedManifest
           if ($LASTEXITCODE -ne 0) { throw "便携 ZIP 主题资源核对失败" }
 
-      - name: Run portable app and verify first-run bundled themes
+      # #404：便携包的自我描述是「数据随身、不污染系统目录」，判据必须是**真实写盘落点**：
+      #   exe 同级 data/themes ← 预装主题运行时副本、data/recovery ← 会话标记，
+      #   且 %APPDATA%\com.inklingmd.editor 一条都不能出现。只读代码不算验收通过。
+      - name: Run portable app and verify data lands beside the exe
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $themesDir = Join-Path $env:APPDATA "com.inklingmd.editor/themes"
-          if (Test-Path -LiteralPath $themesDir) { Remove-Item -LiteralPath $themesDir -Recurse -Force }
-          if (Test-Path -LiteralPath $themesDir) { throw "运行时验收必须从无 themes 目录的干净环境开始" }
+          $roamingRoot = Join-Path $env:APPDATA "com.inklingmd.editor"
+          if (Test-Path -LiteralPath $roamingRoot) { Remove-Item -LiteralPath $roamingRoot -Recurse -Force }
+          if (Test-Path -LiteralPath $roamingRoot) { throw "运行时验收必须从无 Roaming 数据目录的干净环境开始" }
           $portableAuditDir = Join-Path $env:RUNNER_TEMP "inkling-portable-zip-audit"
+          $dataDir = Join-Path $portableAuditDir "data"
+          if (Test-Path -LiteralPath $dataDir) { Remove-Item -LiteralPath $dataDir -Recurse -Force }
           $evidenceDir = Join-Path $env:RUNNER_TEMP "inkling-portable-runtime-evidence"
           if (Test-Path -LiteralPath $evidenceDir) { Remove-Item -LiteralPath $evidenceDir -Recurse -Force }
           New-Item -ItemType Directory -Path $evidenceDir -Force | Out-Null
@@ -198,6 +203,26 @@ jobs:
             $app = Start-Process -FilePath $portableExe -WorkingDirectory $portableAuditDir -PassThru
             & node "scripts/probe-portable-bundled-themes.mjs" $evidenceDir $expectedManifest "9222"
             if ($LASTEXITCODE -ne 0) { throw "便携版首次启动主题验收失败" }
+            # 判据一：预装主题的运行时副本落在 exe 同级 data/themes（清单驱动，不写死清单）
+            $manifest = Get-Content -LiteralPath $expectedManifest -Raw | ConvertFrom-Json
+            $themesDir = Join-Path $dataDir "themes"
+            foreach ($entry in $manifest.themes) {
+              $cssPath = Join-Path $themesDir ($entry.css -replace '/', '\')
+              if (-not (Test-Path -LiteralPath $cssPath -PathType Leaf)) {
+                throw "便携模式主题未落在 exe 同级 data/themes：缺少 $($entry.css)（slug=$($entry.slug)）"
+              }
+            }
+            # 判据二：恢复区（会话标记）同样在便携目录
+            $sessionMarker = Join-Path $dataDir "recovery/main/session.json"
+            if (-not (Test-Path -LiteralPath $sessionMarker -PathType Leaf)) {
+              throw "便携模式恢复区未落在 exe 同级 data/recovery：缺少 main/session.json"
+            }
+            # 判据三：系统目录不得被污染（Roaming 里一条都不该出现）
+            if (Test-Path -LiteralPath $roamingRoot) {
+              $polluted = Get-ChildItem -LiteralPath $roamingRoot -Recurse -Force | Select-Object -First 20 | ForEach-Object { $_.FullName }
+              throw "便携模式仍写系统目录：$roamingRoot 被创建。内容：$($polluted -join '; ')"
+            }
+            "PASS portable data location: $themesDir + data/recovery，Roaming 未被创建" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append
           } finally {
             if ($null -ne $app) {
               $app.Refresh()
