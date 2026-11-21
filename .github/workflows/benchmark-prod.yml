@@ -12,7 +12,7 @@ name: Benchmark (prod build)
 # （#294）——所以 FAIL 必须由第三个独立 runner 确认，否则只能落 UNCONFIRMED。
 #
 # 只在手动触发时运行：构建 + 预览会让每个 PR 多几分钟，且 prod 基线播种前没有
-# 对照价值。播种步骤见 README 式的说明（workflow_dispatch 勾 update_baseline）。
+# 对照价值。跑法与播种步骤见 CONTRIBUTING.md 的「prod 构建口径」一节。
 
 on:
   workflow_dispatch:
@@ -37,6 +37,16 @@ on:
         required: false
         default: false
         type: boolean
+      force_suspects:
+        description: "调试用：强制把指定场景当作「疑似回归」（逗号分隔），确定性演练 retest job 的接线"
+        required: false
+        default: ""
+        type: string
+      force_suspects2:
+        description: "调试用：强制把指定场景当作「确认轮候选」（逗号分隔），确定性演练 retest2 job（需同时填 force_suspects）"
+        required: false
+        default: ""
+        type: string
       absolute:
         # CI runner 无显示设备：打开时按 uncapped 跑（解除 vsync 上限），否则绝对行
         # 衡量的是 60Hz 地板而不是代码。
@@ -105,11 +115,12 @@ jobs:
           PERF_UPDATE_BASELINE: ${{ inputs.update_baseline && '1' || '0' }}
           # 首播豁免：播种那次本来就没有可比基线；常规跑必须真的比出结论，
           # 覆盖不足时 report 退出 2（与 dev 通道 tag 运行的语义对齐）。
-          PERF_REQUIRE_COMPARISON: ${{ inputs.update_baseline && '' || '1' }}
+          PERF_REQUIRE_COMPARISON: ${{ inputs.update_baseline && '0' || '1' }}
           PERF_ABSOLUTE: ${{ inputs.absolute && '1' || '' }}
           PERF_UNCAPPED: ${{ inputs.absolute && '1' || '' }}
           # 拆出独立复测 job（#234）：有嫌疑时本 job 只测 + check。
           PERF_SPLIT_RETEST: "1"
+          PERF_FORCE_SUSPECTS: ${{ inputs.force_suspects }}
           CI: "true"
         run: pnpm run benchmark
 
@@ -152,7 +163,12 @@ jobs:
               case "$COVERAGE" in
                 "判定覆盖：0/"*)
                   echo ""
-                  echo "> ⚠️ **本次未与任何基线比较**：结论**不构成性能验证**。prod 基线需先播种（dispatch 勾 update_baseline，取回产物后提交）。"
+                  if [ "${{ inputs.update_baseline }}" = "true" ]; then
+                    echo "> 📦 **本次是播种**：覆盖 0/N 属正常（首播本来就没有可比基线）。"
+                    echo "> 请取回 \`perf-prod-${{ steps.profile.outputs.value }}\` 里的 \`.perf-baseline/prod-*/\` 提交回仓库，之后的运行才有对照。"
+                  else
+                    echo "> ⚠️ **本次未与任何基线比较**：结论**不构成性能验证**。prod 基线需先播种（dispatch 勾 update_baseline，取回产物后提交）。"
+                  fi
                   ;;
               esac
               echo ""
@@ -218,13 +234,17 @@ jobs:
           PERF_BUILD: prod
           PERF_PROFILE: ${{ needs.benchmark.outputs.profile }}
           PERF_UPDATE_BASELINE: ${{ inputs.update_baseline && '1' || '0' }}
-          PERF_REQUIRE_COMPARISON: ${{ inputs.update_baseline && '' || '1' }}
+          PERF_REQUIRE_COMPARISON: ${{ inputs.update_baseline && '0' || '1' }}
           PERF_ABSOLUTE: ${{ inputs.absolute && '1' || '' }}
           PERF_UNCAPPED: ${{ inputs.absolute && '1' || '' }}
           PERF_RETEST_ONLY: "1"
           # 不可省（#294 评审 P0）：它决定 planConfirmPhases 是否返回 handoff；
           # 缺了确认轮会跑在与 R2 同一台 runner 上。
           PERF_SPLIT_RETEST: "1"
+          # 确定性演练钩子（与 dev 同款）：没有它，三段路径只能等真回归触发，
+          # 而 prod 通道不随 PR 运行，接线在首次真回归前无法验证。
+          PERF_FORCE_SUSPECTS: ${{ inputs.force_suspects }}
+          PERF_FORCE_SUSPECTS2: ${{ inputs.force_suspects2 }}
           CI: "true"
         run: pnpm run benchmark
 
@@ -316,7 +336,7 @@ jobs:
           PERF_BUILD: prod
           PERF_PROFILE: ${{ needs.retest.outputs.profile }}
           PERF_UPDATE_BASELINE: ${{ inputs.update_baseline && '1' || '0' }}
-          PERF_REQUIRE_COMPARISON: ${{ inputs.update_baseline && '' || '1' }}
+          PERF_REQUIRE_COMPARISON: ${{ inputs.update_baseline && '0' || '1' }}
           PERF_ABSOLUTE: ${{ inputs.absolute && '1' || '' }}
           PERF_UNCAPPED: ${{ inputs.absolute && '1' || '' }}
           PERF_RETEST2_ONLY: "1"
