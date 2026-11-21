@@ -155,7 +155,7 @@ jobs:
           # 便携版 resource_dir() 指向 exe 同目录，主题源副本必须位于 themes/。
           Copy-Item -Path "src-tauri/resources/themes" -Destination "$portableDir/themes" -Recurse
           # 便携模式标记文件：存在则启用绿色模式，数据写入同目录 data 文件夹
-          Set-Content -Path "$portableDir/portable.txt" -Value "This marker file enables portable mode. Keep it next to InklingMD.exe. All app data (themes, recovery, WebView2 cache) is stored in the 'data' folder beside the exe. Remove this file to fall back to the system AppData location."
+          Set-Content -Path "$portableDir/portable.txt" -Value "This marker file enables portable mode. Keep it next to InklingMD.exe. All app data (themes, recovery, WebView2 cache) is stored in the 'data' folder beside the exe. Removing this file switches back to the system AppData location, but the data already written here is NOT moved back automatically - copy it yourself before removing the marker."
           $portableZip = "src-tauri/target/release/InklingMD-${version}-portable.zip"
           Compress-Archive -Path "$portableDir/*" -DestinationPath $portableZip -Force
           Write-Host "Portable zip: $portableZip"
@@ -205,6 +205,7 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw "便携版首次启动主题验收失败" }
             # 判据一：预装主题的运行时副本落在 exe 同级 data/themes（清单驱动，不写死清单）
             $manifest = Get-Content -LiteralPath $expectedManifest -Raw | ConvertFrom-Json
+            if (-not $manifest.themes -or $manifest.themes.Count -eq 0) { throw "源主题清单缺少 themes 数组，落点判据无法执行" }
             $themesDir = Join-Path $dataDir "themes"
             foreach ($entry in $manifest.themes) {
               $cssPath = Join-Path $themesDir ($entry.css -replace '/', '\')

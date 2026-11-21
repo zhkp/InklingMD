@@ -13,7 +13,13 @@
 //! `write_recovery_file` 的路径守卫会把前端算出来的路径判成「恢复区之外」。
 //!
 //! 安装版（没有标记文件）仍走 `app_data_dir()` 原路径：升级不得让用户已有主题「消失」。
+//!
+//! 平台边界：便携模式目前只随 Windows 便携 ZIP 交付（`portable.txt` 只打进那个包）。
+//! 非 Windows 上若用户自己放了这个文件，应用数据根照样会搬走，但 WebView2 那层
+//! （`WEBVIEW2_USER_DATA_FOLDER`）只存在于 Windows —— 即「浏览器数据留系统目录、
+//! 应用数据随身」的半迁移，属于已知边界，不是本模块可以补齐的。
 
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -23,12 +29,14 @@ use tauri::Manager;
 pub const PORTABLE_MARKER: &str = "portable.txt";
 /// 便携数据的目录名（exe 同级）
 pub const PORTABLE_DATA_DIR: &str = "data";
+/// 迁移完成标记：存在即不再尝试迁移（否则用户删掉的主题会被旧位置「复活」）
+pub const MIGRATION_MARKER: &str = ".migrated-from-appdata";
 /// 需要随包搬走的数据子目录（旧位置 → 便携位置）
 pub const MIGRATED_SUBDIRS: [&str; 2] = ["themes", "recovery"];
 
-/// 便携模式首次启动时从旧位置复制过来的结果。
+/// 便携模式首启时从旧位置复制过来的结果。
 ///
-/// 三个清单都为空 = 没有可报告的事（全新机器首启、或已经迁移过），前端不弹提示。
+/// 三个清单都为空且没有 warnings = 没有可报告的事，前端不弹提示。
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
 pub struct PortableMigration {
     /// 旧数据根（安装版使用的 `app_data_dir()`）
@@ -39,14 +47,21 @@ pub struct PortableMigration {
     pub copied: Vec<String>,
     /// 复制失败的子目录（含原因）——必须让用户看见，不能当成「没这回事」
     pub failed: Vec<String>,
-    /// 复制过程中跳过的条目（符号链接等，含原因）
+    /// 有意跳过的条目（符号链接、旧位置不是目录、便携目录已有数据等，含原因）
     pub skipped: Vec<String>,
+    /// 不属于迁移但同样需要用户知道的启动问题（asset scope 放行失败、旧目录取不到等）。
+    /// release 是 `windows_subsystem = "windows"`，没有控制台，eprintln 没人看得到，
+    /// 这类失败只能借这条通道送到界面上。
+    pub warnings: Vec<String>,
 }
 
 impl PortableMigration {
     /// 是否有需要告知用户的内容
     pub fn has_report(&self) -> bool {
-        !self.copied.is_empty() || !self.failed.is_empty() || !self.skipped.is_empty()
+        !self.copied.is_empty()
+            || !self.failed.is_empty()
+            || !self.skipped.is_empty()
+            || !self.warnings.is_empty()
     }
 }
 
@@ -65,53 +80,72 @@ pub fn portable_data_dir() -> Option<PathBuf> {
     portable_data_dir_from_exe(&exe, marker_exists)
 }
 
-/// 应用数据根：便携模式 → exe 同级 `data/`（顺带建好目录）；安装版 → `app_data_dir()`。
+/// 应用数据根：便携模式 → exe 同级 `data/`；安装版 → `app_data_dir()`。
 ///
-/// 返回值同时是 recovery 路径守卫的根，以及前端 themes / recovery 的根。
+/// 两条分支都保证目录存在（前端契约：拿到就能写），失败时返回可读原因。
 pub fn resolve_app_data_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
-    if let Some(dir) = portable_data_dir() {
-        std::fs::create_dir_all(&dir)
-            .map_err(|e| format!("创建便携数据目录失败 {}: {e}", dir.display()))?;
-        return Ok(dir);
-    }
-    app.path()
-        .app_data_dir()
-        .map_err(|e| format!("取应用数据目录失败: {e}"))
+    let dir = match portable_data_dir() {
+        Some(dir) => dir,
+        None => app
+            .path()
+            .app_data_dir()
+            .map_err(|e| format!("取应用数据目录失败: {e}"))?,
+    };
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("创建应用数据目录失败 {}: {e}", dir.display()))?;
+    Ok(dir)
 }
 
 /// 便携模式启动准备：放行 asset scope + 从旧位置迁移数据。
 ///
-/// 返回 `None` 表示非便携模式（安装版路径完全不变），或没有需要告知用户的迁移内容。
+/// 返回 `None` 表示非便携模式（安装版路径完全不变），或没有任何需要告知用户的内容。
 ///
 /// asset scope 是这条改动的硬前置：`tauri.conf.json` 的静态 scope 只有 `$APPDATA/**`
 /// 与 `$APPLOCALDATA/**`，覆盖不到 exe 同级目录；主题 CSS 里的 `url()` 资源经
 /// `convertFileSrc` 走 asset 协议，不放行就会被判越界、字体/图片静默降级。
 /// 放行机制与工作区图片相同（`allow_asset_dir` → `asset_protocol_scope().allow_directory`），
-/// 只是这里在窗口创建前对应用数据根放行一次。
-pub fn prepare_portable_session(app: &tauri::AppHandle, data_dir: &Path) -> Option<PortableMigration> {
+/// 只是这里在窗口创建前做一次。
+///
+/// **只放行主题目录，不放行整个 `data/`**：WebView2 的 profile（cookies / localStorage）
+/// 也在 `data/` 下，没有理由让 asset 协议够得着它。
+pub fn prepare_portable_session(
+    app: &tauri::AppHandle,
+    data_dir: &Path,
+) -> Option<PortableMigration> {
     if portable_data_dir().is_none() {
         return None;
     }
-    // 目录必须已存在：`allow_directory` 会对模式做 canonicalize
-    if let Err(e) = app.asset_protocol_scope().allow_directory(data_dir, true) {
-        // 失败不阻断启动（主题文件本身可读），但必须留痕：否则用户只会看到
-        // 「主题里的图片/字体不显示」而查不到原因
-        eprintln!(
-            "[portable] 放行 asset 目录失败 {}: {e}",
-            data_dir.display()
-        );
-    }
-    let legacy = match app.path().app_data_dir() {
-        Ok(dir) => dir,
-        Err(e) => {
-            eprintln!("[portable] 取旧数据目录失败，跳过迁移: {e}");
-            return None;
-        }
+    let mut report = PortableMigration {
+        to: data_dir.display().to_string(),
+        ..Default::default()
     };
-    if legacy == data_dir {
-        return None;
+    // 目录必须存在：`allow_directory` 会对模式做 canonicalize
+    let themes_dir = data_dir.join("themes");
+    if let Err(e) = std::fs::create_dir_all(&themes_dir) {
+        report.warnings.push(format!(
+            "创建主题目录失败 {}: {e}",
+            themes_dir.display()
+        ));
+    } else if let Err(e) = app.asset_protocol_scope().allow_directory(&themes_dir, true) {
+        report.warnings.push(format!(
+            "主题目录未加入 asset 白名单，主题里的图片/字体将无法加载 {}: {e}",
+            themes_dir.display()
+        ));
     }
-    let report = migrate_legacy_data(&legacy, data_dir);
+    match app.path().app_data_dir() {
+        Ok(legacy) if legacy != data_dir => {
+            let migration = migrate_legacy_data(&legacy, data_dir);
+            report.from = migration.from;
+            report.copied = migration.copied;
+            report.failed = migration.failed;
+            report.skipped = migration.skipped;
+            report.warnings.extend(migration.warnings);
+        }
+        Ok(_) => {}
+        Err(e) => report
+            .warnings
+            .push(format!("取旧数据目录失败，本次未迁移旧数据: {e}")),
+    }
     if report.has_report() {
         Some(report)
     } else {
@@ -119,37 +153,150 @@ pub fn prepare_portable_session(app: &tauri::AppHandle, data_dir: &Path) -> Opti
     }
 }
 
+/// 旧位置条目的类型判定结果。**必须区分「不存在」与「读不到」**：
+/// `Path::is_dir()` 在元数据读取失败时同样返回 false，把它当成「没有数据」会
+/// 让一次权限/占用故障变成永久静默不迁移。
+#[derive(Debug, PartialEq, Eq)]
+enum SourceKind {
+    Missing,
+    Symlink,
+    NotDir,
+    Dir,
+    Error(String),
+}
+
+fn source_kind(path: &Path) -> SourceKind {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => SourceKind::Symlink,
+        Ok(meta) if meta.is_dir() => SourceKind::Dir,
+        Ok(_) => SourceKind::NotDir,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => SourceKind::Missing,
+        Err(e) => SourceKind::Error(e.to_string()),
+    }
+}
+
+/// 目标目录状态：区分「缺失」「空目录」「已有内容」。
+///
+/// 「空目录」这一档是必需的：应用自己会在首启把 `data/themes` 建出来（`ensureDir`），
+/// 只看 `exists()` 会把「空目录」误判成「已经迁过了」，之后永远不再迁移。
+#[derive(Debug, PartialEq, Eq)]
+enum DestState {
+    Missing,
+    Empty,
+    NonEmpty,
+    Error(String),
+}
+
+fn destination_state(path: &Path) -> DestState {
+    match std::fs::read_dir(path) {
+        Ok(mut entries) => match entries.next() {
+            None => DestState::Empty,
+            Some(_) => DestState::NonEmpty,
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => DestState::Missing,
+        Err(e) => DestState::Error(e.to_string()),
+    }
+}
+
 /// 把旧数据根里需要随包走的两类目录**复制**到便携数据根。
 ///
-/// 语义刻意是复制而不是移动，且只在目标缺失时复制：
+/// 语义刻意是复制而不是移动，且只在目标缺失/为空时复制：
 /// - 复制：旧位置无人清理时用户还能回滚，不存在「搬一半丢了」的窗口；
-/// - 目标已存在就跳过（不合并、不覆盖）：两次运行叠加出互相矛盾的两套数据，
-///   比少迁一次更难收拾；此时也不记入报告，否则每次启动都会重复提示。
+/// - 目标已有内容就跳过（不合并、不覆盖）：两次运行叠加出互相矛盾的两套数据，
+///   比少迁一次更难收拾。跳过会进 `skipped` 让用户看见，并用标记文件抑制重复提示。
+///
+/// 完成（`failed` 为空且旧位置确有数据）后写 [`MIGRATION_MARKER`]：此后不再尝试迁移，
+/// 否则用户在便携目录里删掉的主题会被旧位置重新「复活」。
+/// 旧位置完全没数据时不写标记，等用户之后装过安装版再来仍能迁移。
 pub fn migrate_legacy_data(legacy: &Path, target: &Path) -> PortableMigration {
     let mut report = PortableMigration {
         from: legacy.display().to_string(),
         to: target.display().to_string(),
         ..Default::default()
     };
+    if target.join(MIGRATION_MARKER).exists() {
+        // 已经迁过：不重复、不提示（迁移结果早就在上一轮告知过）
+        return PortableMigration::default();
+    }
+    let mut has_legacy_data = false;
     for name in MIGRATED_SUBDIRS {
         let source = legacy.join(name);
         let destination = target.join(name);
-        if !source.is_dir() {
-            // 旧位置本来就没有这类数据（全新机器 / 从没用过安装版）
-            continue;
+        match source_kind(&source) {
+            SourceKind::Missing => continue,
+            SourceKind::Symlink => {
+                has_legacy_data = true;
+                report.skipped.push(format!(
+                    "{name}: 旧位置是符号链接，未跟随复制（如需搬走请直接复制链接目标）"
+                ));
+                continue;
+            }
+            SourceKind::NotDir => {
+                has_legacy_data = true;
+                report.skipped.push(format!("{name}: 旧位置同名项不是目录"));
+                continue;
+            }
+            SourceKind::Error(e) => {
+                has_legacy_data = true;
+                report.failed.push(format!("{name}: 读取旧位置失败 {e}"));
+                continue;
+            }
+            SourceKind::Dir => has_legacy_data = true,
         }
-        if destination.exists() {
-            // 已经搬过（或用户自己在便携目录里先建好了）——不合并、不覆盖
-            continue;
+        match destination_state(&destination) {
+            DestState::Missing => {}
+            DestState::Empty => {
+                // 应用自己建出来的空目录：清掉后走「整树复制 + 改名」，不做逐文件合并
+                if let Err(e) = std::fs::remove_dir(&destination) {
+                    report
+                        .failed
+                        .push(format!("{name}: 清理空目录失败 {}: {e}", destination.display()));
+                    continue;
+                }
+            }
+            DestState::NonEmpty => {
+                report.skipped.push(format!(
+                    "{name}: 便携目录已有数据，未合并（需要的话请手动复制旧位置的内容）"
+                ));
+                continue;
+            }
+            DestState::Error(e) => {
+                report
+                    .failed
+                    .push(format!("{name}: 读取便携目录失败 {}: {e}", destination.display()));
+                continue;
+            }
         }
         match copy_tree_atomically(&source, &destination, &mut report.skipped) {
             Ok(()) => report.copied.push(name.to_string()),
-            Err(e) => report
-                .failed
-                .push(format!("{name}: 复制失败 {e}")),
+            Err(e) => report.failed.push(format!("{name}: 复制失败 {e}")),
         }
     }
+    // 有失败时不写标记：下次启动重试并重新提示（数据没搬过来这件事不能被静默吞掉）
+    if report.failed.is_empty() && has_legacy_data {
+        write_migration_marker(target, &report);
+    }
     report
+}
+
+/// 写迁移标记。失败不阻断启动：最坏结果是下次启动重复迁移（`DestState::NonEmpty`
+/// 会把它挡掉并再提示一次），不会丢数据。
+fn write_migration_marker(target: &Path, report: &PortableMigration) {
+    // 生产路径上 `resolve_app_data_dir` 已经建好目录；这里兜一次是为了让
+    // 「标记一定和迁移结果同时落地」不依赖调用顺序
+    let _ = std::fs::create_dir_all(target);
+    let marker = target.join(MIGRATION_MARKER);
+    let payload = serde_json::json!({
+        "from": report.from,
+        "to": report.to,
+        "copied": report.copied,
+        "skipped": report.skipped,
+        "at": std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+    });
+    let _ = std::fs::write(marker, payload.to_string());
 }
 
 /// 先整树复制到同级临时目录，成功后再改名，避免「复制到一半中断」留下半份主题目录，
@@ -178,7 +325,11 @@ fn copy_tree_atomically(
 
 /// 递归复制；**不跟随符号链接**（跟随会把链接目标的内容复制成实体，便携包反而不再
 /// 自洽），被跳过的相对路径记进 `skipped`，由调用方交给用户看。
-fn copy_dir_recursive(source: &Path, destination: &Path, skipped: &mut Vec<String>) -> std::io::Result<()> {
+fn copy_dir_recursive(
+    source: &Path,
+    destination: &Path,
+    skipped: &mut Vec<String>,
+) -> std::io::Result<()> {
     std::fs::create_dir_all(destination)?;
     for entry in std::fs::read_dir(source)? {
         let entry = entry?;
@@ -196,6 +347,23 @@ fn copy_dir_recursive(source: &Path, destination: &Path, skipped: &mut Vec<Strin
         }
     }
     Ok(())
+}
+
+/// release 是 GUI 子系统进程（`windows_subsystem = "windows"`），`eprintln!` 没有任何
+/// 接收方。启动期还没拿到前端通道的致命错误，至少落到临时目录的一份日志里可供排查。
+pub fn record_startup_error(message: &str) {
+    eprintln!("[app-path] {message}");
+    let dir = std::env::temp_dir().join("inklingmd");
+    if std::fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("startup-error.log"))
+    {
+        let _ = writeln!(file, "{message}");
+    }
 }
 
 /// 首启迁移结果的一次性取用位（与 `PendingFile` 同款：前端取走即清空）
@@ -251,6 +419,17 @@ mod tests {
         }
     }
 
+    /// 造一份「旧位置有主题与恢复区」的现场，返回 (legacy, portable)
+    fn seed_legacy(root: &Path) -> (PathBuf, PathBuf) {
+        let legacy = root.join("roaming");
+        let portable = root.join("data");
+        fs::create_dir_all(legacy.join("themes/aurora")).expect("建旧主题目录");
+        fs::write(legacy.join("themes/aurora/aurora.css"), "body{color:red}").expect("写主题");
+        fs::create_dir_all(legacy.join("recovery/main")).expect("建旧恢复目录");
+        fs::write(legacy.join("recovery/temp-kept.json"), "{}").expect("写登记表");
+        (legacy, portable)
+    }
+
     #[test]
     fn portable_marker_decides_data_dir() {
         let exe = Path::new("D:/Portable/InklingMD.exe");
@@ -263,21 +442,45 @@ mod tests {
     }
 
     #[test]
+    fn serialized_keys_match_the_frontend_contract() {
+        // 前端 `PortableMigration` 接口逐字依赖这些键名；改名/加 rename_all 会让弹窗
+        // 拿不到 failed/skipped（读取 undefined 直接抛错），而两侧单测都察觉不到
+        let value = serde_json::to_value(PortableMigration::default()).expect("可序列化");
+        let mut keys: Vec<String> = value
+            .as_object()
+            .expect("对象")
+            .keys()
+            .cloned()
+            .collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            vec![
+                "copied".to_string(),
+                "failed".to_string(),
+                "from".to_string(),
+                "skipped".to_string(),
+                "to".to_string(),
+                "warnings".to_string(),
+            ]
+        );
+    }
+
+    #[test]
     fn migration_copies_themes_and_recovery_without_touching_source() {
         let root = TempDir::new("copy");
-        let legacy = root.path().join("roaming");
-        let portable = root.path().join("data");
-        fs::create_dir_all(legacy.join("themes/aurora")).expect("建旧主题目录");
-        fs::write(legacy.join("themes/aurora/aurora.css"), "body{color:red}").expect("写主题");
-        fs::create_dir_all(legacy.join("recovery/main")).expect("建旧恢复目录");
-        fs::write(legacy.join("recovery/temp-kept.json"), "{}").expect("写登记表");
+        let (legacy, portable) = seed_legacy(root.path());
         // 不属于迁移范围的数据不得被带走（每个 issue 的假设都靠这条兜住）
         fs::write(legacy.join("unrelated.txt"), "keep").expect("写无关文件");
 
         let report = migrate_legacy_data(&legacy, &portable);
 
-        assert_eq!(report.copied, vec!["themes".to_string(), "recovery".to_string()]);
+        assert_eq!(
+            report.copied,
+            vec!["themes".to_string(), "recovery".to_string()]
+        );
         assert!(report.failed.is_empty(), "不应有失败项: {:?}", report.failed);
+        assert!(report.skipped.is_empty(), "不应有跳过项: {:?}", report.skipped);
         assert!(report.has_report());
         assert_eq!(
             fs::read_to_string(portable.join("themes/aurora/aurora.css")).expect("便携目录应有主题"),
@@ -287,6 +490,7 @@ mod tests {
         assert!(!portable.join("unrelated.txt").exists());
         // 复制而非移动：旧位置原样保留，用户可回滚
         assert!(legacy.join("themes/aurora/aurora.css").is_file());
+        assert!(portable.join(MIGRATION_MARKER).is_file(), "完成后应写迁移标记");
     }
 
     #[test]
@@ -296,47 +500,126 @@ mod tests {
         let portable = root.path().join("data");
         fs::create_dir_all(&legacy).expect("建旧数据根");
 
-        // 全新机器（旧位置没有 themes/recovery）：不产生任何报告，否则每次启动都弹窗
+        // 全新机器（旧位置没有 themes/recovery）：不产生任何报告，否则每次启动都弹窗；
+        // 也不能写标记 —— 用户之后装了安装版再来，仍要能迁移
         let empty = migrate_legacy_data(&legacy, &portable);
         assert!(!empty.has_report(), "空旧目录不应产生报告: {empty:?}");
+        assert!(!portable.join(MIGRATION_MARKER).exists(), "没数据时不得写标记");
 
-        // 第二次启动：目标已存在 → 既不复制也不报告（不合并、不覆盖）
+        // 之后旧位置有了数据、便携目录还是空的 → 必须仍能迁移（F3 的真实场景）
         fs::create_dir_all(legacy.join("themes")).expect("建旧主题目录");
         fs::write(legacy.join("themes/old.css"), "old").expect("写旧主题");
-        fs::create_dir_all(portable.join("themes")).expect("建便携主题目录");
-        fs::write(portable.join("themes/new.css"), "new").expect("写便携主题");
-        let second = migrate_legacy_data(&legacy, &portable);
-        assert!(!second.has_report(), "已迁移过不应重复报告: {second:?}");
-        assert!(!portable.join("themes/old.css").exists(), "不得合并旧数据");
+        let later = migrate_legacy_data(&legacy, &portable);
+        assert_eq!(later.copied, vec!["themes".to_string()]);
         assert_eq!(
-            fs::read_to_string(portable.join("themes/new.css")).expect("便携主题应保留"),
-            "new"
+            fs::read_to_string(portable.join("themes/old.css")).expect("应迁入"),
+            "old"
+        );
+
+        // 再启动一次：标记已写 → 不复制、不报告（删掉的主题不会被复活）
+        fs::write(legacy.join("themes/resurrect.css"), "back").expect("写新主题");
+        let again = migrate_legacy_data(&legacy, &portable);
+        assert!(!again.has_report(), "已迁移过不应重复报告: {again:?}");
+        assert!(!portable.join("themes/resurrect.css").exists(), "不得再次迁入");
+    }
+
+    #[test]
+    fn migration_into_app_created_empty_dir_still_happens() {
+        // 应用自己会在首启把 data/themes 建出来（ensureDir）：空目录不能算「已迁移」
+        let root = TempDir::new("emptydir");
+        let (legacy, portable) = seed_legacy(root.path());
+        fs::create_dir_all(portable.join("themes")).expect("建空主题目录");
+
+        let report = migrate_legacy_data(&legacy, &portable);
+
+        assert_eq!(report.copied, vec!["themes".to_string(), "recovery".to_string()]);
+        assert!(report.failed.is_empty(), "{:?}", report.failed);
+        assert!(portable.join("themes/aurora/aurora.css").is_file());
+    }
+
+    #[test]
+    fn migration_reports_non_empty_target_instead_of_merging() {
+        let root = TempDir::new("nonempty");
+        let (legacy, portable) = seed_legacy(root.path());
+        fs::create_dir_all(portable.join("themes")).expect("建便携主题目录");
+        fs::write(portable.join("themes/mine.css"), "mine").expect("写便携主题");
+
+        let report = migrate_legacy_data(&legacy, &portable);
+
+        // 主题不合并（不覆盖用户自己的），但必须进 skipped 让用户看见
+        assert_eq!(report.copied, vec!["recovery".to_string()]);
+        assert!(
+            report.skipped.iter().any(|s| s.contains("themes") && s.contains("未合并")),
+            "已有数据必须显式登记: {:?}",
+            report.skipped
+        );
+        assert!(!portable.join("themes/aurora/aurora.css").exists(), "不得合并");
+        assert_eq!(
+            fs::read_to_string(portable.join("themes/mine.css")).expect("便携主题应保留"),
+            "mine"
         );
     }
 
     #[test]
-    fn migration_skips_symlinks_and_reports_them() {
-        let root = TempDir::new("symlink");
+    fn migration_reports_unreadable_and_non_directory_sources() {
+        let root = TempDir::new("nondir");
         let legacy = root.path().join("roaming");
         let portable = root.path().join("data");
-        fs::create_dir_all(legacy.join("themes")).expect("建旧主题目录");
-        fs::write(legacy.join("themes/real.css"), "real").expect("写主题");
-        let link = legacy.join("themes/link.css");
-        #[cfg(unix)]
-        let linked = std::os::unix::fs::symlink(legacy.join("themes/real.css"), &link);
-        #[cfg(windows)]
-        let linked = std::os::windows::fs::symlink_file(legacy.join("themes/real.css"), &link);
-        if linked.is_err() {
-            // 无符号链接权限（Windows 非管理员 / 开发者模式关闭）：跳过该断言
-            return;
-        }
+        fs::create_dir_all(&legacy).expect("建旧数据根");
+        // 旧位置的 themes 是个文件：既不能静默当成「没有数据」，也不能当目录读
+        fs::write(legacy.join("themes"), "not a dir").expect("写同名文件");
 
         let report = migrate_legacy_data(&legacy, &portable);
 
-        assert_eq!(report.copied, vec!["themes".to_string()]);
-        assert_eq!(report.skipped.len(), 1, "符号链接必须显式登记: {:?}", report.skipped);
+        assert!(report.copied.is_empty());
+        assert!(
+            report.skipped.iter().any(|s| s.contains("themes") && s.contains("不是目录")),
+            "非目录必须显式登记: {:?}",
+            report.skipped
+        );
+        // 有内容可处理 → 写标记，避免每次启动重复提示
+        assert!(portable.join(MIGRATION_MARKER).is_file());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn migration_skips_symlinks_and_reports_them() {
+        let root = TempDir::new("symlink");
+        let (legacy, portable) = seed_legacy(root.path());
+        std::os::unix::fs::symlink(legacy.join("themes/aurora/aurora.css"), legacy.join("themes/link.css"))
+            .expect("创建符号链接");
+
+        let report = migrate_legacy_data(&legacy, &portable);
+
+        assert_eq!(report.copied, vec!["themes".to_string(), "recovery".to_string()]);
+        assert_eq!(
+            report.skipped.len(),
+            1,
+            "符号链接必须显式登记: {:?}",
+            report.skipped
+        );
         assert!(report.skipped[0].contains("符号链接"));
-        assert!(portable.join("themes/real.css").is_file());
+        assert!(portable.join("themes/aurora/aurora.css").is_file());
         assert!(!portable.join("themes/link.css").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn migration_does_not_follow_symlinked_source_root() {
+        // 旧位置的 themes 本身是链接：跟随复制会把链接目标变成实体副本
+        let root = TempDir::new("symlink-root");
+        let legacy = root.path().join("roaming");
+        let portable = root.path().join("data");
+        let real = root.path().join("elsewhere");
+        fs::create_dir_all(&real).expect("建目标目录");
+        fs::write(real.join("x.css"), "x").expect("写主题");
+        fs::create_dir_all(&legacy).expect("建旧数据根");
+        std::os::unix::fs::symlink(&real, legacy.join("themes")).expect("创建目录链接");
+
+        let report = migrate_legacy_data(&legacy, &portable);
+
+        assert!(report.copied.is_empty(), "不得跟随符号链接复制: {report:?}");
+        assert!(report.skipped.iter().any(|s| s.contains("符号链接")), "{:?}", report.skipped);
+        assert!(!portable.join("themes/x.css").exists());
     }
 }

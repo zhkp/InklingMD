@@ -640,6 +640,7 @@ describe("#365 启动入口（useStartupRecovery）", () => {
       copied: ["themes"],
       failed: ["recovery: 复制失败 磁盘已满"],
       skipped: ["themes/link.css: 符号链接，未迁移"],
+      warnings: [],
     };
     messageMock.mockReset().mockResolvedValue(undefined);
 

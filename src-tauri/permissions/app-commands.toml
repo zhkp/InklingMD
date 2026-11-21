@@ -6,6 +6,10 @@
 # 定义格式：identifier 用 allow-<command 名的 kebab-case 形式>（如 search_in_workspace
 # → allow-search-in-workspace），commands.allow 填 command 函数名原样（下划线保留，
 # 即 invoke_handler 注册的名字）。
+#
+# 例外：命令名本身以 `allow_` 开头时去掉该前缀再拼 —— allow_asset_dir → allow-asset-dir
+# （而不是 allow-allow-asset-dir）。tests/unit/capabilities.test.ts 的 permissionIdOf
+# 与本规则逐字对应，改一处必须同步改另一处。
 "$schema" = "schemas/schema.json"
 
 # 文件系统命令

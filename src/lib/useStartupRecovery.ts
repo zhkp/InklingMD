@@ -10,7 +10,11 @@
 
 import { useEffect } from "react";
 import { isTauri } from "@tauri-apps/api/core";
-import { takePortableMigration, type PortableMigration } from "./appDataRoot";
+import {
+  portableMigrationMessage,
+  takePortableMigration,
+  type PortableMigration,
+} from "./appDataRoot";
 import {
   applyRecovery,
   beginSession,
@@ -25,32 +29,17 @@ export const DISCARD = "丢弃";
 export const LATER = "稍后";
 
 /**
- * #404：便携模式首启把旧数据（themes / recovery）从 Roaming 复制到便携目录后，
+ * #404：便携模式首启把旧数据（themes / recovery）从旧位置复制到便携目录后，
  * 必须让用户看见。静默迁移等于把「我的主题怎么变成这份了」留给用户猜。
  */
 async function reportPortableMigration(migration: PortableMigration): Promise<void> {
-  const lines = [
-    "便携模式：已从系统目录把应用数据复制到便携目录。",
-    `来源：${migration.from}`,
-    `目标：${migration.to}`,
-  ];
-  if (migration.copied.length > 0) lines.push(`已复制：${migration.copied.join("、")}`);
-  if (migration.skipped.length > 0) {
-    lines.push("", "以下条目未复制（源文件仍在原处）：", ...migration.skipped.map((s) => `· ${s}`));
-  }
-  if (migration.failed.length > 0) {
-    lines.push("", "以下条目复制失败，便携目录里没有它们：", ...migration.failed.map((f) => `· ${f}`));
-  }
-  if (migration.failed.length === 0) lines.push("", "原位置的文件保留未删除，可自行清理。");
+  const { text, kind } = portableMigrationMessage(migration);
   try {
     const { message } = await import("@tauri-apps/plugin-dialog");
-    await message(lines.join("\n"), {
-      title: "便携模式数据迁移",
-      kind: migration.failed.length > 0 ? "error" : "info",
-    });
+    await message(text, { title: "便携模式数据迁移", kind });
   } catch {
     // 弹窗不可用（headless / 权限）不能影响启动：退化为控制台留痕
-    console.warn("[portable] 数据迁移提示无法显示：", lines.join(" | "));
+    console.warn("[portable] 数据迁移提示无法显示：", text.replace(/\n/g, " | "));
   }
 }
 
@@ -63,9 +52,11 @@ export function useStartupRecovery(): void {
 
     void (async () => {
       // #404：迁移本身在 Rust setup 里完成（先于窗口创建），这里只负责告知结果。
-      // 先取报告、放到最后再弹窗：模态弹窗会挂住本函数的 await，用户不点就把
-      // 「恢复未保存内容」也一起挡住了（恢复比迁移提示紧急得多）
+      // 报告是**一次性**的（Rust 侧 take 即清空），所以取到就立刻显示，
+      // 不能先取后放：中途 `return` / 组件卸载 / StrictMode 双跑都会让它永久丢失。
+      // 这里刻意不看 `cancelled`：这是一次性启动提示，与组件存活无关。
       const migration = await takePortableMigration().catch(() => null);
+      if (migration) await reportPortableMigration(migration);
       // 先取旧标记再写新标记：`beginSession()` 会把同一个文件覆盖成 cleanExit:false，
       // 之后再读就永远读到 false（「上次正常退出不提示」会变成死代码）
       const previous = await beginSession();
@@ -114,9 +105,6 @@ export function useStartupRecovery(): void {
       if (!cancelled) await cleanupExpiredDrafts(Date.now(), undefined, {
         exclude: new Set(restored),
       });
-
-      // #404：迁移提示放在最后 —— 恢复询问优先，弹窗挂住时也不会耽误内容恢复
-      if (!cancelled && migration) await reportPortableMigration(migration);
     })();
 
     return () => {

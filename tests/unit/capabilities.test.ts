@@ -19,8 +19,9 @@ function readCapabilities() {
 /**
  * `save_document` → `allow-save-document`（Tauri 的 app command 权限命名规则）。
  *
- * `allow_asset_dir` 例外：项目按「去掉命令自带的 allow_ 前缀」命名为 `allow-asset-dir`
- * （见 app-commands.toml 注释），这里按同一口径归一，避免出现 `allow-allow-asset-dir`。
+ * 例外：命令名自带 `allow_` 前缀时去掉它 —— `allow_asset_dir` → `allow-asset-dir`
+ * （与 `permissions/app-commands.toml` 头部注释的例外规则逐字对应）。
+ * 这条规则只在「没有其它 `allow_*` 命令」时是单射的，下面有专门断言守住这个前提。
  */
 function permissionIdOf(command: string): string {
   return `allow-${command.replace(/^allow_/, "").replace(/_/g, "-")}`;
@@ -103,9 +104,33 @@ describe("capabilities/default.json ACL 权限配置（v1.2.10 防回归）", ()
     for (const [identifier, command] of definedCommands) {
       expect(permissionIdOf(command), `identifier 与命令名不一致：${identifier}`).toBe(identifier);
     }
+    // 反向：toml 里不得有「谁都不注册」的权限（漂移的另一半）
+    const registered = new Set(registeredCommands());
+    const orphaned = [...definedCommands.values()].filter((command) => !registered.has(command));
+    expect(orphaned, `permissions 定义了未注册的命令：${orphaned.join(", ")}`).toEqual([]);
+    // [[permission]] 块数必须等于去重后的 identifier 数：重复 identifier 会被 Map 静默去重，
+    // 那样「无冗余」就变成了假通过
+    const blockCount = permissionDefinitions.split("[[permission]]").length - 1;
+    expect(blockCount, "存在重复的 [[permission]] 块").toBe(definedCommands.size);
+
     const appPermissions = permissions.filter((id) => id.startsWith("allow-"));
     const dangling = appPermissions.filter((id) => !definedCommands.has(id));
     expect(dangling, `capabilities 引用了未定义的权限：${dangling.join(", ")}`).toEqual([]);
+    const missingCapability = [...definedCommands.keys()].filter((id) => !permissions.includes(id));
+    expect(missingCapability, `权限未在 capabilities 中引用：${missingCapability.join(", ")}`).toEqual(
+      [],
+    );
+  });
+
+  it("除 allow_asset_dir 外没有别的 allow_ 前缀命令（permissionIdOf 的前提）", () => {
+    // `permissionIdOf` 会剥掉 `allow_` 前缀，两条命令若都以此开头就可能撞成同一个 identifier
+    const allowPrefixed = registeredCommands().filter(
+      (command) => command.startsWith("allow_") && command !== "allow_asset_dir",
+    );
+    expect(
+      allowPrefixed,
+      `新增 allow_ 前缀命令需先为它显式定义 identifier 规则：${allowPrefixed.join(", ")}`,
+    ).toEqual([]);
   });
 
   it("保留既有关键命令权限（历史回归）", () => {

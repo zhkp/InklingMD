@@ -119,7 +119,8 @@ pub fn run() {
             let migration = match &app_dir {
                 Ok(dir) => app_paths::prepare_portable_session(app.handle(), dir),
                 Err(e) => {
-                    eprintln!("[app-data] {e}");
+                    // release 是 GUI 子系统进程，控制台看不到 → 落一份临时目录日志
+                    app_paths::record_startup_error(e);
                     None
                 }
             };
