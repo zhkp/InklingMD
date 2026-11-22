@@ -114,7 +114,7 @@ const csOpts = (find: string): SearchOpts => ({ find, caseSensitive: true, useRe
 const reOpts = (find: string): SearchOpts => ({ find, caseSensitive: false, useRegex: true });
 
 function matchesOf(view: EditorView) {
-  return searchKey.getState(view.state)!.matches;
+  return searchKey.getState(view.state)!.matches.map(({ from, to }) => ({ from, to }));
 }
 
 function decorationsOf(plugin: ReturnType<typeof searchPlugin>) {
@@ -594,7 +594,7 @@ describe("#371 跨 mark 替换", () => {
     view.destroy();
   });
 
-  it("正则跨 mark 替换（替换串按字面插入，不做 $1 展开——#380 不在本 Epic 范围）", () => {
+  it("正则跨 mark 替换时按捕获组展开 $1（#380）", () => {
     const s = makeSchema();
     const view = makeView(
       s.nodes.doc.create(null, [para(s, t(s, "ab", "strong"), t(s, "cd"))]),
@@ -602,7 +602,7 @@ describe("#371 跨 mark 替换", () => {
     );
     expect(matchesOf(view)).toHaveLength(1);
     replaceCurrent(view, "$1");
-    expect(view.state.doc.child(0).textContent).toBe("$1");
+    expect(view.state.doc.child(0).textContent).toBe("ab");
     view.destroy();
   });
 
@@ -768,9 +768,9 @@ describe("#371 增量更新（#192 优化在跨 mark 下仍成立）", () => {
     // 原当前匹配整体后移，索引必须变成 2（沿用旧下标 1 会指到第 1 段的新命中）。
     view.dispatch(view.state.tr.insertText("foo bar ", 1));
     const state = searchKey.getState(view.state)!;
-    expect(state.matches).toEqual(groundTruth(view.state.doc, plainOpts("foo bar")));
+    expect(matchesOf(view)).toEqual(groundTruth(view.state.doc, plainOpts("foo bar")));
     expect(state.current).toBe(2);
-    expect(state.matches[state.current]).toEqual({ from: 18, to: 25 });
+    expect(matchesOf(view)[state.current]).toEqual({ from: 18, to: 25 });
     const currents = decorationsOf(plugin)(view.state)
       .find()
       .filter((d) => decoClass(d) === "search-match-current");

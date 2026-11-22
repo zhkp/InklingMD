@@ -72,6 +72,10 @@ function decoClass(d: Decoration): string | undefined {
   return (d as unknown as { type: { attrs?: { class?: string } } }).type.attrs?.class;
 }
 
+function matchesOf(view: EditorView): { from: number; to: number }[] {
+  return searchKey.getState(view.state)!.matches.map(({ from, to }) => ({ from, to }));
+}
+
 afterEach(() => {
   vi.restoreAllMocks();
 });
@@ -135,7 +139,7 @@ describe("#192 增量更新正确性（增量结果 ≡ 全量重算）", () => 
 
     const s = searchKey.getState(view.state)!;
     expect(view.state.doc.textContent).toBe("foo onebar two foothree foo");
-    expect(s.matches).toEqual(groundTruth(view.state.doc, "foo"));
+    expect(matchesOf(view)).toEqual(groundTruth(view.state.doc, "foo"));
     expect(s.matches).toHaveLength(3);
     // 装饰与匹配同构
     const decos = decorationsOf(plugin)(view.state).find();
@@ -151,7 +155,7 @@ describe("#192 增量更新正确性（增量结果 ≡ 全量重算）", () => 
 
     const s = searchKey.getState(view.state)!;
     expect(view.state.doc.textContent).toBe("aa bbcc foo dd");
-    expect(s.matches).toEqual(groundTruth(view.state.doc, "foo"));
+    expect(matchesOf(view)).toEqual(groundTruth(view.state.doc, "foo"));
     expect(s.matches).toHaveLength(1);
     view.destroy();
   });
@@ -162,14 +166,12 @@ describe("#192 增量更新正确性（增量结果 ≡ 全量重算）", () => 
     // 在第一个匹配内部插入 "X"：NEEDXLE 不再匹配
     const m0 = searchKey.getState(view.state)!.matches[0];
     view.dispatch(view.state.tr.insertText("X", m0.from + 2));
-    expect(searchKey.getState(view.state)!.matches).toEqual(
-      groundTruth(view.state.doc, "NEEDLE"),
-    );
+    expect(matchesOf(view)).toEqual(groundTruth(view.state.doc, "NEEDLE"));
     expect(searchKey.getState(view.state)?.matches).toHaveLength(0);
     // 再补一个完整 NEEDLE：新匹配被捕获
     view.dispatch(view.state.tr.insertText("NEEDLE", m0.from + 3));
     const s = searchKey.getState(view.state)!;
-    expect(s.matches).toEqual(groundTruth(view.state.doc, "NEEDLE"));
+    expect(matchesOf(view)).toEqual(groundTruth(view.state.doc, "NEEDLE"));
     expect(s.matches).toHaveLength(1);
     view.destroy();
   });
@@ -183,7 +185,7 @@ describe("#192 增量更新正确性（增量结果 ≡ 全量重算）", () => 
 
     const s = searchKey.getState(view.state)!;
     expect(view.state.doc.textContent).toBe("Xfoo aYb foo");
-    expect(s.matches).toEqual(groundTruth(view.state.doc, "foo"));
+    expect(matchesOf(view)).toEqual(groundTruth(view.state.doc, "foo"));
     expect(s.matches).toHaveLength(2);
     view.destroy();
   });
@@ -204,7 +206,7 @@ describe("#192 增量更新正确性（增量结果 ≡ 全量重算）", () => 
     // 恰好一个当前高亮，且位于平移后的第三个匹配上
     expect(currents).toHaveLength(1);
     const s = searchKey.getState(view.state)!;
-    expect(s.matches).toEqual(groundTruth(view.state.doc, "foo"));
+    expect(matchesOf(view)).toEqual(groundTruth(view.state.doc, "foo"));
     expect(currents[0].from).toBe(s.matches[2].from);
     expect(currents[0].to).toBe(s.matches[2].to);
     // 其余两个是普通匹配类
@@ -221,7 +223,7 @@ describe("#192 增量更新正确性（增量结果 ≡ 全量重算）", () => 
     const m2 = searchKey.getState(view.state)!.matches[2];
     view.dispatch(view.state.tr.delete(m2.from, m2.to));
     const s = searchKey.getState(view.state)!;
-    expect(s.matches).toEqual(groundTruth(view.state.doc, "foo"));
+    expect(matchesOf(view)).toEqual(groundTruth(view.state.doc, "foo"));
     expect(s.matches).toHaveLength(2);
     expect(s.current).toBe(0); // 越界收敛
     view.destroy();
@@ -232,7 +234,7 @@ describe("#192 增量更新正确性（增量结果 ≡ 全量重算）", () => 
     expect(searchKey.getState(view.state)?.matches).toHaveLength(0);
     view.dispatch(view.state.tr.insertText("foo", paraTextStart(view, 0) + 8));
     const s = searchKey.getState(view.state)!;
-    expect(s.matches).toEqual(groundTruth(view.state.doc, "foo"));
+    expect(matchesOf(view)).toEqual(groundTruth(view.state.doc, "foo"));
     expect(s.matches).toHaveLength(1);
     expect(s.current).toBe(-1); // 与既有语义一致：无选中时不自动选中
     view.destroy();

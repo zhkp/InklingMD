@@ -119,6 +119,40 @@ describe("replaceAll 全部替换", () => {
     expect(view.state.doc.textContent).toBe("a0 b0 c0 d0");
     view.destroy();
   });
+
+  it("正则全部替换展开 $1、$2、$& 与 $$", () => {
+    const view = makeViewWithSearch("alpha-12 beta-34", {
+      find: "(\\w+)-(\\d+)",
+      caseSensitive: false,
+      useRegex: true,
+    });
+    const n = replaceAll(view, "$2:$1:$&:$$");
+    expect(n).toBe(2);
+    expect(view.state.doc.textContent).toBe("12:alpha:alpha-12:$ 34:beta:beta-34:$");
+    view.destroy();
+  });
+
+  it("正则无捕获组时保留 $1/$2 字面量，仍展开 $& 与 $$", () => {
+    const view = makeViewWithSearch("foo", {
+      find: "foo",
+      caseSensitive: false,
+      useRegex: true,
+    });
+    replaceAll(view, "$1-$&-$$-$2-$01");
+    expect(view.state.doc.textContent).toBe("$1-foo-$-$2-$01");
+    view.destroy();
+  });
+
+  it("正则中已定义但未参与匹配的捕获组展开为空串", () => {
+    const view = makeViewWithSearch("b", {
+      find: "(a)?b",
+      caseSensitive: false,
+      useRegex: true,
+    });
+    replaceAll(view, "[$1]");
+    expect(view.state.doc.textContent).toBe("[]");
+    view.destroy();
+  });
 });
 
 describe("空替换串（#178：删除全部匹配而不是抛 RangeError）", () => {
@@ -156,6 +190,35 @@ describe("replaceCurrent 替换当前匹配", () => {
     replaceCurrent(view, "BAR");
     // 默认 current=0，替换第一个
     expect(view.state.doc.textContent).toBe("BAR foo foo");
+    view.destroy();
+  });
+
+  it("正则替换当前项展开 $1、$2、$& 与 $$", () => {
+    const view = makeViewWithSearch("alpha-12 beta-34", {
+      find: "(\\w+)-(\\d+)",
+      caseSensitive: false,
+      useRegex: true,
+    });
+    replaceCurrent(view, "$1|$2|$&|$$|$01");
+    expect(view.state.doc.textContent).toBe("alpha|12|alpha-12|$|alpha beta-34");
+    view.destroy();
+  });
+
+  it("正则当前替换无捕获组时保留 $1/$2 字面量", () => {
+    const view = makeViewWithSearch("foo", {
+      find: "foo",
+      caseSensitive: false,
+      useRegex: true,
+    });
+    replaceCurrent(view, "$1-$&-$$-$2-$01");
+    expect(view.state.doc.textContent).toBe("$1-foo-$-$2-$01");
+    view.destroy();
+  });
+
+  it("普通文本查找时替换串中的 $ 引用保持字面量", () => {
+    const view = makeViewWithSearch("foo", plainOpts("foo"));
+    replaceCurrent(view, "$1-$&-$$");
+    expect(view.state.doc.textContent).toBe("$1-$&-$$");
     view.destroy();
   });
 });
