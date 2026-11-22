@@ -13,6 +13,7 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import ts from "typescript";
 import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
 import { readObservers } from "../perf/metrics.js";
 import { createPerfReportWorkspace, type PerfReportWorkspace } from "./perf-report-env";
@@ -537,8 +538,18 @@ describe("R2 / R3 存在其他指标行但缺少 longTaskMaxMs 时的降级判�
   });
 });
 
+function collectAstNodes<T extends ts.Node>(root: ts.Node, predicate: (node: ts.Node) => node is T): T[] {
+  const out: T[] = [];
+  const visit = (node: ts.Node): void => {
+    if (predicate(node)) out.push(node);
+    ts.forEachChild(node, visit);
+  };
+  visit(root);
+  return out;
+}
+
 describe("场景采集器与 readObservers() 单元测试（#424 评审）", () => {
-  it("tests/perf/scenarios/*.spec.ts 全集与 profiles.json 对账，且每个场景均采集 longTaskMaxMs", () => {
+  it("tests/perf/scenarios/*.spec.ts 全集与 profiles.json 对账，且每个场景均通过真实 AST 采集 longTaskMaxMs", () => {
     const profiles = JSON.parse(readFileSync("tests/perf/profiles.json", "utf8")) as {
       scenarios: string[];
     };
@@ -551,15 +562,86 @@ describe("场景采集器与 readObservers() 单元测试（#424 评审）", () 
     expect(files.length).toBeGreaterThanOrEqual(7);
 
     for (const f of files) {
-      const src = readFileSync(join(dir, f), "utf8");
-      expect(src, `${f} 未调用 readObservers 采集长任务`).toContain("readObservers");
-      expect(src, `${f} 缺少 longTaskMax.push(observers.longTaskMaxMs)`).toContain(
-        "longTaskMax.push(observers.longTaskMaxMs)",
+      const filePath = join(dir, f);
+      const src = readFileSync(filePath, "utf8");
+      const sf = ts.createSourceFile(filePath, src, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+
+      const calls = collectAstNodes(sf, ts.isCallExpression);
+      const readObserverCalls = calls.filter(
+        (c) => c.expression.getText(sf) === "page.evaluate" && c.arguments[0]?.getText(sf) === "readObservers",
       );
-      expect(src, `${f} 没把 longTaskMaxMs: maxOf(longTaskMax) 写进 scalars`).toContain(
-        "longTaskMaxMs: maxOf(longTaskMax),",
+      expect(readObserverCalls.length, `${f} 缺少真实的 page.evaluate(readObservers) 调用`).toBeGreaterThanOrEqual(1);
+
+      const pushCalls = calls.filter((c) => c.expression.getText(sf) === "longTaskMax.push");
+      expect(pushCalls.length, `${f} 缺少 longTaskMax.push(...) 调用`).toBeGreaterThanOrEqual(1);
+
+      const formulaCalls = calls.filter(
+        (c) => c.expression.getText(sf) === "page.evaluate" && c.arguments[0]?.getText(sf) === "waitFormulaSettled",
       );
-      expect(src, `${f} 的 maxOf 未取最大值`).toMatch(/function maxOf\([\s\S]*v > m \? v : m/);
+      if (f === "open.spec.ts" || formulaCalls.length > 0) {
+        // open 场景在 TTI 之后等待 waitFormulaSettled，必须在 waitFormulaSettled 之后再读一次 readObservers 并取前后最大值
+        expect(formulaCalls.length, `${f} 缺少 waitFormulaSettled 调用`).toBeGreaterThanOrEqual(1);
+        const formulaEnd = formulaCalls[0].getEnd();
+        const varDecls = collectAstNodes(sf, ts.isVariableDeclaration);
+        const postFormulaDecl = varDecls.find(
+          (v) =>
+            v.getStart(sf) > formulaEnd &&
+            v.initializer !== undefined &&
+            collectAstNodes(v.initializer, ts.isCallExpression).some(
+              (c) => c.expression.getText(sf) === "page.evaluate" && c.arguments[0]?.getText(sf) === "readObservers",
+            ),
+        );
+        expect(postFormulaDecl, `${f} 必须在 waitFormulaSettled 之后读取 readObservers`).toBeDefined();
+        const postVarName = postFormulaDecl!.name.getText(sf);
+
+        const maxPush = pushCalls.some((p) => {
+          const arg = p.arguments[0];
+          if (!arg || !ts.isCallExpression(arg) || arg.expression.getText(sf) !== "Math.max") return false;
+          const argTexts = new Set(arg.arguments.map((a) => a.getText(sf)));
+          return argTexts.has("observers.longTaskMaxMs") && argTexts.has(`${postVarName}.longTaskMaxMs`);
+        });
+        expect(
+          maxPush,
+          `${f} 必须用 Math.max(observers.longTaskMaxMs, ${postVarName}.longTaskMaxMs) 纳入公式尾部渲染长任务`,
+        ).toBe(true);
+      } else {
+        const directPush = pushCalls.some((p) => p.arguments[0]?.getText(sf) === "observers.longTaskMaxMs");
+        expect(directPush, `${f} 缺少 longTaskMax.push(observers.longTaskMaxMs)`).toBe(true);
+      }
+
+      const writeRawCalls = calls.filter((c) => c.expression.getText(sf) === "writeRawFile");
+      expect(writeRawCalls.length, `${f} 缺少 writeRawFile 调用`).toBe(1);
+      const rawArg = writeRawCalls[0].arguments[0];
+      expect(rawArg && ts.isObjectLiteralExpression(rawArg), `${f} writeRawFile 参数须为对象字面量`).toBe(true);
+      const scalarsProp = (rawArg as ts.ObjectLiteralExpression).properties.find(
+        (p): p is ts.PropertyAssignment =>
+          ts.isPropertyAssignment(p) &&
+          (ts.isIdentifier(p.name) || ts.isStringLiteral(p.name)) &&
+          p.name.text === "scalars",
+      );
+      expect(
+        scalarsProp && ts.isObjectLiteralExpression(scalarsProp.initializer),
+        `${f} writeRawFile 缺少 scalars 对象`,
+      ).toBe(true);
+      const longTaskMaxProp = (scalarsProp!.initializer as ts.ObjectLiteralExpression).properties.find(
+        (p): p is ts.PropertyAssignment =>
+          ts.isPropertyAssignment(p) &&
+          (ts.isIdentifier(p.name) || ts.isStringLiteral(p.name)) &&
+          p.name.text === "longTaskMaxMs",
+      );
+      expect(
+        longTaskMaxProp?.initializer.getText(sf),
+        `${f} scalars.longTaskMaxMs 必须由 maxOf(longTaskMax) 聚合`,
+      ).toBe("maxOf(longTaskMax)");
+
+      const maxOfDecl = collectAstNodes(sf, ts.isFunctionDeclaration).find(
+        (fn) => fn.name?.getText(sf) === "maxOf",
+      );
+      expect(maxOfDecl, `${f} 缺少 maxOf 函数声明`).toBeDefined();
+      const hasGt = collectAstNodes(maxOfDecl!, ts.isBinaryExpression).some(
+        (b) => b.operatorToken.kind === ts.SyntaxKind.GreaterThanToken,
+      );
+      expect(hasGt, `${f} 的 maxOf 未使用 > 比较取最大值`).toBe(true);
     }
   });
 
