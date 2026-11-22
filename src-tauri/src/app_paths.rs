@@ -192,12 +192,20 @@ enum DestState {
     Error(String),
 }
 
+/// 区分 `read_dir().next()` 的三态：`None`（空目录）、`Some(Ok(_))`（非空）、`Some(Err(e))`（迭代失败）。
+/// 必须把 `Some(Err(_))` 拆成 `DestState::Error`，否则一次瞬时迭代故障会被误判成
+/// `DestState::NonEmpty` 并永久结算为 `skipped:non-empty`。
+fn classify_first_entry<T>(first: Option<std::io::Result<T>>) -> DestState {
+    match first {
+        None => DestState::Empty,
+        Some(Ok(_)) => DestState::NonEmpty,
+        Some(Err(e)) => DestState::Error(e.to_string()),
+    }
+}
+
 fn destination_state(path: &Path) -> DestState {
     match std::fs::read_dir(path) {
-        Ok(mut entries) => match entries.next() {
-            None => DestState::Empty,
-            Some(_) => DestState::NonEmpty,
-        },
+        Ok(mut entries) => classify_first_entry(entries.next()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => DestState::Missing,
         Err(e) => DestState::Error(e.to_string()),
     }
@@ -241,6 +249,15 @@ fn read_migration_marker(target: &Path) -> MigrationMarker {
 ///   比少迁一次更难收拾。跳过会进 `skipped` 让用户看见，并结算成 `skipped:*`，
 ///   由 [`MIGRATION_MARKER`] 抑制重复提示。
 pub fn migrate_legacy_data(legacy: &Path, target: &Path) -> PortableMigration {
+    migrate_legacy_data_with(legacy, target, dir_has_entries, destination_state)
+}
+
+fn migrate_legacy_data_with(
+    legacy: &Path,
+    target: &Path,
+    check_has_entries: impl Fn(&Path) -> std::io::Result<bool>,
+    check_dest_state: impl Fn(&Path) -> DestState,
+) -> PortableMigration {
     let mut report = PortableMigration {
         from: legacy.display().to_string(),
         to: target.display().to_string(),
@@ -282,25 +299,23 @@ pub fn migrate_legacy_data(legacy: &Path, target: &Path) -> PortableMigration {
                 report.failed.push(format!("{name}: 读取旧位置失败 {e}"));
                 continue;
             }
-            SourceKind::Dir => {
-                if !dir_has_entries(&source) {
+            SourceKind::Dir => match check_has_entries(&source) {
+                Ok(true) => {}
+                Ok(false) => {
                     // 旧位置是空目录：现在没什么可搬。**不能结算** ——
                     // 否则用户之后真往里放东西，就永远不会再迁了
                     continue;
                 }
-            }
-        }
-        match destination_state(&destination) {
-            DestState::Missing => {}
-            DestState::Empty => {
-                // 应用自己建出来的空目录：清掉后走「整树复制 + 改名」，不做逐文件合并
-                if let Err(e) = std::fs::remove_dir(&destination) {
-                    report
-                        .failed
-                        .push(format!("{name}: 清理空目录失败 {}: {e}", destination.display()));
+                Err(e) => {
+                    // 打开或遍历旧目录失败：不得当成「空目录」静默跳过，也不结算，下次启动重试
+                    report.failed.push(format!("{name}: 读取旧位置失败 {e}"));
                     continue;
                 }
-            }
+            },
+        }
+        let dest_is_empty = match check_dest_state(&destination) {
+            DestState::Missing => false,
+            DestState::Empty => true,
             DestState::NonEmpty => {
                 report.skipped.push(format!(
                     "{name}: 便携目录已有数据，未合并（需要的话请手动复制旧位置的内容）"
@@ -317,9 +332,19 @@ pub fn migrate_legacy_data(legacy: &Path, target: &Path) -> PortableMigration {
                     .push(format!("{name}: 读取便携目录失败 {}: {e}", destination.display()));
                 continue;
             }
-        }
-        match copy_tree_atomically(&source, &destination, &mut report.skipped) {
-            Ok(()) => {
+        };
+        let skipped_before = report.skipped.len();
+        match copy_tree_atomically(&source, &destination, dest_is_empty, &mut report.skipped) {
+            Ok(0) => {
+                // 仅含符号链接（实际复制 0 个文件）：不得放入 report.copied，按跳过结算且不落空目录
+                if report.skipped.len() > skipped_before {
+                    marker
+                        .settled
+                        .insert(name.to_string(), "skipped:symlink".to_string());
+                    marker_dirty = true;
+                }
+            }
+            Ok(_) => {
                 report.copied.push(name.to_string());
                 marker.settled.insert(name.to_string(), "copied".to_string());
                 marker_dirty = true;
@@ -347,25 +372,20 @@ pub fn migrate_legacy_data(legacy: &Path, target: &Path) -> PortableMigration {
 ///
 /// 只判一层 `read_dir().next()` 会把「只有空 `.staging/`」的旧主题目录当成有数据，
 /// 结果什么都没复制却结算成 `copied`，弹窗说「已复制」，此后该子目录永远不再迁移。
-/// 符号链接算条目（不跟随，交给复制阶段登记为 skipped）；读不到目录按「没内容」处理，
-/// 不结算，下次再试。
-fn dir_has_entries(path: &Path) -> bool {
-    let Ok(entries) = std::fs::read_dir(path) else {
-        return false;
-    };
-    for entry in entries.flatten() {
-        let Ok(file_type) = entry.file_type() else {
-            // 类型读不到：当成有内容，让复制阶段给出可见的失败原因
-            return true;
-        };
+/// 符号链接算条目（不跟随，交给复制阶段登记为 skipped）；打开目录、读取条目或获取
+/// 文件类型失败时显式传播 `Err`，由调用方记入 `report.failed` 且不结算，避免静默跳过。
+fn dir_has_entries(path: &Path) -> std::io::Result<bool> {
+    for entry in std::fs::read_dir(path)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
         if file_type.is_symlink() || !file_type.is_dir() {
-            return true;
+            return Ok(true);
         }
-        if dir_has_entries(&entry.path()) {
-            return true;
+        if dir_has_entries(&entry.path())? {
+            return Ok(true);
         }
     }
-    false
+    Ok(false)
 }
 
 fn write_migration_marker(target: &Path, marker: &MigrationMarker) -> Result<(), String> {
@@ -387,13 +407,16 @@ fn write_migration_marker(target: &Path, marker: &MigrationMarker) -> Result<(),
     Ok(())
 }
 
-/// 先整树复制到同级临时目录，成功后再改名，避免「复制到一半中断」留下半份主题目录，
-/// 让下一次启动误以为已经迁移完成。
+/// 先整树复制到同级临时目录，成功且实际复制文件数 > 0 后再改名落位，避免「复制到一半中断」
+/// 留下半份主题目录，或「仅含符号链接（0 个文件）」时留下无意义的空结构覆盖目标。
+///
+/// 返回实际复制的普通文件数量。
 fn copy_tree_atomically(
     source: &Path,
     destination: &Path,
+    dest_is_empty: bool,
     skipped: &mut Vec<String>,
-) -> std::io::Result<()> {
+) -> std::io::Result<usize> {
     let name = destination
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
@@ -405,25 +428,41 @@ fn copy_tree_atomically(
     }
     // 复制失败同样清掉半成品：否则 data/ 下会留下一个既没结算、也不在白名单里的
     // `.themes.migrating`，用户拷走便携包时带上一份不完整数据
-    if let Err(e) = copy_dir_recursive(source, &staging, skipped) {
+    let copied_files = match copy_dir_recursive(source, &staging, skipped) {
+        Ok(count) => count,
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&staging);
+            return Err(e);
+        }
+    };
+    if copied_files == 0 {
+        // 0 个普通文件被复制（例如子目录内仅含符号链接）：清理临时目录且不覆盖目标
         let _ = std::fs::remove_dir_all(&staging);
-        return Err(e);
+        return Ok(0);
+    }
+    if dest_is_empty {
+        // 应用自己建出来的空目录：只有确认真有文件要落位时才清掉再 rename
+        if let Err(e) = std::fs::remove_dir(destination) {
+            let _ = std::fs::remove_dir_all(&staging);
+            return Err(e);
+        }
     }
     if let Err(e) = std::fs::rename(&staging, destination) {
         let _ = std::fs::remove_dir_all(&staging);
         return Err(e);
     }
-    Ok(())
+    Ok(copied_files)
 }
 
 /// 递归复制；**不跟随符号链接**（跟随会把链接目标的内容复制成实体，便携包反而不再
-/// 自洽），被跳过的相对路径记进 `skipped`，由调用方交给用户看。
+/// 自洽），被跳过的源路径（`path.display()`）记进 `skipped`，由调用方交给用户看。返回实际复制的文件数。
 fn copy_dir_recursive(
     source: &Path,
     destination: &Path,
     skipped: &mut Vec<String>,
-) -> std::io::Result<()> {
+) -> std::io::Result<usize> {
     std::fs::create_dir_all(destination)?;
+    let mut copied = 0usize;
     for entry in std::fs::read_dir(source)? {
         let entry = entry?;
         let path = entry.path();
@@ -434,12 +473,13 @@ fn copy_dir_recursive(
             continue;
         }
         if file_type.is_dir() {
-            copy_dir_recursive(&path, &target, skipped)?;
+            copied += copy_dir_recursive(&path, &target, skipped)?;
         } else {
             std::fs::copy(&path, &target)?;
+            copied += 1;
         }
     }
-    Ok(())
+    Ok(copied)
 }
 
 /// release 是 GUI 子系统进程（`windows_subsystem = "windows"`），`eprintln!` 没有任何
@@ -781,5 +821,193 @@ mod tests {
         assert!(report.copied.is_empty(), "不得跟随符号链接复制: {report:?}");
         assert!(report.skipped.iter().any(|s| s.contains("符号链接")), "{:?}", report.skipped);
         assert!(!portable.join("themes/x.css").exists());
+    }
+
+    #[test]
+    fn dir_has_entries_propagates_read_dir_errors() {
+        let root = TempDir::new("dir-has-entries-err");
+        let file_path = root.path().join("not-a-dir.css");
+        fs::write(&file_path, "body{}").expect("写普通文件");
+
+        // 传入普通文件会触发 read_dir 失败：必须显式返回 Err，不得静默吞成 Ok(false)
+        let err = dir_has_entries(&file_path).expect_err("read_dir 失败必须返回 Err");
+        assert!(!err.to_string().is_empty());
+
+        let empty_tree = root.path().join("empty-tree/.staging");
+        fs::create_dir_all(&empty_tree).expect("建空子目录");
+        assert!(!dir_has_entries(&root.path().join("empty-tree")).expect("空子目录应返回 Ok(false)"));
+
+        fs::write(empty_tree.join("a.css"), "h1{}").expect("写入真实文件");
+        assert!(dir_has_entries(&root.path().join("empty-tree")).expect("含文件应返回 Ok(true)"));
+    }
+
+    #[test]
+    fn migration_records_failure_and_does_not_settle_when_dir_scan_fails() {
+        let root = TempDir::new("scan-err");
+        let (legacy, portable) = seed_legacy(root.path());
+
+        // 模拟扫描旧 themes 目录时返回 IO 错误（如列目录权限被拒）
+        let report = migrate_legacy_data_with(
+            &legacy,
+            &portable,
+            |path| {
+                if path.file_name().and_then(|n| n.to_str()) == Some("themes") {
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "access denied",
+                    ))
+                } else {
+                    dir_has_entries(path)
+                }
+            },
+            destination_state,
+        );
+
+        assert_eq!(report.copied, vec!["recovery".to_string()]);
+        assert!(
+            report
+                .failed
+                .iter()
+                .any(|f| f.contains("themes") && f.contains("access denied")),
+            "扫描旧目录失败必须记入 report.failed: {:?}",
+            report.failed
+        );
+        // recovery 已结算，但 themes 失败不得写入 settled —— 下次恢复可读后必须可重试迁入
+        let marker = read_migration_marker(&portable);
+        assert_eq!(marker.settled.get("recovery").map(String::as_str), Some("copied"));
+        assert!(!marker.settled.contains_key("themes"));
+
+        let retry = migrate_legacy_data(&legacy, &portable);
+        assert_eq!(retry.copied, vec!["themes".to_string()]);
+        assert!(retry.failed.is_empty(), "{:?}", retry.failed);
+        assert!(portable.join("themes/aurora/aurora.css").is_file());
+    }
+
+    #[test]
+    fn classify_first_entry_treats_iterator_error_as_error_not_non_empty() {
+        assert_eq!(classify_first_entry::<()>(None), DestState::Empty);
+        assert_eq!(classify_first_entry(Some(Ok(()))), DestState::NonEmpty);
+
+        let iter_err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "iter denied");
+        assert_eq!(
+            classify_first_entry::<()>(Some(Err(iter_err))),
+            DestState::Error("iter denied".to_string())
+        );
+    }
+
+    #[test]
+    fn migration_records_failure_and_does_not_settle_on_destination_read_error() {
+        let root = TempDir::new("dest-read-err");
+        let (legacy, portable) = seed_legacy(root.path());
+        fs::create_dir_all(&portable).expect("建便携数据根");
+        // 目标路径被同名普通文件占据：read_dir 失败 → 进 report.failed 且不结算
+        let blocker = portable.join("themes");
+        fs::write(&blocker, "not a directory").expect("写占位文件");
+
+        let report = migrate_legacy_data(&legacy, &portable);
+        assert_eq!(report.copied, vec!["recovery".to_string()]);
+        assert!(
+            report.failed.iter().any(|f| f.contains("themes")),
+            "目标读取失败必须进 failed: {:?}",
+            report.failed
+        );
+        assert!(report.skipped.is_empty(), "读失败不得伪装成 skipped:non-empty: {:?}", report.skipped);
+        let marker = read_migration_marker(&portable);
+        assert!(!marker.settled.contains_key("themes"), "目标读失败不得结算: {marker:?}");
+
+        // 模拟瞬时迭代失败（Some(Err) → DestState::Error）：同样进 failed、不结算，恢复后可迁入
+        fs::remove_file(&blocker).expect("清占位文件");
+        let transient = migrate_legacy_data_with(
+            &legacy,
+            &portable,
+            dir_has_entries,
+            |path| {
+                if path.file_name().and_then(|n| n.to_str()) == Some("themes") {
+                    classify_first_entry::<()>(Some(Err(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        "transient read_dir iter error",
+                    ))))
+                } else {
+                    destination_state(path)
+                }
+            },
+        );
+        assert!(transient.copied.is_empty());
+        assert!(
+            transient
+                .failed
+                .iter()
+                .any(|f| f.contains("themes") && f.contains("transient read_dir iter error")),
+            "{:?}",
+            transient.failed
+        );
+        assert!(!read_migration_marker(&portable).settled.contains_key("themes"));
+
+        let retry = migrate_legacy_data(&legacy, &portable);
+        assert_eq!(retry.copied, vec!["themes".to_string()]);
+        assert!(portable.join("themes/aurora/aurora.css").is_file());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn migration_with_only_symlinks_does_not_mark_copied() {
+        let root = TempDir::new("only-symlinks");
+        let legacy = root.path().join("roaming");
+        let portable = root.path().join("data");
+        let target = root.path().join("elsewhere/real.css");
+        fs::create_dir_all(target.parent().unwrap()).expect("建目标目录");
+        fs::write(&target, "body{}").expect("写真实主题");
+        // 旧位置 themes 下只有符号链接（包含嵌套子目录中的符号链接），0 个真实文件
+        fs::create_dir_all(legacy.join("themes/nested")).expect("建旧主题目录");
+        std::os::unix::fs::symlink(&target, legacy.join("themes/nested/link.css"))
+            .expect("创建符号链接");
+
+        let report = migrate_legacy_data(&legacy, &portable);
+
+        assert!(
+            report.copied.is_empty(),
+            "仅含符号链接（实际复制 0 个文件）不得记入 copied: {report:?}"
+        );
+        assert!(
+            report.skipped.iter().any(|s| s.contains("符号链接")),
+            "符号链接必须显式登记在 skipped: {:?}",
+            report.skipped
+        );
+        assert!(
+            !portable.join("themes").exists(),
+            "0 文件复制不应在便携目录留下无意义的空结构"
+        );
+        assert!(portable.join(MIGRATION_MARKER).is_file(), "应写入跳过结算标记");
+        assert_eq!(
+            read_migration_marker(&portable)
+                .settled
+                .get("themes")
+                .map(String::as_str),
+            Some("skipped:symlink")
+        );
+
+        let again = migrate_legacy_data(&legacy, &portable);
+        assert!(!again.has_report(), "已结算后再次启动应静默: {again:?}");
+
+        // 目标目录本身已被应用先建为空目录时（prepare_portable_session 真实顺序），同样不落空子目录
+        let root2 = TempDir::new("only-symlinks-empty-dest");
+        let legacy2 = root2.path().join("roaming");
+        let portable2 = root2.path().join("data");
+        fs::create_dir_all(legacy2.join("themes/nested")).expect("建旧主题目录");
+        fs::create_dir_all(portable2.join("themes")).expect("模拟首启已建空目录");
+        std::os::unix::fs::symlink(&target, legacy2.join("themes/nested/link.css"))
+            .expect("创建符号链接");
+
+        let report2 = migrate_legacy_data(&legacy2, &portable2);
+        assert!(report2.copied.is_empty(), "{report2:?}");
+        assert!(report2.skipped.iter().any(|s| s.contains("符号链接")));
+        assert!(
+            !portable2.join("themes/nested").exists(),
+            "不得把无意义空子目录搬进目标空目录"
+        );
+        assert_eq!(
+            fs::read_dir(portable2.join("themes")).expect("目标目录应保持为空").count(),
+            0
+        );
     }
 }

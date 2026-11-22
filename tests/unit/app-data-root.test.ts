@@ -153,6 +153,20 @@ describe("#404 便携迁移提示", () => {
     expect(text).toContain("符号链接");
   });
 
+  it("子目录内仅含符号链接（实际复制 0 个文件，copied 为空）→ 首句说没有复制且不含「已复制」与「可自行清理」", () => {
+    const { text, kind } = portableMigrationMessage({
+      ...EMPTY_REPORT,
+      copied: [],
+      skipped: ["C:\\Users\\x\\AppData\\Roaming\\com.inklingmd.editor\\themes\\link.css: 符号链接，未迁移"],
+    });
+
+    expect(kind).toBe("warning");
+    expect(text.split("\n")[0]).toBe("便携模式：本次没有复制任何数据。");
+    expect(text).not.toContain("已复制");
+    expect(text).not.toContain("可自行清理");
+    expect(text).toContain("符号链接");
+  });
+
   it("复制成功但有启动警告（如 asset scope 放行失败）→ warning，首句仍是「已复制」", () => {
     const { text, kind } = portableMigrationMessage({
       ...EMPTY_REPORT,
