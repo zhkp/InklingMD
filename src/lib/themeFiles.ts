@@ -2,15 +2,15 @@
  * #307 主题目录的 IO 封装（桌面端走 Rust 命令；浏览器端走 `mockThemes`，供 E2E 跑通真实链路）。
  *
  * 目录规范（§2，对标 Typora）：
- *   Windows  `%APPDATA%/inklingmd/themes/`
- *   macOS    `~/Library/Application Support/inklingmd/themes/`
- *   Linux    `~/.config/inklingmd/themes/`
+ *   安装版   `<应用数据根>/themes/`（Windows 即 `%APPDATA%/com.inklingmd.editor/themes/`）
+ *   便携版   `<exe 同级 data>/themes/`（#404：数据随包走）
+ * 应用数据根本身由 Rust 解析（`appDataRoot()` → `app_data_root`），前端不再自己猜平台目录。
  * 约定「一个主题 = 一个 `<name>.css` + 同名可选资源目录 `<name>/`」；备份目录为隐藏项 `.backup/`
  * （扫描会跳过，见 Rust `scan_theme_dir`）。
  */
 import { invoke, isTauri } from "@tauri-apps/api/core";
-import { appDataDir } from "@tauri-apps/api/path";
 import { revealItemInDir } from "@tauri-apps/plugin-opener";
+import { appDataRoot } from "./appDataRoot";
 import { createDir, dirNameOf, joinPath, normalizePath, readTextFile } from "./fs";
 
 export const THEMES_DIR_NAME = "themes";
@@ -50,10 +50,15 @@ export interface ExtractReport {
   skipped: string[];
 }
 
-/** 主题目录（应用数据目录下的 `themes/`） */
+/**
+ * 主题目录（应用数据根下的 `themes/`）。
+ *
+ * 根目录走 `appDataRoot()`（#404）：便携模式下是 exe 同级 `data/`，与 Rust 侧
+ * recovery 守卫、asset scope 放行同一根；安装版与历史位置一致。
+ */
 export async function themesRoot(): Promise<string> {
   if (isTauri()) {
-    return normalizePath(joinPath(await appDataDir(), THEMES_DIR_NAME));
+    return normalizePath(joinPath(await appDataRoot(), THEMES_DIR_NAME));
   }
   const { mockThemesRoot } = await import("./mockThemes");
   return mockThemesRoot();

@@ -76,7 +76,8 @@ export interface ThemeRewriteContext {
   maxImportDepth?: number;
   /**
    * 资源 URL 允许的根（§C9）：默认 = `themeDir`（保守）。
-   * 调用方（#307/#225）应传 **assetProtocol.scope 的实际根**（如 `$APPDATA`），
+   * 调用方（#307/#225）应传**主题资源根**（`<应用数据根>/themes`，与 Rust 侧 asset scope
+   * 放行的范围一致；#404 起不再传整个应用数据根——那里还有 WebView2 profile 与恢复区），
    * 这样 `../` 指向同包内的资源仍可加载；越出该根即按 §C9 降级为不加载并登记。
    */
   assetRoot?: string;

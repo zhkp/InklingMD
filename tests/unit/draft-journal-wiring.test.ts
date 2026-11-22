@@ -12,7 +12,6 @@ vi.mock("@tauri-apps/api/core", () => ({
   isTauri: () => true,
   invoke: invokeMock,
 }));
-vi.mock("@tauri-apps/api/path", () => ({ appDataDir: async () => "/appdata" }));
 vi.mock("@tauri-apps/api/window", () => ({
   getCurrentWindow: () => ({ label: "inkling-test" }),
 }));
@@ -71,7 +70,11 @@ function tab(path: string, extra: Partial<OpenTab> = {}): OpenTab {
 }
 
 beforeEach(() => {
-  invokeMock.mockReset().mockResolvedValue(undefined);
+  // #404：应用数据根由 `app_data_root` 解析（便携模式下不是 Roaming），其余命令默认成功
+  invokeMock.mockReset().mockImplementation(async (cmd: string) => {
+    if (cmd === "app_data_root") return "/appdata";
+    return undefined;
+  });
   // session.json 走 `fs.writeTextFile`（不是 journal IO），断言要看这个 mock
   vi.mocked(writeTextFile).mockClear();
   __resetJournalHealth();
@@ -99,10 +102,17 @@ describe("#365 默认 IO 的命令名", () => {
 
   it("删除失败时不清记账：下一次 clearDraft 仍会重试", async () => {
     await writeDraftNow({ path: "/w/a.md", isUntitled: false, content: "x" });
-    invokeMock.mockRejectedValueOnce(new Error("locked"));
+    // 只让 delete_path 失败：一次性 mock 会先被 app_data_root 吃掉（#404）
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "app_data_root") return "/appdata";
+      if (cmd === "delete_path") throw new Error("locked");
+      return undefined;
+    });
 
     await clearDraft("/w/a.md"); // 第一次：失败
-    invokeMock.mockResolvedValue(undefined);
+    invokeMock.mockImplementation(async (cmd: string) =>
+      cmd === "app_data_root" ? "/appdata" : undefined,
+    );
     await clearDraft("/w/a.md"); // 第二次：必须真的再发一次 delete_path
 
     const deleteCalls = invokeMock.mock.calls.filter((c) => c[0] === "delete_path");
