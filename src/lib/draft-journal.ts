@@ -174,18 +174,20 @@ export async function writeDraftNow(
   options: { durability?: "sync" | "none" } = {},
 ): Promise<boolean> {
   if (!isTauri()) return false;
-  const draft: DraftFile = {
-    version: 1,
-    draftId: draftFileKey(tab.path),
-    sessionId,
-    tabPath: tab.path,
-    isUntitled: tab.isUntitled,
-    title: tab.title ?? tab.path.split(/[\\/]/).pop() ?? tab.path,
-    content: tab.content,
-    pinned: false,
-    updatedAt: Date.now(),
-  };
   try {
+    // `draftFileKey` 用 `encodeURIComponent`：孤立代理项等非法路径会抛 URIError。
+    // 放进 try 内，让这种路径只表现为「这条草稿没写成」，而不是让 flushAllDrafts 整体 reject。
+    const draft: DraftFile = {
+      version: 1,
+      draftId: draftFileKey(tab.path),
+      sessionId,
+      tabPath: tab.path,
+      isUntitled: tab.isUntitled,
+      title: tab.title ?? tab.path.split(/[\\/]/).pop() ?? tab.path,
+      content: tab.content,
+      pinned: false,
+      updatedAt: Date.now(),
+    };
     const dir = await recoveryDir();
     await io.writeTextFile(draftPath(dir, tab.path), JSON.stringify(draft), {
       createParents: true,

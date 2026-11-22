@@ -6,8 +6,10 @@
 //   2. `findRecoverableDrafts()`：上次不是正常退出 → 把草稿读出来交给用户决定；
 //   3. `applyRecovery()`：把草稿恢复成 tab，并从 checkpoint 取回光标/滚动（#378）；
 //   4. `cleanupExpiredDrafts()`：只清「已归档会话里被用户处理过」且超 7 天的；
-//      本次会话的、未处理过的崩溃副本、pinned 一律保留；同时回收
-//      `fullyHandled=true` 且超 7 天的旧 `crashed-*.json`（#409 第一片）。
+//      本次会话的、未处理过的崩溃副本、pinned 一律保留；同时回收 `fullyHandled=true`、
+//      超 7 天、**且归档内 `draftPaths` 在 `drafts/` 中已无对应文件**的旧
+//      `crashed-*.json`。空 `draftPaths` 还要求归档自身声明「枚举完整」
+//      （`draftsEnumerated === true`）；`drafts/` 列不出来时整体跳过回收（#409 第一片）。
 //
 // 恢复入口**不自动恢复**：用户必须明确选择「恢复 / 丢弃」，否则一份过期草稿会
 // 悄悄覆盖他已经改过的文件。
@@ -55,6 +57,15 @@ export interface CrashedSession {
    */
   handledDraftIds: string[];
   fullyHandled: boolean;
+  /**
+   * 归档那一刻的草稿枚举是否**完整**（同一次 `listDraftsDetailed()` 里取路径、列目录、
+   * 逐条读取/解析与必需字段校验都成功）。
+   *
+   * 枚举不完整时 `draftPaths` 可能漏掉真实存在的草稿；此时 `fullyHandled` 不能当作
+   * 「该会话没有草稿」，否则账本会被回收、漏掉的草稿永远失去会话归属（永不清理）。
+   * 旧归档没有该字段 → 视为不可信（只在 `draftPaths` 非空时靠残留检查判断）。
+   */
+  draftsEnumerated?: boolean;
 }
 
 interface RecoveryDirEntry {
@@ -201,6 +212,8 @@ async function crashedFiles(): Promise<
             draftPaths: Array.isArray(raw.draftPaths) ? raw.draftPaths : [],
             handledDraftIds: Array.isArray(raw.handledDraftIds) ? raw.handledDraftIds : [],
             fullyHandled: !!raw.fullyHandled,
+            draftsEnumerated:
+              typeof raw.draftsEnumerated === "boolean" ? raw.draftsEnumerated : undefined,
           },
         });
       } catch {
@@ -236,11 +249,15 @@ export async function archivePreviousSession(
   const startedAt = Number.isFinite(rawStartedAt) ? rawStartedAt : now;
   const legacySession = !previous.sessionId;
   const sessionId = previous.sessionId ?? `legacy-${startedAt}`;
-  const draftPaths = (await listDrafts())
+  const { dir } = await sessionPaths();
+  // 枚举与「可信度」必须来自同一次读取：另起一次 listDir 探针只能证明那一刻可读，
+  // 不能代表真正产出 draftPaths 的这次枚举。枚举不完整时绝不能写
+  // 「空 draftPaths + fullyHandled=true」，否则账本被回收后漏掉的草稿永远没有会话归属。
+  const { drafts: liveDrafts, enumerated: draftsEnumerated } = await listDraftsDetailed();
+  const draftPaths = liveDrafts
     .filter((d) => (legacySession ? d.sessionId !== currentSessionId() : d.sessionId === sessionId))
     .map((d) => d.tabPath);
 
-  const { dir } = await sessionPaths();
   const sep = sepOf(dir);
   const file = `${dir}${sep}crashed-${startedAt}.json`;
   const payload: CrashedSession = {
@@ -251,9 +268,10 @@ export async function archivePreviousSession(
     archivedAt: now,
     cleanExit: false,
     draftPaths,
+    draftsEnumerated,
     handledDraftIds: [],
-    // 没有草稿可处理的归档直接算「处理完」，否则它会永远留着
-    fullyHandled: draftPaths.length === 0,
+    // 没有草稿可处理、且枚举可信的归档才算「处理完」，否则会永远留着或过早回收
+    fullyHandled: draftsEnumerated && draftPaths.length === 0,
   };
   try {
     await io.writeTextFile(file, JSON.stringify(payload), {
@@ -294,7 +312,11 @@ export async function markDraftsHandled(
         JSON.stringify({
           ...data,
           handledDraftIds: [...handled],
-          fullyHandled: data.draftPaths.every((p) => handled.has(p)),
+          // 空 draftPaths 可能是「归档时列目录失败」：只有确认枚举可信才算处理完
+          fullyHandled:
+            data.draftPaths.length === 0
+              ? data.draftsEnumerated === true
+              : data.draftPaths.every((p) => handled.has(p)),
           handledAt: now,
         }),
         { createParents: true, durability: "sync" },
@@ -305,31 +327,54 @@ export async function markDraftsHandled(
   }
 }
 
-/** 读出所有草稿（含内容）；只有上次非正常退出时才有意义 */
-export async function listDrafts(): Promise<RecoverableDraft[]> {
-  if (!isTauri()) return [];
+/**
+ * 读出所有草稿（含内容）；只有上次非正常退出时才有意义。
+ *
+ * `enumerated=false` 表示这次枚举**不完整**：读目录失败（含取恢复区路径失败）、
+ * 某条草稿读不出来 / 解析失败 / 缺少必需字段（`content`、`tabPath`、`sessionId`）。
+ * 归档据此决定能否声明「该会话没有草稿」——否则会把 `fullyHandled` 写成 true，
+ * 账本被回收后漏掉的那份草稿永远没有会话归属。
+ */
+async function listDraftsDetailed(): Promise<{
+  drafts: RecoverableDraft[];
+  enumerated: boolean;
+}> {
+  if (!isTauri()) return { drafts: [], enumerated: false };
   let names: string[];
+  let draftsDir: string;
+  let dirSep: string;
   try {
+    // 取路径与列目录都属于枚举本身：任何一步失败都不能对外声称「没有草稿」
     const { drafts } = await sessionPaths();
+    draftsDir = drafts;
+    dirSep = sepOf(await io.appDataDir());
     const entries = await io.listDir(drafts);
     names = entries.filter((e) => !e.isDir && e.name.endsWith(".json")).map((e) => e.name);
-  } catch {
-    // 目录还不存在：正常（从没崩溃过）
-    return [];
+  } catch (err) {
+    // 目录不存在（从没崩溃过）在 Rust 侧返回空表、不会走到这里；走到这里说明真失败了
+    console.warn("[recovery] 读取草稿目录失败，本次枚举不可信:", err);
+    return { drafts: [], enumerated: false };
   }
-  const dirSep = sepOf(await io.appDataDir());
-  const draftsDir = (await sessionPaths()).drafts;
   const out: RecoverableDraft[] = [];
+  let enumerated = true;
   for (const name of names) {
     try {
       const raw = await io.readTextFile(`${draftsDir}${dirSep}${name}`);
       const parsed = JSON.parse(raw) as Partial<RecoverableDraft>;
-      if (!parsed || typeof parsed.content !== "string" || typeof parsed.tabPath !== "string") {
+      if (
+        !parsed ||
+        typeof parsed.content !== "string" ||
+        typeof parsed.tabPath !== "string" ||
+        typeof parsed.sessionId !== "string" ||
+        parsed.sessionId === ""
+      ) {
+        // 文件在、但内容不完整（含缺 sessionId，无法归属会话）：这次枚举不可信
+        enumerated = false;
         continue;
       }
       out.push({
         draftId: parsed.draftId ?? name.replace(/\.json$/, ""),
-        sessionId: typeof parsed.sessionId === "string" ? parsed.sessionId : "",
+        sessionId: parsed.sessionId,
         tabPath: parsed.tabPath,
         isUntitled: !!parsed.isUntitled,
         title: parsed.title ?? parsed.tabPath,
@@ -337,11 +382,18 @@ export async function listDrafts(): Promise<RecoverableDraft[]> {
         pinned: !!parsed.pinned,
         updatedAt: Number(parsed.updatedAt ?? 0),
       });
-    } catch {
-      // 单条损坏不影响其它：跳过
+    } catch (err) {
+      // 单条损坏不影响其它：跳过，但这次枚举不再完整（要有诊断线索，不能静默）
+      enumerated = false;
+      console.warn("[recovery] 草稿读取/解析失败，本次枚举不可信:", name, err);
     }
   }
-  return out.sort((a, b) => b.updatedAt - a.updatedAt);
+  return { drafts: out.sort((a, b) => b.updatedAt - a.updatedAt), enumerated };
+}
+
+/** 读出所有草稿（含内容）；只有上次非正常退出时才有意义 */
+export async function listDrafts(): Promise<RecoverableDraft[]> {
+  return (await listDraftsDetailed()).drafts;
 }
 
 /**
@@ -514,9 +566,11 @@ export function mergeDraftIntoExistingTab(
  * ——否则「很久没打开」就等于自动丢用户内容。`pinned` 一律豁免。
  * `exclude` 是本次刚恢复的 path（内容此刻只在编辑器里）。
  *
- * 另外按设计 §8.3 回收旧归档：`fullyHandled=true` 且超 TTL 的 `crashed-*.json`
- * 才删；未 fullyHandled 的归档是「哪些草稿已处理」的唯一账本，删了会让草稿变孤儿。
- * 返回删除的**草稿**条数，归档回收不计入。
+ * 另外按设计 §8.3 回收旧归档：`fullyHandled=true`、超 TTL，**且该会话的草稿已全部不在
+ * 磁盘上**才删。未 fullyHandled 的归档是「哪些草稿已处理」的唯一账本；删除失败、本次刚
+ * 恢复（`exclude`）或合并进已打开 tab 的草稿仍占着副本，账本一删它们就成了永久孤儿。
+ * 空 `draftPaths` 还要求 `draftsEnumerated === true`：归档时枚举失败写成空数组的，
+ * 无法证明该会话真的没有草稿。返回删除的**草稿**条数，归档回收不计入。
  */
 export async function cleanupExpiredDrafts(
   now = Date.now(),
@@ -542,22 +596,52 @@ export async function cleanupExpiredDrafts(
   });
   const removed = expired.length === 0 ? 0 : await discardDrafts(expired);
 
-  // 旧归档只在「全部草稿都处理过」且超 TTL 时回收（设计 §8.3）。
-  // `archivedAt` 缺失（旧版本 / 半写）时用文件 mtime 兜底；两者都没有则保留，
-  // 绝不因为「时间戳是 0」就把刚写的归档当成 7 天前的文件删掉。
-  for (const { file, data, mtimeUs } of crashes) {
-    if (!data.fullyHandled) continue;
+  // 归档回收的前提比「fullyHandled + 超 TTL」更严：该会话的草稿必须真的都不在磁盘上。
+  // `discardDrafts` 只返回成功条数、失败被吞，`exclude` 又会让本次刚恢复的草稿留下来；
+  // 只看 fullyHandled 就删账本，这些残留草稿之后会落进 `!crash` 分支永久保留。
+  const reclaimable = crashes.filter(({ data, mtimeUs }) => {
+    if (!data.fullyHandled) return false;
+    // 空 draftPaths 且没有「枚举可信」的证据（旧归档 / 归档时列目录失败）→ 不回收：
+    // 无法证明该会话真的没有草稿残留，宁可多留账本
+    if (data.draftPaths.length === 0 && data.draftsEnumerated !== true) return false;
     const stampedAt = data.archivedAt > 0
       ? data.archivedAt
       : mtimeUs > 0
         ? Math.floor(mtimeUs / 1000)
         : 0;
-    if (stampedAt <= 0 || now - stampedAt <= ttlMs) continue;
+    return stampedAt > 0 && now - stampedAt > ttlMs;
+  });
+  if (reclaimable.length > 0) {
+    let alive: Set<string> | null = null;
     try {
-      await io.deletePath(file);
+      const { drafts: draftsDir } = await sessionPaths();
+      alive = new Set(
+        (await io.listDir(draftsDir)).filter((e) => !e.isDir).map((e) => e.name),
+      );
     } catch (err) {
-      // 删不掉就留到下次；清理是尽力而为，但不能静默吞掉
-      console.warn("[recovery] 旧归档删除失败，保留到下次清理:", file, err);
+      // 列不出草稿目录就不回收：宁可多留账本，也不能让残留草稿变孤儿
+      console.warn("[recovery] 列出草稿目录失败，跳过旧归档回收:", err);
+    }
+    if (alive) {
+      const present = alive;
+      for (const { file, data } of reclaimable) {
+        let stillPresent: boolean;
+        try {
+          // 该会话还有草稿在磁盘上（删除失败 / 本次刚恢复 / pinned / 未 handled）→ 账本必须留着
+          stillPresent = data.draftPaths.some((p) => present.has(`${draftFileKey(p)}.json`));
+        } catch (err) {
+          // 坏归档里的路径算不出文件名（如孤立代理项）：不回收，等人工处理
+          console.warn("[recovery] 归档 draftPaths 无法映射为文件名，跳过回收:", file, err);
+          continue;
+        }
+        if (stillPresent) continue;
+        try {
+          await io.deletePath(file);
+        } catch (err) {
+          // 删不掉就留到下次；清理是尽力而为，但不能静默吞掉
+          console.warn("[recovery] 旧归档删除失败，保留到下次清理:", file, err);
+        }
+      }
     }
   }
   return removed;

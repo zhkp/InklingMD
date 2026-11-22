@@ -64,6 +64,8 @@ const files = new Map<string, string>();
 /** 文件 mtime（微秒）：模拟旧归档缺 archivedAt 时用磁盘时间判龄 */
 const fileMtimeUs = new Map<string, number>();
 let failDelete = false;
+/** 只让指定前缀的删除失败：用于「草稿删不掉、归档仍可删」的场景 */
+let failDeleteOnlyPrefix: string | null = null;
 
 function draftFile(path: string): string {
   const key = Buffer.from(path, "utf8")
@@ -106,6 +108,7 @@ beforeEach(() => {
   files.clear();
   fileMtimeUs.clear();
   failDelete = false;
+  failDeleteOnlyPrefix = null;
   readDocumentMock
     .mockReset()
     .mockResolvedValue({ content: "磁盘内容", stat: { mtimeUs: 5_000, size: 4 } });
@@ -134,7 +137,8 @@ beforeEach(() => {
       }));
     },
     deletePath: async (path) => {
-      if (failDelete) throw new Error("EIO: 删除失败");
+      const targeted = failDeleteOnlyPrefix !== null && path.startsWith(failDeleteOnlyPrefix);
+      if (failDelete || targeted) throw new Error("EIO: 删除失败");
       files.delete(path);
     },
   });
@@ -687,6 +691,8 @@ describe("#409 旧 crashed 归档回收", () => {
         draftPaths: [],
         handledDraftIds: [],
         fullyHandled: true,
+        // 手工播种默认「枚举可信」：空 draftPaths 才允许回收
+        draftsEnumerated: true,
         ...data,
       }),
     );
@@ -767,5 +773,231 @@ describe("#409 旧 crashed 归档回收", () => {
     expect(await cleanupExpiredDrafts(NOW)).toBe(0);
     expect(files.has(draft)).toBe(true);
     expect(files.has(archive)).toBe(true);
+  });
+
+  it("该会话的草稿删除失败时，归档保留到下次清理", async () => {
+    const archive = crashed("crashed-keep.json", {
+      sessionId: "s-failed",
+      draftPaths: ["/w/a.md"],
+      handledDraftIds: ["/w/a.md"],
+    });
+    const draft = seedDraft("/w/a.md", { updatedAt: OLD, sessionId: "s-failed" });
+    failDeleteOnlyPrefix = `${DRAFTS}/`;
+
+    expect(await cleanupExpiredDrafts(NOW)).toBe(0); // 删失败：removed 不计
+    expect(files.has(draft)).toBe(true);
+    // 账本必须留着：删了这份草稿就再没有会话归属，永远不会被清理
+    expect(files.has(archive)).toBe(true);
+  });
+
+  it("本次刚恢复（exclude）的草稿仍在磁盘时，归档不被回收", async () => {
+    const archive = crashed("crashed-excluded.json", {
+      sessionId: "s-restored",
+      draftPaths: ["/w/a.md"],
+      handledDraftIds: ["/w/a.md"],
+    });
+    const draft = seedDraft("/w/a.md", { updatedAt: OLD, sessionId: "s-restored" });
+
+    expect(
+      await cleanupExpiredDrafts(NOW, undefined, { exclude: new Set(["/w/a.md"]) }),
+    ).toBe(0);
+    expect(files.has(draft)).toBe(true);
+    expect(files.has(archive)).toBe(true);
+  });
+
+  it("pinned 草稿仍在磁盘时，归档不被回收", async () => {
+    const archive = crashed("crashed-pinned.json", {
+      sessionId: "s-pinned",
+      draftPaths: ["/w/a.md"],
+      handledDraftIds: ["/w/a.md"],
+    });
+    const draft = seedDraft("/w/a.md", {
+      updatedAt: OLD,
+      sessionId: "s-pinned",
+      pinned: true,
+    });
+
+    expect(await cleanupExpiredDrafts(NOW)).toBe(0);
+    expect(files.has(draft)).toBe(true);
+    expect(files.has(archive)).toBe(true);
+  });
+
+  it("草稿目录列不出来时跳过归档回收，不抛错", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const archive = crashed("crashed-unlistable.json");
+    __setRecoveryIo({
+      appDataDir: async () => "/appdata",
+      readTextFile: async (path) => {
+        const v = files.get(path);
+        if (v === undefined) throw new Error("not found");
+        return v;
+      },
+      writeTextFile: async (path, content) => {
+        files.set(path, content);
+      },
+      listDir: async (path) => {
+        if (path.endsWith("/drafts")) throw new Error("EIO: 目录不可读");
+        const prefix = path.endsWith("/") ? path : `${path}/`;
+        const names = new Set<string>();
+        for (const key of files.keys()) {
+          if (key.startsWith(prefix)) names.add(key.slice(prefix.length));
+        }
+        return [...names].map((name) => ({ name, isDir: false }));
+      },
+      deletePath: async (path) => {
+        files.delete(path);
+      },
+    });
+
+    try {
+      await expect(cleanupExpiredDrafts(NOW)).resolves.toBe(0);
+      expect(files.has(archive)).toBe(true);
+      expect(warn).toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("归档时草稿目录列不出来 → 不宣称已处理完，超期也不回收账本", async () => {
+    files.set(
+      SESSION,
+      JSON.stringify({ version: 1, sessionId: "s-old", startedAt: 1_111, cleanExit: false }),
+    );
+    const draft = seedDraft("/w/a.md", { updatedAt: OLD, sessionId: "s-old" });
+    __setRecoveryIo({
+      appDataDir: async () => "/appdata",
+      readTextFile: async (path) => {
+        const v = files.get(path);
+        if (v === undefined) throw new Error("not found");
+        return v;
+      },
+      writeTextFile: async (path, content) => {
+        files.set(path, content);
+      },
+      listDir: async (path) => {
+        if (path.endsWith("/drafts")) throw new Error("EIO: 目录不可读");
+        const prefix = path.endsWith("/") ? path : `${path}/`;
+        const names = new Set<string>();
+        for (const key of files.keys()) {
+          if (key.startsWith(prefix)) names.add(key.slice(prefix.length));
+        }
+        return [...names].map((name) => ({ name, isDir: false }));
+      },
+      deletePath: async (path) => {
+        files.delete(path);
+      },
+    });
+
+    await beginSession(2_222);
+
+    const archive = "/appdata/recovery/main/crashed-1111.json";
+    const archived = JSON.parse(files.get(archive)!);
+    expect(archived.draftsEnumerated).toBe(false);
+    expect(archived.fullyHandled).toBe(false);
+
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await cleanupExpiredDrafts(NOW);
+      // 那次枚举失败，谁也不知道还有没有草稿：账本与草稿都必须留着
+      expect(files.has(archive)).toBe(true);
+      expect(files.has(draft)).toBe(true);
+      // 归档侧不能静默：这份账本会永久不可回收，需要诊断线索
+      expect(warn).toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("旧归档缺 draftsEnumerated 且 draftPaths 为空时保守保留", async () => {
+    const archive = crashed("crashed-legacy-empty.json", {
+      draftPaths: [],
+      draftsEnumerated: undefined,
+    });
+
+    await cleanupExpiredDrafts(NOW);
+
+    expect(files.has(archive)).toBe(true);
+  });
+
+  it("归档里的 draftPaths 无法映射为文件名时不抛错、也不回收", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const archive = crashed("crashed-bad-path.json", {
+      draftPaths: ["\ud800"],
+      handledDraftIds: ["\ud800"],
+    });
+
+    try {
+      await expect(cleanupExpiredDrafts(NOW)).resolves.toBe(0);
+      expect(files.has(archive)).toBe(true);
+      expect(warn).toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("归档声明枚举失败且 draftPaths 为空时，即使 fullyHandled 也不回收", async () => {
+    const archive = crashed("crashed-enum-failed.json", {
+      sessionId: "s-enum",
+      draftPaths: [],
+      draftsEnumerated: false,
+      fullyHandled: true,
+    });
+    const draft = seedDraft("/w/x.md", { updatedAt: OLD, sessionId: "s-enum" });
+
+    await cleanupExpiredDrafts(NOW);
+
+    // 空 draftPaths 无法证明「该会话没有草稿」：账本留着，草稿也留着
+    expect(files.has(archive)).toBe(true);
+    expect(files.has(draft)).toBe(true);
+  });
+
+  it("归档时有草稿读不出来 → 不宣称已处理完，账本不回收", async () => {
+    files.set(
+      SESSION,
+      JSON.stringify({ version: 1, sessionId: "s-old", startedAt: 1_111, cleanExit: false }),
+    );
+    const draft = seedDraft("/w/a.md", { updatedAt: OLD, sessionId: "s-old" });
+    files.set(draft, "{ 坏 JSON");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await beginSession(2_222);
+      const archive = "/appdata/recovery/main/crashed-1111.json";
+      const archived = JSON.parse(files.get(archive)!);
+      expect(archived.draftsEnumerated).toBe(false);
+      expect(archived.fullyHandled).toBe(false);
+
+      await cleanupExpiredDrafts(NOW);
+      expect(files.has(archive)).toBe(true);
+      expect(files.has(draft)).toBe(true);
+      expect(warn).toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("归档时有草稿缺 sessionId → 不能声称已处理完", async () => {
+    files.set(
+      SESSION,
+      JSON.stringify({ version: 1, sessionId: "s-old", startedAt: 1_111, cleanExit: false }),
+    );
+    const draft = draftFile("/w/a.md");
+    files.set(
+      draft,
+      JSON.stringify({
+        version: 1,
+        draftId: "x",
+        tabPath: "/w/a.md",
+        content: "x",
+        updatedAt: OLD,
+      }),
+    );
+
+    await beginSession(2_222);
+
+    const archive = "/appdata/recovery/main/crashed-1111.json";
+    const archived = JSON.parse(files.get(archive)!);
+    // 缺 sessionId 无法归属会话：归档不能声称「该会话没有草稿」
+    expect(archived.draftsEnumerated).toBe(false);
+    expect(archived.fullyHandled).toBe(false);
   });
 });
