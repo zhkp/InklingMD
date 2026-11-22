@@ -116,7 +116,9 @@ jobs:
           # 首播豁免：播种那次本来就没有可比基线；常规跑必须真的比出结论，
           # 覆盖不足时 report 退出 2（与 dev 通道 tag 运行的语义对齐）。
           PERF_REQUIRE_COMPARISON: ${{ inputs.update_baseline && '0' || '1' }}
-          PERF_ABSOLUTE: ${{ inputs.absolute && '1' || '' }}
+          # 播种期跳过绝对失败判定（PERF_ABSOLUTE=0），仍保持 PERF_UNCAPPED 写进 uncapped/ 目录，
+          # 避免无 GPU CI 因 scroll-* 未达帧预算触发三段并 exit 1 判红（首播不计回归）。
+          PERF_ABSOLUTE: ${{ inputs.absolute && !inputs.update_baseline && '1' || '0' }}
           PERF_UNCAPPED: ${{ inputs.absolute && '1' || '' }}
           # 拆出独立复测 job（#234）：有嫌疑时本 job 只测 + check。
           PERF_SPLIT_RETEST: "1"
@@ -184,7 +186,11 @@ jobs:
               echo ""
               echo "**疑似场景**："
               echo ""
-              node -e "const l=JSON.parse(require('fs').readFileSync('.perf-output/retest.json','utf8'));console.log(l.map(x=>'- \`'+x+'\`').join('\n'))"
+              node -e "let l=null;try{l=JSON.parse(require('fs').readFileSync('.perf-output/retest.json','utf8'))}catch{};console.log(Array.isArray(l)&&l.length?l.map(x=>'- \`'+x+'\`').join('\n'):'- （空）')"
+              echo ""
+              echo "> ⚠️ 若本次是**播种**（\`update_baseline=true\`）：基线更新发生在最终出报告的下游 job（retest 或 retest2），"
+              echo "> 请取回 \`perf-prod-${{ steps.profile.outputs.value }}-retest\`（若又移交确认轮则取 \`perf-prod-${{ steps.profile.outputs.value }}-retest2\`）产物提交——"
+              echo "> 本 job 的 \`perf-prod-${{ steps.profile.outputs.value }}\` 里仍是旧基线（取错＝本次播种静默丢失）。"
             } >> "$GITHUB_STEP_SUMMARY"
           else
             echo "⚠️ 未生成 .perf-output/report.md（benchmark 未跑完，属 infra 故障）" >> "$GITHUB_STEP_SUMMARY"
@@ -235,7 +241,8 @@ jobs:
           PERF_PROFILE: ${{ needs.benchmark.outputs.profile }}
           PERF_UPDATE_BASELINE: ${{ inputs.update_baseline && '1' || '0' }}
           PERF_REQUIRE_COMPARISON: ${{ inputs.update_baseline && '0' || '1' }}
-          PERF_ABSOLUTE: ${{ inputs.absolute && '1' || '' }}
+          # 播种期跳过绝对失败判定（PERF_ABSOLUTE=0），仍保持 PERF_UNCAPPED 写进 uncapped/ 目录
+          PERF_ABSOLUTE: ${{ inputs.absolute && !inputs.update_baseline && '1' || '0' }}
           PERF_UNCAPPED: ${{ inputs.absolute && '1' || '' }}
           PERF_RETEST_ONLY: "1"
           # 不可省（#294 评审 P0）：它决定 planConfirmPhases 是否返回 handoff；
@@ -274,13 +281,27 @@ jobs:
         shell: bash
         run: |
           if [ -f .perf-output/report.md ]; then
+            COVERAGE=$(grep -oE '判定覆盖：[0-9]+/[0-9]+' .perf-output/report.md | head -1 || true)
             {
               echo "## 性能 Benchmark · prod 构建 · 独立复测（新 runner，#234）"
+              echo ""
+              [ -n "$COVERAGE" ] && echo "**$COVERAGE**"
+              case "$COVERAGE" in
+                "判定覆盖：0/"*)
+                  echo ""
+                  if [ "${{ inputs.update_baseline }}" = "true" ]; then
+                    echo "> 📦 **本次是播种**：覆盖 0/N 属正常（首播本来就没有可比基线）。"
+                    echo "> 基线已在**本 job** 更新，请取回 \`perf-prod-${{ needs.benchmark.outputs.profile }}-retest\` 里的 \`.perf-baseline/prod-*/\` 提交回仓库；上游产物里仍是旧基线（取错＝本次播种静默丢失）。"
+                  else
+                    echo "> ⚠️ **本次未与任何基线比较**：结论**不构成性能验证**。prod 基线需先播种（dispatch 勾 update_baseline，取回产物后提交）。"
+                  fi
+                  ;;
+              esac
               echo ""
               cat .perf-output/report.md
               echo ""
               echo "> 📦 若本次是播种（\`update_baseline=true\`）：基线已在**本 job** 更新，"
-              echo "> 请取 \`perf-prod-${{ needs.benchmark.outputs.profile }}-retest\`；上游产物里是旧基线。"
+              echo "> 请取 \`perf-prod-${{ needs.benchmark.outputs.profile }}-retest\`；上游 \`perf-prod-${{ needs.benchmark.outputs.profile }}\` 里是旧基线（取错＝本次播种静默丢失）。"
             } >> "$GITHUB_STEP_SUMMARY"
           elif [ -f .perf-output/retest2.json ]; then
             {
@@ -290,7 +311,11 @@ jobs:
               echo ""
               echo "**确认轮候选**："
               echo ""
-              node -e "const l=JSON.parse(require('fs').readFileSync('.perf-output/retest2.json','utf8'));console.log(Array.isArray(l)&&l.length?l.map(x=>'- \`'+x+'\`').join('\n'):'- （空）')"
+              node -e "let l=null;try{l=JSON.parse(require('fs').readFileSync('.perf-output/retest2.json','utf8'))}catch{};console.log(Array.isArray(l)&&l.length?l.map(x=>'- \`'+x+'\`').join('\n'):'- （空）')"
+              echo ""
+              echo "> ⚠️ 若本次是**播种**（\`update_baseline=true\`）：基线更新发生在 retest2 job，"
+              echo "> 请取回 \`perf-prod-${{ needs.benchmark.outputs.profile }}-retest2\` 产物提交——"
+              echo "> 本 job 的 \`perf-prod-${{ needs.benchmark.outputs.profile }}-retest\` 里仍是旧基线（取错＝本次播种静默丢失）。"
             } >> "$GITHUB_STEP_SUMMARY"
           else
             echo "⚠️ 未生成 .perf-output/report.md（复测 job 未跑完，属 infra 故障）" >> "$GITHUB_STEP_SUMMARY"
@@ -337,7 +362,8 @@ jobs:
           PERF_PROFILE: ${{ needs.retest.outputs.profile }}
           PERF_UPDATE_BASELINE: ${{ inputs.update_baseline && '1' || '0' }}
           PERF_REQUIRE_COMPARISON: ${{ inputs.update_baseline && '0' || '1' }}
-          PERF_ABSOLUTE: ${{ inputs.absolute && '1' || '' }}
+          # 播种期跳过绝对失败判定（PERF_ABSOLUTE=0），仍保持 PERF_UNCAPPED 写进 uncapped/ 目录
+          PERF_ABSOLUTE: ${{ inputs.absolute && !inputs.update_baseline && '1' || '0' }}
           PERF_UNCAPPED: ${{ inputs.absolute && '1' || '' }}
           PERF_RETEST2_ONLY: "1"
           CI: "true"
@@ -365,11 +391,22 @@ jobs:
               echo "## 性能 Benchmark · prod 构建 · 确认轮（第三个 runner，#294）"
               echo ""
               [ -n "$COVERAGE" ] && echo "**$COVERAGE**"
+              case "$COVERAGE" in
+                "判定覆盖：0/"*)
+                  echo ""
+                  if [ "${{ inputs.update_baseline }}" = "true" ]; then
+                    echo "> 📦 **本次是播种**：覆盖 0/N 属正常（首播本来就没有可比基线）。"
+                    echo "> 基线已在**本 job** 更新，请取回 \`perf-prod-${{ needs.retest.outputs.profile }}-retest2\` 里的 \`.perf-baseline/prod-*/\` 提交回仓库；上游两个产物里仍是旧基线（取错＝本次播种静默丢失）。"
+                  else
+                    echo "> ⚠️ **本次未与任何基线比较**：结论**不构成性能验证**。prod 基线需先播种（dispatch 勾 update_baseline，取回产物后提交）。"
+                  fi
+                  ;;
+              esac
               echo ""
               cat .perf-output/report.md
               echo ""
               echo "> 📦 若本次是播种（\`update_baseline=true\`）：基线已在**本 job** 更新，"
-              echo "> 请取 \`perf-prod-${{ needs.retest.outputs.profile }}-retest2\`。"
+              echo "> 请取 \`perf-prod-${{ needs.retest.outputs.profile }}-retest2\`；上游两个产物里都是旧基线（取错＝本次播种静默丢失）。"
             } >> "$GITHUB_STEP_SUMMARY"
           else
             echo "⚠️ 未生成 .perf-output/report.md（确认轮 job 未跑完，属 infra 故障）" >> "$GITHUB_STEP_SUMMARY"

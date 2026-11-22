@@ -34,7 +34,7 @@
 
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { resolve, join } from "node:path";
-import { baselineComparability, MODE_FALLBACK, ROUNDS_FALLBACK } from "./comparability.js";
+import { baselineComparability } from "./comparability.js";
 import { baselinePath as baselinePathFor } from "./baseline-path.mjs";
 import { runtimeDescription } from "./report-header.mjs";
 import {
@@ -170,11 +170,11 @@ function readPwReport() {
 
 /**
  * 基线文件路径 = **测量配置** 的函数：
- * `<BASE_DIR>/[<env>/]<profile>/<mode>/r<rounds>/<id>.json`
+ * `<BASE_DIR>/<envPrefix><profile>/<mode>/r<rounds>/<id>.json`
  *
- * 前缀是白名单式的（见 `baseline-path.mjs` 的 envDirPrefix）：`local` 与
- * `ci-ubuntu` / `ci-windows` 以外的任何 env（prod-*、将来的 ci-macos 等）都带
- * 自己的目录，避免新口径静默写进历史共享目录。
+ * 前缀规则见 `baseline-path.mjs` 的 `envDirPrefix`：**白名单**式——只有
+ * `ci-ubuntu` / `ci-windows` 沿用无前缀的历史布局；`local` 走 `local/`，其余任何
+ * env（`prod-*`、将来的 `ci-macos` 等）都用自己的命名空间，避免新口径静默写进历史共享目录。
  *
  * 为什么把 mode / rounds 放进路径（而不是只靠 comparability 拦截）：
  * 它们是**测量配置**，不同配置的绝对值不可比。放在路径里，headless 日常回归与

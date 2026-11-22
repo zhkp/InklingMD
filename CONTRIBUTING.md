@@ -456,10 +456,9 @@ gh workflow run benchmark-prod.yml -f profile=quick -f update_baseline=true   # 
 
 也可在 Actions → **Benchmark (prod build)** → Run workflow 里点选。
 
-> ⚠️ **前提**：`workflow_dispatch` 只能触发**默认分支上已存在**的工作流。该文件尚未合入
-> `main` 时，上面的命令会返回 `HTTP 404: workflow not found on the default branch`。
-> 要在分支上试跑，必须显式指定含该文件的 ref：
-> `gh workflow run benchmark-prod.yml --ref <branch>`（且该 ref 里已有这个文件）。
+> ⚠️ **前提（分两阶段）**：
+> 1. **工作流尚未合入 `main` 时**：无法通过 `workflow_dispatch` 触发——**即使显式传 `--ref <branch>` 同样返回 `HTTP 404: workflow not found on the default branch`**（GitHub 的 dispatch API 要求工作流文件先存在于默认分支），必须先将该工作流合入 `main`；
+> 2. **合入 `main` 之后**：若需在特性分支上试跑分支代码或工作流修改，再使用 `gh workflow run benchmark-prod.yml --ref <branch>`（且该 ref 里包含该工作流文件）。
 
 **基线落点**：`.perf-baseline/prod-ci-<os>/<profile>/<mode>/r<rounds>/`
 （如 `prod-ci-ubuntu/quick/headless/r2/`）。本机跑 `PERF_BUILD=prod` 时落在
@@ -485,13 +484,15 @@ gh workflow run benchmark-prod.yml -f profile=quick -f update_baseline=true   # 
 取错＝本次播种静默丢失）→ 把其中的 `.perf-baseline/prod-*/` 提交回仓库。
 
 ⚠️ **播种遇 `exit 2`（部分场景未测量）**：`report` 是**逐场景写入**，已测场景的基线照常
-更新，缺的只是未测量场景的本轮点位——与 dev 通道的纪律完全一致（见上文「基线的身份 =
-测量配置」小节的同一条）。先修超时 / 失败，再补一次完整播种；不要把整轮 `exit 2` 当成
+更新，缺的只是未测量场景的本轮点位——与 dev 通道的纪律完全一致（见上文「基线维护」→
+「播种深度与节奏」下的「播种遇 `exit 2`」条目）。先修超时 / 失败，再补一次完整播种；不要把整轮 `exit 2` 当成
 「播种失败、什么都没写成」而直接重跑，否则未测量场景的点位会一直缺、σ 估不准。
 
 **判定口径**：常规跑（`update_baseline` 未勾）会下发 `PERF_REQUIRE_COMPARISON=1`，
 覆盖不足时 `report` 以 exit 2 收尾，Job Summary 会写明「本次未与任何基线比较，结论
-不构成性能验证」；播种那次豁免该门禁。三段 job（`benchmark` → `retest` → `retest2`）
+不构成性能验证」；播种那次豁免该门禁（若同时勾 `absolute=true`，仍按 `uncapped`
+测量并写入 `uncapped/` 目录，但下发 `PERF_ABSOLUTE=0` 跳过播种期绝对失败判定，
+避免无 GPU CI 触发三段并 `exit 1` 判红）。三段 job（`benchmark` → `retest` → `retest2`）
 与 dev 通道同构，FAIL 必须由第三个独立 runner 确认。
 
 **调试钩子**：`force_suspects` / `force_suspects2` 可以把指定场景强制当成「疑似回归 /

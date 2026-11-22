@@ -2,9 +2,7 @@ import { defineConfig, type PluginOption } from "vite";
 import react from "@vitejs/plugin-react";
 import { readFileSync } from "node:fs";
 
-// @ts-expect-error process is a nodejs global
 const isTauriDev = !!process.env.TAURI_DEV_HOST;
-// @ts-expect-error process is a nodejs global
 const host = process.env.TAURI_DEV_HOST || "127.0.0.1";
 
 /**
@@ -55,7 +53,6 @@ function themeBaseLayerPlugin(): PluginOption {
 // 打进去，让 `tests/perf/inject.ts` 不必依赖 Vite dev 专用的
 // `/src/lib/mockFs.ts` 模块路径。release 构建不设该变量，常量恒为 false，
 // `main.tsx` 里的分支会被 Rollup 摇掉。
-// @ts-expect-error process is a nodejs global
 const perfMock = process.env.PERF_BUILD === "prod";
 
 // https://vite.dev/config/
