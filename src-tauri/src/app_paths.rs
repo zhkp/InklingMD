@@ -29,7 +29,8 @@ use tauri::Manager;
 pub const PORTABLE_MARKER: &str = "portable.txt";
 /// 便携数据的目录名（exe 同级）
 pub const PORTABLE_DATA_DIR: &str = "data";
-/// 迁移完成标记：存在即不再尝试迁移（否则用户删掉的主题会被旧位置「复活」）
+/// 迁移结算标记（内容见 [`MigrationMarker`]）。**按子目录结算**，不是「文件存在就整体停迁」：
+/// 已结算的子目录不再检查；旧位置当时缺失/为空或上次失败的子目录，每次启动都还会检查。
 pub const MIGRATION_MARKER: &str = ".migrated-from-appdata";
 /// 需要随包搬走的数据子目录（旧位置 → 便携位置）
 pub const MIGRATED_SUBDIRS: [&str; 2] = ["themes", "recovery"];
@@ -204,8 +205,11 @@ fn destination_state(path: &Path) -> DestState {
 
 /// 迁移状态的落地形态（[`MIGRATION_MARKER`] 的内容）。
 ///
-/// `settled` 是**逐子目录**的结算状态：已经有结论的子目录下次启动静默跳过，
-/// 没有条目的（旧位置当时是空目录、或上次失败）下次仍会检查。
+/// `settled` 是**逐子目录**的结算状态：已经有结论的子目录下次启动静默跳过；
+/// 没有条目的子目录每次启动都还会检查，包括：
+/// - 旧位置当时缺失（`SourceKind::Missing`）——之后装过安装版才可能有数据；
+/// - 旧位置当时是空目录——之后才可能放进主题；
+/// - 上次读取/复制失败——需要重试。
 /// 单文件 + 逐子目录状态，才能同时满足两件互相拉扯的事：
 /// 「迁过就别再迁」（否则用户删掉的主题会被旧位置复活）与
 /// 「当时没数据就别把门关死」（否则用户之后用安装版产生数据就永远迁不过来）。
@@ -352,8 +356,17 @@ fn write_migration_marker(target: &Path, marker: &MigrationMarker) -> Result<(),
     std::fs::create_dir_all(target)
         .map_err(|e| format!("建目录失败 {}: {e}", target.display()))?;
     let body = serde_json::to_vec(marker).map_err(|e| format!("序列化失败: {e}"))?;
-    std::fs::write(target.join(MIGRATION_MARKER), body)
-        .map_err(|e| format!("写入失败 {}: {e}", target.join(MIGRATION_MARKER).display()))
+    // 先写临时文件再改名：直接覆盖时若中途崩溃，标记会变成半截 JSON，
+    // 解析失败就会退化成「什么都没结算」，把用户删掉的主题整树复制回来
+    let final_path = target.join(MIGRATION_MARKER);
+    let staging = target.join(format!("{MIGRATION_MARKER}.tmp"));
+    std::fs::write(&staging, body)
+        .map_err(|e| format!("写入失败 {}: {e}", staging.display()))?;
+    if let Err(e) = std::fs::rename(&staging, &final_path) {
+        let _ = std::fs::remove_file(&staging);
+        return Err(format!("改名失败 {}: {e}", final_path.display()));
+    }
+    Ok(())
 }
 
 /// 先整树复制到同级临时目录，成功后再改名，避免「复制到一半中断」留下半份主题目录，
@@ -662,8 +675,10 @@ mod tests {
         );
     }
 
+    /// 注意：`SourceKind::Error`（元数据读失败）这条分支在本机无法稳定制造
+    /// （需要权限/占用故障，CI 以 root 跑 chmod 场景会失效），这里只覆盖「同名项不是目录」。
     #[test]
-    fn migration_reports_unreadable_and_non_directory_sources() {
+    fn migration_reports_non_directory_sources() {
         let root = TempDir::new("nondir");
         let legacy = root.path().join("roaming");
         let portable = root.path().join("data");

@@ -166,6 +166,34 @@ describe("#404 便携迁移提示", () => {
     expect(text).toContain("主题目录未加入 asset 白名单");
   });
 
+  it("复制成功但有条目被跳过 → warning，首句说清「部分条目没有复制」", () => {
+    const { text, kind } = portableMigrationMessage({
+      ...EMPTY_REPORT,
+      copied: ["themes"],
+      skipped: ["recovery: 便携目录已有数据，未合并（需要的话请手动复制旧位置的内容）"],
+    });
+
+    expect(kind).toBe("warning");
+    expect(text.split("\n")[0]).toBe("便携模式：已复制应用数据，但有部分条目没有复制。");
+    expect(text).toContain("recovery");
+  });
+
+  it("来源为空时不输出空的「来源：」行（取不到旧目录 / 旧目录即便携目录）", () => {
+    const { text, kind } = portableMigrationMessage({
+      from: "",
+      to: PORTABLE_ROOT,
+      copied: [],
+      failed: [],
+      skipped: [],
+      warnings: ["取旧数据目录失败，本次未迁移旧数据: 拒绝访问"],
+    });
+
+    expect(kind).toBe("warning");
+    expect(text).not.toContain("来源：\n");
+    expect(text.split("\n").some((line) => line.trim() === "来源：")).toBe(false);
+    expect(text).toContain(PORTABLE_ROOT);
+  });
+
   it("只有启动问题（什么都没迁）→ warning，首句与「数据迁移」区分开", () => {
     const { text, kind } = portableMigrationMessage({
       ...EMPTY_REPORT,

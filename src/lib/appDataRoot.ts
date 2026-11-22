@@ -26,9 +26,11 @@ export interface PortableMigration {
 /**
  * 应用数据根（Rust 侧解析，两条分支都保证目录已存在）。
  *
- * 本函数**不判** `isTauri()`（浏览器预览没有 Tauri IPC）：调用方要么自己先判
- * `isTauri()`（`themesRoot` / `beginSession` 等），要么 try/catch 兜住并回落
- * （`store/theme.ts` 的 `assetRoot`）。新增调用方必须照做。
+ * 本函数**不判** `isTauri()`：浏览器预览里没有 Tauri IPC。现有保护分两层——
+ * `themesRoot` / `beginSession` 这类入口自己先判 `isTauri()`；
+ * `exit-session` / `draft-journal` / `cursor-checkpoint` / `session-recovery` 的
+ * 内部调用点不判，由使用它们的上一层（写标记 / 写草稿的那个函数）判。
+ * 新增调用方必须在其中一层兜住，否则浏览器预览会抛 `__TAURI_INTERNALS__ is undefined`。
  */
 export async function appDataRoot(): Promise<string> {
   return invoke<string>("app_data_root");
@@ -83,7 +85,11 @@ export function portableMigrationMessage(migration: PortableMigration): {
     kind = "warning";
   }
 
-  const lines = [headline, `来源：${migration.from}`, `目标：${migration.to}`];
+  // 来源可能为空：取不到旧数据目录、或旧目录恰好等于便携目录时，Rust 侧没有可填的值。
+  // 空的「来源：」行既没用又像 bug，直接不输出
+  const lines = [headline];
+  if (migration.from) lines.push(`来源：${migration.from}`);
+  if (migration.to) lines.push(`目标：${migration.to}`);
   if (copied.length > 0) lines.push(`已复制：${copied.join("、")}`);
   if (skipped.length > 0) {
     lines.push("", "以下条目未复制（源文件仍在原处）：", ...skipped.map((s) => `· ${s}`));
