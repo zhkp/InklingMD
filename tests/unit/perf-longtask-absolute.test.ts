@@ -9,7 +9,7 @@
 // 2. 判据是「每轮单次最长」而不是均值——`longTaskMs/longTaskCount` 推不出来；
 // 3. 三轮都超才 FAIL（沿用 #294 的确认语义），单轮超只 WARN。
 import { execFileSync } from "node:child_process";
-import { rmSync, writeFileSync } from "node:fs";
+import { readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createPerfReportWorkspace, type PerfReportWorkspace } from "./perf-report-env";
@@ -141,5 +141,28 @@ describe("longTaskMaxMs 绝对判定", () => {
     writeRaw("raw", 0, { includeMax: false });
     const check = runReport("check");
     expect(check.stdout).not.toContain("longTaskMaxMs(绝对)");
+  });
+
+  it("所有采长任务的场景都必须上报 longTaskMaxMs（#424 评审）", () => {
+    // 这条锁的是「新增场景忘了采」的回归：只写 longTaskCount/longTaskMs 的场景
+    // 在 absolute=true 时**不会**产出 50ms 判定行，等于该场景没有验收口径。
+    const dir = "tests/perf/scenarios";
+    const files = readdirSync(dir).filter((f) => f.endsWith(".spec.ts"));
+    const collectors = files.filter((f) =>
+      readFileSync(join(dir, f), "utf8").includes(
+        "longTaskMs.push(observers.longTaskMs)",
+      ),
+    );
+    // 至少覆盖 input-source / input / open / save / scroll / search / tab-switch
+    expect(collectors.length).toBeGreaterThanOrEqual(7);
+    for (const f of collectors) {
+      const src = readFileSync(join(dir, f), "utf8");
+      expect(src, `${f} 采了 longTaskMs 却没采 longTaskMaxMs`).toContain(
+        "longTaskMax.push(observers.longTaskMaxMs)",
+      );
+      expect(src, `${f} 没把 longTaskMaxMs 写进 scalars`).toContain(
+        "longTaskMaxMs: maxOf(longTaskMax),",
+      );
+    }
   });
 });

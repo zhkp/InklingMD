@@ -53,6 +53,7 @@ for (const tier of ctx.tiers) {
       const switchSamples: number[] = [];
       const longTaskCount: number[] = [];
       const longTaskMs: number[] = [];
+      const longTaskMax: number[] = [];
       const clsValues: number[] = [];
       const heapDeltas: number[] = [];
 
@@ -104,6 +105,8 @@ for (const tier of ctx.tiers) {
           await probe.measure(page);
           longTaskCount.push(observers.longTaskCount);
           longTaskMs.push(observers.longTaskMs);
+          // 单次最长长任务（#387 验收项），逐轮 push 后取最坏一次
+          longTaskMax.push(observers.longTaskMaxMs);
           clsValues.push(observers.cls);
           heapDeltas.push(
             observers.heapStartMB !== null && observers.heapEndMB !== null
@@ -135,6 +138,7 @@ for (const tier of ctx.tiers) {
           ...probe.scalars(),
           longTaskCount: avg(longTaskCount),
           longTaskMs: avg(longTaskMs),
+          longTaskMaxMs: maxOf(longTaskMax),
           cls: avg(clsValues),
           heapDeltaMB: avg(heapDeltas),
         },
@@ -146,4 +150,10 @@ for (const tier of ctx.tiers) {
 function avg(values: number[]): number {
   if (values.length === 0) return 0;
   return Math.round((values.reduce((s, v) => s + v, 0) / values.length) * 100) / 100;
+}
+
+/** 轮次聚合：取最坏一次（单次长任务用，均值会掩盖偶发长任务） */
+function maxOf(values: number[]): number {
+  if (values.length === 0) return 0;
+  return Math.round(values.reduce((m, v) => (v > m ? v : m), 0) * 100) / 100;
 }
