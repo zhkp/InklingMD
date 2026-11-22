@@ -13,10 +13,13 @@
  * | 失败 | 降级为「不走快照」+ **记录状态位**（不得静默） |
  */
 import { isSnapshotEligible } from "./registry";
+import { isSamePath, normalizePath } from "../lib/path-utils";
 
 export const THEME_KEY = "inkling-theme";
 export const SNAPSHOT_PREFIX = "inkling-theme-snapshot:";
 export const THEMES_INDEX_KEY = "inkling-themes-index";
+/** 最近一次校验并落盘快照时对应的归一化主题目录（#404：搬家/升级重校验基准） */
+export const THEMES_ROOT_KEY = "inkling-themes-root";
 /** 快照状态位（G9「不得静默」；也登记进统一同步注册点） */
 export const SNAPSHOT_STATE_KEY = "inkling-theme-snapshot-state";
 
@@ -31,6 +34,8 @@ export interface ThemeSnapshot {
   themeId: string;
   hash: string;
   css: string;
+  /** 生成该快照时使用的归一化 `themesRoot`；缺失表示旧版遗留快照（#404） */
+  themesRoot?: string;
   at: number;
 }
 
@@ -80,15 +85,21 @@ function isValidSnapshot(value: unknown): value is ThemeSnapshot {
     typeof v.v === "number" &&
     typeof v.themeId === "string" &&
     typeof v.hash === "string" &&
-    typeof v.css === "string"
+    typeof v.css === "string" &&
+    (v.themesRoot === undefined || typeof v.themesRoot === "string")
   );
 }
 
 /**
- * 读取快照：**比对 `themeId + hash`**，不匹配（含旧版本/损坏）即弃用。
+ * 读取快照：**比对 `themeId + hash`**（传入 `expectedThemesRoot` 时一并比对目录根），
+ * 不匹配（含旧版本/损坏/搬家后根路径变化）即弃用。
  * 弃用时会顺手删掉不匹配的 key，避免长期占位（回收策略的一部分）。
  */
-export function readSnapshot(themeId: string, hash: string): ThemeSnapshot | undefined {
+export function readSnapshot(
+  themeId: string,
+  hash: string,
+  expectedThemesRoot?: string,
+): ThemeSnapshot | undefined {
   const key = snapshotKey(themeId, hash);
   let raw: string | null = null;
   try {
@@ -118,6 +129,18 @@ export function readSnapshot(themeId: string, hash: string): ThemeSnapshot | und
     }
     return undefined;
   }
+  if (expectedThemesRoot) {
+    const expected = normalizePath(expectedThemesRoot);
+    if (!parsed.themesRoot || !isSamePath(parsed.themesRoot, expected)) {
+      // 便携目录搬家或旧版无根记录快照：弃用并清理，强制按当前根重算 url()
+      try {
+        localStorage.removeItem(key);
+      } catch {
+        /* 忽略 */
+      }
+      return undefined;
+    }
+  }
   return parsed;
 }
 
@@ -127,7 +150,12 @@ export interface SnapshotWriteResult {
   bytes: number;
 }
 
-export function writeSnapshot(themeId: string, hash: string, css: string): SnapshotWriteResult {
+export function writeSnapshot(
+  themeId: string,
+  hash: string,
+  css: string,
+  themesRoot?: string,
+): SnapshotWriteResult {
   const bytes = byteLength(css);
   if (!isSnapshotEligible(themeId)) {
     recordSnapshotState({ last: "inapplicable", themeId, hash, detail: "内置主题不走快照（P2-4）" });
@@ -144,11 +172,13 @@ export function writeSnapshot(themeId: string, hash: string, css: string): Snaps
   }
   // 回收：同 themeId 只保留最新一份（写入前删旧 hash key）
   removeSnapshotsFor(themeId, hash);
+  const normalizedRoot = themesRoot ? normalizePath(themesRoot) : undefined;
   const payload: ThemeSnapshot = {
     v: SNAPSHOT_VERSION,
     themeId,
     hash,
     css,
+    ...(normalizedRoot ? { themesRoot: normalizedRoot } : {}),
     at: Date.now(),
   };
   try {
@@ -219,6 +249,86 @@ export function gcSnapshots(knownThemeIds: readonly string[]): number {
     recordSnapshotState({ last: "gc", detail: `清理 ${removed} 份失效快照` });
   }
   return removed;
+}
+
+export function readSnapshotThemesRoot(): string | null {
+  try {
+    const raw = localStorage.getItem(THEMES_ROOT_KEY);
+    return raw ? normalizePath(raw) : null;
+  } catch {
+    return null;
+  }
+}
+
+export function writeSnapshotThemesRoot(themesRoot: string): void {
+  try {
+    localStorage.setItem(THEMES_ROOT_KEY, normalizePath(themesRoot));
+  } catch {
+    /* 隐私模式等：忽略 */
+  }
+}
+
+export interface SnapshotRootReconcileResult {
+  rootChanged: boolean;
+  removed: number;
+  removedThemeIds: Set<string>;
+}
+
+/**
+ * 校验已落盘快照对应的 `themesRoot` 是否与当前扫描到的主题目录一致（#404）：
+ * - 便携目录搬家：`inkling-themes-root` 与当前根不一致 → 清空全部旧快照；
+ * - 老版本升级：尚无 `inkling-themes-root` 记录，或单条快照缺少/不匹配 `themesRoot` → 清理失效快照。
+ * 同时更新记录的 `themesRoot`，避免后续重启仍按旧根误判。
+ */
+export function reconcileSnapshotsForThemesRoot(currentRoot: string): SnapshotRootReconcileResult {
+  const normalizedRoot = normalizePath(currentRoot);
+  const recordedRoot = readSnapshotThemesRoot();
+  const rootChanged = recordedRoot !== null && !isSamePath(recordedRoot, normalizedRoot);
+  const removedThemeIds = new Set<string>();
+  let removed = 0;
+
+  for (const key of listSnapshotKeys()) {
+    const parsedKey = parseSnapshotKey(key);
+    let shouldRemove = rootChanged;
+    let snapshotThemeId = parsedKey?.themeId;
+
+    if (!shouldRemove) {
+      try {
+        const raw = localStorage.getItem(key);
+        const parsed: unknown = raw ? JSON.parse(raw) : null;
+        if (!isValidSnapshot(parsed) || parsed.v !== SNAPSHOT_VERSION) {
+          shouldRemove = true;
+        } else {
+          snapshotThemeId = parsed.themeId;
+          if (!parsed.themesRoot || !isSamePath(parsed.themesRoot, normalizedRoot)) {
+            shouldRemove = true;
+          }
+        }
+      } catch {
+        shouldRemove = true;
+      }
+    }
+
+    if (!shouldRemove) continue;
+    try {
+      localStorage.removeItem(key);
+      removed += 1;
+      if (snapshotThemeId) removedThemeIds.add(snapshotThemeId);
+    } catch {
+      /* 忽略 */
+    }
+  }
+
+  writeSnapshotThemesRoot(normalizedRoot);
+  if (removed > 0) {
+    recordSnapshotState({
+      last: "gc",
+      detail: rootChanged
+        ? `主题目录根变更，清理 ${removed} 份旧路径快照`
+        : `清理 ${removed} 份无根或路径不匹配快照`,
+    });
+  }
+  return { rootChanged, removed, removedThemeIds };
 }
 
 export function readSnapshotState(): SnapshotState | undefined {

@@ -38,6 +38,7 @@ import {
   writeSnapshot,
   writeStoredThemeId,
 } from "./snapshot";
+import { normalizePath } from "../lib/path-utils";
 import type { ThemeMode } from "./typora/metadata";
 
 export type FirstFrameSource = "snapshot" | "baseline" | "inapplicable";
@@ -54,6 +55,8 @@ export interface FirstFrameResult {
 
 /** 会话当前主题（权威源的内存镜像；store 与断言都读它，避免各处重复解析） */
 let currentTheme: { themeId: string; mode: ThemeMode } = { themeId: DEFAULT_THEME_ID, mode: "light" };
+/** 本窗口当前已注入主题样式对应的归一化 `themesRoot`（#404：防多窗口并发清理后本窗口漏重算） */
+let injectedThemesRoot: string | null = null;
 
 export function currentThemeId(): string {
   return currentTheme.themeId;
@@ -61,6 +64,10 @@ export function currentThemeId(): string {
 
 export function currentThemeMode(): ThemeMode {
   return currentTheme.mode;
+}
+
+export function currentInjectedThemesRoot(): string | null {
+  return injectedThemesRoot;
 }
 
 const now = (): number =>
@@ -124,12 +131,14 @@ export function bootstrapFirstFrameTheme(): FirstFrameResult {
 
   let source: FirstFrameSource = "inapplicable";
   let needsAsyncLoad = unknownStored || (theme?.css?.kind === "file" && !eligible);
+  injectedThemesRoot = null;
 
   if (eligible && hash) {
     const started = now();
     const snap = readSnapshot(themeId, hash);
     if (snap) {
       injectThemeCss(snap.css);
+      injectedThemesRoot = snap.themesRoot ? normalizePath(snap.themesRoot) : null;
       source = "snapshot";
       const elapsed = now() - started;
       // 耗时预算 ≤ 8 ms：超预算记状态位（仍可用），不阻塞首帧
@@ -173,6 +182,8 @@ export interface ApplyThemeOptions {
   css?: string | null;
   /** 是否写回 `inkling-theme`（默认 true；多窗口同步接收方也应写回以便一致） */
   persist?: boolean;
+  /** 生成或复用快照对应的归一化 `themesRoot`（#404：搬家/升级防旧绝对路径固化） */
+  themesRoot?: string;
 }
 
 /**
@@ -190,9 +201,11 @@ export function applyTheme(theme: AppTheme, options: ApplyThemeOptions = {}): vo
   if (css === null || theme.css?.kind === "none") {
     // 内置基线：没有独立样式表 → 卸载主题样式（避免上一个主题的规则残留）
     injectThemeCss(null);
+    injectedThemesRoot = null;
   } else {
     injectThemeCss(css);
-    if (theme.hash) writeSnapshot(theme.id, theme.hash, css);
+    injectedThemesRoot = options.themesRoot ? normalizePath(options.themesRoot) : null;
+    if (theme.hash) writeSnapshot(theme.id, theme.hash, css, options.themesRoot);
   }
 
   // #226：主题变化的**单一广播点**。CSS 类跟随由 `data-theme` 自动完成，
@@ -217,6 +230,7 @@ export function notifyThemeChanged(themeId: string, mode: ThemeMode): void {
 /** 卸载主题（回到「无主题样式」状态）；`data-theme` 仍保持（由调用方决定） */
 export function unloadThemeStyles(): void {
   injectThemeCss(null);
+  injectedThemesRoot = null;
   clearThemeAttributes();
 }
 

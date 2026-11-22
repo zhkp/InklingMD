@@ -10,8 +10,12 @@ const files = new Map<string, string>();
 const writes: Array<{ path: string; options?: { durability?: string; createParents?: boolean } }> = [];
 let failWrite = false;
 
-vi.mock("@tauri-apps/api/core", () => ({ isTauri: () => true }));
-vi.mock("@tauri-apps/api/path", () => ({ appDataDir: async () => "/appdata" }));
+// #404：应用数据根由 `app_data_root` 命令解析（便携模式可能不是 Roaming），
+// 这里按真实命令名应答；继续 mock `@tauri-apps/api/path` 会掩盖这条链路
+vi.mock("@tauri-apps/api/core", () => ({
+  isTauri: () => true,
+  invoke: async (cmd: string) => (cmd === "app_data_root" ? "/appdata" : null),
+}));
 
 vi.mock("../../src/lib/fs", () => ({
   writeTextFile: vi.fn(async (path: string, content: string, options?: { durability?: string }) => {

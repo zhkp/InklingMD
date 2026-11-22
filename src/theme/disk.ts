@@ -24,7 +24,7 @@ export interface LoadThemeCssOptions {
   themeId: string;
   /** 主题 CSS 文件绝对路径 */
   filePath: string;
-  /** 资源允许根（§C9；生产传应用数据目录 = `assetProtocol.scope` 的根） */
+  /** 资源允许根（§C9；生产传主题目录 `<应用数据根>/themes` = asset scope 放行的根） */
   assetRoot: string;
   io: ThemeDiskIo;
   /** `@import` 递归深度上限（P1-6，默认 8，与 `#306` 一致） */
@@ -56,7 +56,8 @@ export interface PreloadOptions {
   maxImportDepth?: number;
   /**
    * 允许读取的根（**默认 = themeDir**，保守）：解析后的目标必须落在该根内，否则**丢弃该 `@import`**。
-   * 与 `§C9` 的 `url()` 越界判据**同一套**（`isWithinRoot` 路径边界比较），生产传 `assetRoot` = 应用数据目录，
+   * 与 `§C9` 的 `url()` 越界判据**同一套**（`isWithinRoot` 路径边界比较），生产传 `assetRoot` = 主题目录
+   * `<应用数据根>/themes`（与 Rust 侧 asset scope 放行范围一致），
    * 这样主题目录区内的合法共享（`../shared/x.css`）仍可用，而 `../../.ssh/id_rsa` 这类越界读取被拦。
    */
   assetRoot?: string;

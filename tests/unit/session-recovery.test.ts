@@ -5,8 +5,17 @@
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("@tauri-apps/api/core", () => ({ isTauri: () => true }));
-vi.mock("@tauri-apps/api/path", () => ({ appDataDir: async () => "/appdata" }));
+// #404：应用数据根走 `app_data_root` 命令（便携模式下不再是 Roaming AppData）；
+// 便携迁移报告由 `take_portable_migration` 一次性取走（默认没有迁移）
+const portable = vi.hoisted(() => ({ migration: null as null | Record<string, unknown> }));
+vi.mock("@tauri-apps/api/core", () => ({
+  isTauri: () => true,
+  invoke: async (cmd: string) => {
+    if (cmd === "app_data_root") return "/appdata";
+    if (cmd === "take_portable_migration") return portable.migration;
+    return null;
+  },
+}));
 vi.mock("@tauri-apps/api/window", () => ({
   getCurrentWindow: () => ({ label: "main" }),
 }));
@@ -109,6 +118,7 @@ beforeEach(() => {
   fileMtimeUs.clear();
   failDelete = false;
   failDeleteOnlyPrefix = null;
+  portable.migration = null;
   readDocumentMock
     .mockReset()
     .mockResolvedValue({ content: "磁盘内容", stat: { mtimeUs: 5_000, size: 4 } });
@@ -634,6 +644,63 @@ describe("#365 启动入口（useStartupRecovery）", () => {
 
     await waitFor(() => expect(files.has(draftFile)).toBe(false));
     expect(useWorkspace.getState().openTabs).toHaveLength(0);
+  });
+
+  it("#404 便携迁移结果必须可见：弹窗列出复制/跳过/失败，而非静默搬走", async () => {
+    files.set(SESSION, JSON.stringify({ version: 1, cleanExit: true }));
+    portable.migration = {
+      from: "C:/Users/x/AppData/Roaming/com.inklingmd.editor",
+      to: "D:/Portable/InklingMD/data",
+      copied: ["themes"],
+      failed: ["recovery: 复制失败 磁盘已满"],
+      skipped: ["themes/link.css: 符号链接，未迁移"],
+      warnings: [],
+    };
+    messageMock.mockReset().mockResolvedValue(undefined);
+
+    const { renderHook, waitFor } = await import("@testing-library/react");
+    const { useStartupRecovery } = await import("../../src/lib/useStartupRecovery");
+    renderHook(() => useStartupRecovery());
+
+    await waitFor(() => expect(messageMock).toHaveBeenCalled());
+    const call = messageMock.mock.calls.find(
+      (c) => (c[1] as { title?: string } | undefined)?.title === "便携模式数据迁移",
+    );
+    expect(call, "迁移必须弹出「便携模式数据迁移」提示").toBeTruthy();
+    const text = String(call?.[0]);
+    expect(text).toContain("D:/Portable/InklingMD/data");
+    expect(text).toContain("themes");
+    // 失败项用 error 语气呈现：用户要知道哪些数据没搬过来
+    expect((call?.[1] as { kind?: string }).kind).toBe("error");
+    expect(text).toContain("磁盘已满");
+  });
+
+  it("#404 会话标记必须先于迁移弹窗落盘（弹窗挂着时崩溃仍能提示恢复）", async () => {
+    // 迁移弹窗是模态的，会挂住后续 await：若 beginSession 在它后面，
+    // 用户不点弹窗就崩溃，本次会话没有 cleanExit:false，下次启动不会提示恢复
+    files.set(SESSION, JSON.stringify({ version: 1, cleanExit: true }));
+    portable.migration = {
+      from: "C:/Roaming/com.inklingmd.editor",
+      to: "D:/Portable/InklingMD/data",
+      copied: ["themes"],
+      failed: [],
+      skipped: [],
+      warnings: [],
+    };
+    let cleanExitFalseAtDialogTime: boolean | null = null;
+    messageMock.mockReset().mockImplementation(async () => {
+      const marker = files.get(SESSION);
+      cleanExitFalseAtDialogTime =
+        marker !== undefined && JSON.parse(marker).cleanExit === false;
+      return undefined;
+    });
+
+    const { renderHook, waitFor } = await import("@testing-library/react");
+    const { useStartupRecovery } = await import("../../src/lib/useStartupRecovery");
+    renderHook(() => useStartupRecovery());
+
+    await waitFor(() => expect(messageMock).toHaveBeenCalled());
+    expect(cleanExitFalseAtDialogTime).toBe(true);
   });
 });
 

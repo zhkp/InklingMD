@@ -1,4 +1,5 @@
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
+mod app_paths;
 mod commands;
 mod navigation_guard;
 
@@ -58,19 +59,15 @@ fn pick_open_file_target_label<'a, I: IntoIterator<Item = &'a str>>(labels: I) -
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // 纯绿色模式：当 exe 同目录存在 portable.txt 标记文件时，
-    // 将 WebView2 用户数据目录重定向到 exe 同目录下的 data 文件夹，
-    // 实现免安装、数据随身、不污染系统目录。
+    // 纯绿色模式：exe 同目录存在 portable.txt 时，「数据随身」由两部分组成——
+    //   ① WebView2 用户数据目录（localStorage 等）→ exe 同级 `data/`（本块，仅 Windows 有这一层）；
+    //   ② 应用数据根（themes / recovery）→ 同一个 `data/`，见 `app_paths::resolve_app_data_dir`。
+    // 只做 ① 是 #404：主题与恢复区仍写系统目录，拷走便携目录就丢。
     #[cfg(target_os = "windows")]
     {
-        if let Ok(exe) = std::env::current_exe() {
-            if let Some(parent) = exe.parent() {
-                if parent.join("portable.txt").exists() {
-                    let data_dir = parent.join("data");
-                    let _ = std::fs::create_dir_all(&data_dir);
-                    std::env::set_var("WEBVIEW2_USER_DATA_FOLDER", &data_dir);
-                }
-            }
+        if let Some(data_dir) = app_paths::portable_data_dir() {
+            let _ = std::fs::create_dir_all(&data_dir);
+            std::env::set_var("WEBVIEW2_USER_DATA_FOLDER", &data_dir);
         }
     }
 
@@ -115,10 +112,23 @@ pub fn run() {
             let args: Vec<String> = std::env::args().collect();
             let pending = md_file_from_args(&args);
             app.manage(PendingFile(Mutex::new(pending)));
-            // #362：半失败登记表落在 app_data_dir/recovery/，多窗口共用一份
-            if let Ok(app_dir) = app.path().app_data_dir() {
-                commands::init_temp_kept_registry(app_dir);
+            // #404：应用数据根由 app_paths 统一解析（便携 → exe 同级 data/，安装版 → app_data_dir）。
+            // 迁移必须先于登记表加载：登记表是「读进来 + 后写盘」的，加载后再覆盖文件
+            // 会把迁来的条目从内存视角抹掉。
+            let app_dir = app_paths::resolve_app_data_dir(app.handle());
+            let migration = match &app_dir {
+                Ok(dir) => app_paths::prepare_portable_session(app.handle(), dir),
+                Err(e) => {
+                    // release 是 GUI 子系统进程，控制台看不到 → 落一份临时目录日志
+                    app_paths::record_startup_error(e);
+                    None
+                }
+            };
+            if let Ok(dir) = app_dir {
+                // #362：半失败登记表落在 <应用数据根>/recovery/，多窗口共用一份
+                commands::init_temp_kept_registry(dir);
             }
+            app.manage(app_paths::PortableMigrationState(Mutex::new(migration)));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -148,7 +158,9 @@ pub fn run() {
             copy_path,
             extract_zip,
             resource_themes_dir,
-            take_pending_file
+            take_pending_file,
+            app_paths::app_data_root,
+            app_paths::take_portable_migration
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

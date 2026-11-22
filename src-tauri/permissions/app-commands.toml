@@ -6,6 +6,10 @@
 # 定义格式：identifier 用 allow-<command 名的 kebab-case 形式>（如 search_in_workspace
 # → allow-search-in-workspace），commands.allow 填 command 函数名原样（下划线保留，
 # 即 invoke_handler 注册的名字）。
+#
+# 例外：命令名本身以 `allow_` 开头时去掉该前缀再拼 —— allow_asset_dir → allow-asset-dir
+# （而不是 allow-allow-asset-dir）。tests/unit/capabilities.test.ts 的 permissionIdOf
+# 与本规则逐字对应，改一处必须同步改另一处。
 "$schema" = "schemas/schema.json"
 
 # 文件系统命令
@@ -126,3 +130,44 @@ commands.allow = ["extract_zip"]
 identifier = "allow-resource-themes-dir"
 description = "Allow resource_themes_dir command"
 commands.allow = ["resource_themes_dir"]
+
+# 应用数据根（#404）：便携模式的数据落点由 Rust 解析，前端不得自己猜 Roaming
+[[permission]]
+identifier = "allow-app-data-root"
+description = "Allow app_data_root command"
+commands.allow = ["app_data_root"]
+
+[[permission]]
+identifier = "allow-take-portable-migration"
+description = "Allow take_portable_migration command"
+commands.allow = ["take_portable_migration"]
+
+# #404 复核：以下命令注册进 invoke_handler 但漏了 ACL 权限，
+# 运行时一律被拦截（实测 `Command save_document not allowed by ACL`），
+# 与 #362/#365 声称的能力不符。ACL 白名单必须与 invoke_handler 同步。
+[[permission]]
+identifier = "allow-list-dir-files"
+description = "Allow list_dir_files command"
+commands.allow = ["list_dir_files"]
+
+[[permission]]
+identifier = "allow-file-stat"
+description = "Allow file_stat command"
+commands.allow = ["file_stat"]
+
+# 成对读取与写盘（#362）：保存链路的唯一入口
+[[permission]]
+identifier = "allow-read-document"
+description = "Allow read_document command"
+commands.allow = ["read_document"]
+
+[[permission]]
+identifier = "allow-save-document"
+description = "Allow save_document command"
+commands.allow = ["save_document"]
+
+# 恢复区写入（#362/#365）：草稿、会话标记、崩溃归档
+[[permission]]
+identifier = "allow-write-recovery-file"
+description = "Allow write_recovery_file command"
+commands.allow = ["write_recovery_file"]

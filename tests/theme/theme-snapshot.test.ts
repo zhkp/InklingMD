@@ -5,6 +5,7 @@ import {
   SNAPSHOT_PREFIX,
   SNAPSHOT_STATE_KEY,
   THEMES_INDEX_KEY,
+  THEMES_ROOT_KEY,
   THEME_KEY,
   byteLength,
   gcSnapshots,
@@ -12,12 +13,15 @@ import {
   parseSnapshotKey,
   readSnapshot,
   readSnapshotState,
+  readSnapshotThemesRoot,
   readStoredThemeId,
   readThemesIndex,
+  reconcileSnapshotsForThemesRoot,
   recordSnapshotState,
   removeSnapshotsFor,
   snapshotKey,
   writeSnapshot,
+  writeSnapshotThemesRoot,
   writeStoredThemeId,
   writeThemesIndex,
 } from "../../src/theme/snapshot";
@@ -173,5 +177,56 @@ describe("#225 G9：回收策略（P2-2）", () => {
     writeSnapshot(USER, HASH_A, "a");
     expect(gcSnapshots([USER])).toBe(0);
     expect(readSnapshot(USER, HASH_A)?.css).toBe("a");
+  });
+});
+
+describe("#404 快照 themesRoot 校验与清理", () => {
+  it("readSnapshot 传入 expectedThemesRoot 时，旧版无根快照或异根快照均弃用并清理", () => {
+    // 1. 旧版无 themesRoot 快照
+    writeSnapshot(USER, HASH_A, "legacy-css");
+    expect(readSnapshot(USER, HASH_A, "D:/Portable/data/themes")).toBeUndefined();
+    expect(localStorage.getItem(snapshotKey(USER, HASH_A))).toBeNull();
+
+    // 2. 携带路径 A 的快照：同路径（含斜杠与盘符大小写差异）命中，异路径 B 淘汰
+    writeSnapshot(USER, HASH_A, "a-css", "D:\\PortableA\\data\\themes\\");
+    expect(readSnapshot(USER, HASH_A, "d:/portablea/data/themes")?.css).toBe("a-css");
+    expect(readSnapshot(USER, HASH_A, "E:/USB/data/themes")).toBeUndefined();
+    expect(localStorage.getItem(snapshotKey(USER, HASH_A))).toBeNull();
+  });
+
+  it("reconcileSnapshotsForThemesRoot 区分同根保留、跨根清扫与旧版无根清扫", () => {
+    // 同根：保留
+    writeSnapshotThemesRoot("D:/PortableA/data/themes");
+    writeSnapshot(USER, HASH_A, "a-css", "D:/PortableA/data/themes");
+    const same = reconcileSnapshotsForThemesRoot("D:\\PortableA\\data\\themes");
+    expect(same.rootChanged).toBe(false);
+    expect(same.removed).toBe(0);
+    expect(readSnapshot(USER, HASH_A)?.css).toBe("a-css");
+
+    // 搬家到路径 B：清空全部旧快照并更新根记录
+    const moved = reconcileSnapshotsForThemesRoot("E:/USB/data/themes");
+    expect(moved.rootChanged).toBe(true);
+    expect(moved.removed).toBe(1);
+    expect(moved.removedThemeIds.has(USER)).toBe(true);
+    expect(readSnapshotThemesRoot()).toBe("E:/USB/data/themes");
+    expect(listSnapshotKeys()).toEqual([]);
+
+    // 遗留无根快照（即使 THEMES_ROOT_KEY 缺失）：同样被清理
+    localStorage.removeItem(THEMES_ROOT_KEY);
+    writeSnapshot(USER, HASH_B, "legacy-roaming-css");
+    const upgraded = reconcileSnapshotsForThemesRoot("E:/USB/data/themes");
+    expect(upgraded.rootChanged).toBe(false);
+    expect(upgraded.removed).toBe(1);
+    expect(upgraded.removedThemeIds.has(USER)).toBe(true);
+    expect(readSnapshotThemesRoot()).toBe("E:/USB/data/themes");
+    expect(listSnapshotKeys()).toEqual([]);
+  });
+
+  it("POSIX 路径比较保留大小写敏感语义", () => {
+    writeSnapshotThemesRoot("/home/User/themes");
+    writeSnapshot(USER, HASH_A, "posix-css", "/home/User/themes");
+    const res = reconcileSnapshotsForThemesRoot("/home/user/themes");
+    expect(res.rootChanged).toBe(true);
+    expect(res.removed).toBe(1);
   });
 });

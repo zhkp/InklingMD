@@ -9,7 +9,6 @@
  */
 import { create } from "zustand";
 import { convertFileSrc, invoke, isTauri } from "@tauri-apps/api/core";
-import { appDataDir } from "@tauri-apps/api/path";
 import { open, message } from "@tauri-apps/plugin-dialog";
 import { loadJSON, writeJSON } from "../lib/storage";
 import {
@@ -26,7 +25,7 @@ import {
   copyThemePath,
   bundledThemesRoot,
 } from "../lib/themeFiles";
-import { normalizePath, joinPath, dirNameOf } from "../lib/path";
+import { isSamePath, normalizePath, joinPath, dirNameOf } from "../lib/path";
 import { showMessage } from "../lib/dialogs";
 import {
   BUILTIN_DARK_ID,
@@ -41,7 +40,13 @@ import {
   themeDisplayName,
   type AppTheme,
 } from "../theme/registry";
-import { applyTheme, currentThemeId, currentThemeMode, firstFrame } from "../theme/session";
+import {
+  applyTheme,
+  currentInjectedThemesRoot,
+  currentThemeId,
+  currentThemeMode,
+  firstFrame,
+} from "../theme/session";
 import { buildThemeCatalog, indexChanged, type CatalogResult } from "../theme/catalog";
 import { loadThemeCss } from "../theme/disk";
 import { themeCssHash } from "../theme/typora/rewrite";
@@ -60,6 +65,7 @@ import {
   THEME_KEY,
   readSnapshot,
   readThemesIndex,
+  reconcileSnapshotsForThemesRoot,
   recordSnapshotState,
   removeSnapshotsFor,
   writeStoredThemeId,
@@ -129,6 +135,14 @@ export function currentThemeLabel(themeId: string): string {
 
 /** 最近一次「远端窗口要求切换但本窗口尚未就绪」的 themeId（P2-3 跨 key 原子性） */
 let pendingRemoteThemeId: string | null = null;
+/** 磁盘读盘请求代次：并发切主题/移除/远端同步时用于淘汰过期异步结果（#404 复审） */
+let diskLoadGeneration = 0;
+
+function isCurrentDiskLoadTarget(themeId: string, requestGen: number): boolean {
+  if (requestGen !== diskLoadGeneration) return false;
+  if (!getTheme(themeId)) return false;
+  return useTheme.getState().themeId === themeId || pendingRemoteThemeId === themeId;
+}
 
 export const useTheme = create<ThemeState>((set, get) => {
   // ── 跨窗口同步（C4：只登记，不各自 addEventListener） ────────────────────
@@ -137,7 +151,7 @@ export const useTheme = create<ThemeState>((set, get) => {
     (e) => {
       const next = e.newValue;
       if (!next || next === get().themeId) return;
-      applyRemoteTheme(next, set);
+      applyRemoteTheme(next, set, get().themesDir);
     },
     "theme:current",
   );
@@ -146,7 +160,7 @@ export const useTheme = create<ThemeState>((set, get) => {
     SNAPSHOT_PREFIX,
     () => {
       const pending = pendingRemoteThemeId;
-      if (pending) applyRemoteTheme(pending, set);
+      if (pending) applyRemoteTheme(pending, set, get().themesDir);
     },
     "theme:snapshot",
   );
@@ -182,7 +196,7 @@ export const useTheme = create<ThemeState>((set, get) => {
       set({ themes: listThemes() });
       // 清单就绪后，重试此前因「未知 themeId」而未切换的远端主题
       const pending = pendingRemoteThemeId;
-      if (pending) applyRemoteTheme(pending, set);
+      if (pending) applyRemoteTheme(pending, set, get().themesDir);
     },
     "theme:index",
   );
@@ -209,8 +223,11 @@ export const useTheme = create<ThemeState>((set, get) => {
         });
         return;
       }
+      // 本地明确切主题：淘汰在途旧读盘，并清掉待应用的远端挂起目标
+      diskLoadGeneration += 1;
+      pendingRemoteThemeId = null;
       // 快照缺失的磁盘主题 → 先切身份（属性 + 持久化），再由读盘路径补 CSS 并落快照
-      const needsDiskLoad = applyThemeWithSnapshot(theme);
+      const needsDiskLoad = applyThemeWithSnapshot(theme, get().themesDir);
       set({ themeId: theme.id, mode: theme.mode });
       if (needsDiskLoad) void loadThemeFromDisk(set, theme.id);
     },
@@ -292,12 +309,15 @@ export const useTheme = create<ThemeState>((set, get) => {
  * 切换主题：优先用「快照里的 CSS」（磁盘主题），否则用描述符自带的文本；
  * 内置基线（`css.kind === "none"`）→ 卸载主题样式。
  */
-function applyThemeWithSnapshot(theme: AppTheme): boolean {
+function applyThemeWithSnapshot(theme: AppTheme, expectedThemesRoot?: string | null): boolean {
   const hash = theme.hash;
   if (theme.css?.kind === "file" && hash) {
-    const snap = readSnapshot(theme.id, hash);
+    const snap = readSnapshot(theme.id, hash, expectedThemesRoot ?? undefined);
     if (snap) {
-      applyTheme(theme, { css: snap.css });
+      applyTheme(theme, {
+        css: snap.css,
+        themesRoot: snap.themesRoot ?? expectedThemesRoot ?? undefined,
+      });
       return false;
     }
     // 快照缺失：先把主题切过去（属性 + 持久化），CSS 由读盘路径补齐（调用方据返回值触发）
@@ -315,7 +335,11 @@ function applyThemeWithSnapshot(theme: AppTheme): boolean {
 }
 
 /** 处理来自其他窗口的主题切换（P2-3：未知 themeId 不切换，等清单/快照就绪） */
-function applyRemoteTheme(remoteValue: string, set: (patch: Partial<ThemeState>) => void): void {
+function applyRemoteTheme(
+  remoteValue: string,
+  set: (patch: Partial<ThemeState>) => void,
+  expectedThemesRoot?: string | null,
+): void {
   // C7：跨窗口同样容忍旧格式一版（老版本窗口写入 "light"/"dark" 时仍能同步）
   const themeId = resolveLegacyThemeId(remoteValue) ?? remoteValue;
   const theme = getTheme(themeId);
@@ -329,10 +353,16 @@ function applyRemoteTheme(remoteValue: string, set: (patch: Partial<ThemeState>)
     return;
   }
   if (theme.css?.kind === "file" && theme.hash) {
-    const snap = readSnapshot(theme.id, theme.hash);
+    const snap = readSnapshot(theme.id, theme.hash, expectedThemesRoot ?? undefined);
     if (snap) {
-      applyTheme(theme, { css: snap.css, persist: false });
+      diskLoadGeneration += 1;
+      applyTheme(theme, {
+        css: snap.css,
+        persist: false,
+        themesRoot: snap.themesRoot ?? expectedThemesRoot ?? undefined,
+      });
     } else {
+      diskLoadGeneration += 1;
       pendingRemoteThemeId = theme.id;
       recordSnapshotState({
         last: "missing",
@@ -345,6 +375,7 @@ function applyRemoteTheme(remoteValue: string, set: (patch: Partial<ThemeState>)
       return;
     }
   } else {
+    diskLoadGeneration += 1;
     applyTheme(theme, { persist: false });
   }
   pendingRemoteThemeId = null;
@@ -424,8 +455,28 @@ function applyCatalog(catalog: CatalogResult, root: string, set: SetState): void
   });
 }
 
-/** 扫描 + 幂等补齐 + 注册 + 落盘（#307 的主入口；启动与导入/移除后都走它） */
+let activeSyncPromise: Promise<void> | null = null;
+
+/** 扫描 + 幂等补齐 + 注册 + 落盘（#307 的主入口；启动与导入/移除后都走它，串行防并发竞态） */
 async function syncThemes(set: SetState, get: GetState): Promise<void> {
+  const prev = activeSyncPromise;
+  const current = (async () => {
+    if (prev) {
+      await prev.catch(() => {});
+    }
+    await runSyncThemes(set, get);
+  })();
+  activeSyncPromise = current;
+  try {
+    await current;
+  } finally {
+    if (activeSyncPromise === current) {
+      activeSyncPromise = null;
+    }
+  }
+}
+
+async function runSyncThemes(set: SetState, get: GetState): Promise<void> {
   set({ scanState: "scanning" });
   try {
     let { root, catalog } = await collectCatalog();
@@ -473,6 +524,7 @@ async function syncThemes(set: SetState, get: GetState): Promise<void> {
       allIssues.unshift(`预装主题不可用：源副本缺少或无法读取 ${missingSourcePaths.size} 项`);
     }
     applyCatalog({ ...catalog, issues: allIssues }, root, set);
+    const snapshotReconcile = reconcileSnapshotsForThemesRoot(root);
     const unavailable = allIssues.find((issue) => issue.startsWith("预装主题不可用："));
     if (unavailable && !preinstalledThemesWarningShown) {
       await notify("预装主题不可用", unavailable, "warning");
@@ -497,8 +549,19 @@ async function syncThemes(set: SetState, get: GetState): Promise<void> {
       return;
     }
 
-    // G3-③：首帧快照缺失/不适用（磁盘主题）→ 这里异步读盘补上
-    if (firstFrame?.needsAsyncLoad && getTheme(currentId)) {
+    // G3-③：首帧快照缺失/不适用（磁盘主题），或搬家/旧版升级快照被清理（含多窗口并发清理场景） → 异步读盘重算并刷新快照
+    const activeTheme = getTheme(currentId);
+    const activeSnapshotInvalidated =
+      snapshotReconcile.rootChanged || snapshotReconcile.removedThemeIds.has(currentId);
+    const injectedRoot = currentInjectedThemesRoot();
+    const injectedRootMismatch =
+      activeTheme?.css?.kind === "file" && (!injectedRoot || !isSamePath(injectedRoot, root));
+    if (
+      activeTheme &&
+      (firstFrame?.needsAsyncLoad ||
+        ((activeSnapshotInvalidated || injectedRootMismatch) &&
+          activeTheme.css?.kind === "file"))
+    ) {
       await loadThemeFromDisk(set, currentId);
     }
   } catch (error) {
@@ -512,29 +575,50 @@ async function syncThemes(set: SetState, get: GetState): Promise<void> {
 const BUILTIN_LIGHT_THEME: AppTheme = { id: DEFAULT_THEME_ID, name: "浅色", mode: "light", source: "builtin-base", css: { kind: "none" } };
 
 /** 读盘补主题：读文件 → 预读本地 `@import` → #306 改写 → 注入 + 落快照（#307 §6.1 第③层） */
-async function loadThemeFromDisk(set: SetState, themeId: string): Promise<void> {
+export async function loadThemeFromDisk(set: SetState, themeId: string): Promise<void> {
   const theme = getTheme(themeId);
   if (!theme || theme.css?.kind !== "file") return;
+  const requestGen = ++diskLoadGeneration;
   try {
-    // `assetRoot` = assetProtocol.scope 的根（应用数据目录）；浏览器/E2E 无 Tauri path API → 回落主题目录
+    // `assetRoot` = 主题资源根 `<应用数据根>/themes`，必须与 Rust 侧 `prepare_portable_session`
+    // 放行的 asset scope 逐字一致（#404）：传整个应用数据根会让主题 CSS 的
+    // `@import "../EBWebView/..."` / `"../recovery/..."` 读到 WebView2 profile 与恢复区草稿。
+    // 浏览器/E2E 没有 Tauri 命令 → 回落主题自身目录
     let assetRoot: string;
-    try {
-      assetRoot = normalizePath(await appDataDir());
-    } catch {
+    let snapshotThemesRoot: string | undefined;
+    if (isTauri()) {
+      try {
+        assetRoot = await themesRoot();
+        snapshotThemesRoot = assetRoot;
+      } catch {
+        assetRoot = dirNameOf(theme.css.path);
+      }
+    } else {
       assetRoot = dirNameOf(theme.css.path);
+      try {
+        snapshotThemesRoot = await themesRoot();
+      } catch {
+        snapshotThemesRoot = assetRoot;
+      }
     }
+    if (!isCurrentDiskLoadTarget(themeId, requestGen)) return;
     const { result } = await loadThemeCss({
       themeId,
       filePath: theme.css.path,
       assetRoot,
       io: { readFile: (abs) => readThemeFile(abs), toAssetUrl: toAssetUrlSafe },
     });
+    if (!isCurrentDiskLoadTarget(themeId, requestGen)) return;
     if (result.rejected) {
       throw new Error("主题 CSS 解析失败（整包拒绝，不注入半解析产物）");
     }
-    applyTheme(theme, { css: result.css });
+    if (pendingRemoteThemeId === theme.id) pendingRemoteThemeId = null;
+    applyTheme(theme, { css: result.css, themesRoot: snapshotThemesRoot });
     set({ themeId: theme.id, mode: theme.mode });
   } catch (error) {
+    // 在途请求已被切走/移除淘汰：静默退出，不得把用户新选中的主题覆写回默认
+    if (!isCurrentDiskLoadTarget(themeId, requestGen)) return;
+    if (pendingRemoteThemeId === themeId) pendingRemoteThemeId = null;
     // §10：读取失败 → 清持久化 + 回落默认 + 可见提示（不再静默）
     recordSnapshotState({
       last: "invalid",
@@ -731,6 +815,10 @@ async function removeTheme(set: SetState, get: GetState, themeId: string): Promi
   const root = await themesRoot();
   const stamp = backupStamp();
   try {
+    if (get().themeId === themeId || pendingRemoteThemeId === themeId) {
+      diskLoadGeneration += 1;
+    }
+    if (pendingRemoteThemeId === themeId) pendingRemoteThemeId = null;
     if (theme.css?.kind === "file") {
       const name = basenameOf(theme.css.path);
       await moveToBackup(root, name, stamp);

@@ -15,7 +15,7 @@
 // 悄悄覆盖他已经改过的文件。
 
 import { isTauri } from "@tauri-apps/api/core";
-import { appDataDir } from "@tauri-apps/api/path";
+import { appDataRoot } from "./appDataRoot";
 import {
   currentSessionId,
   currentWindowLabel,
@@ -88,7 +88,8 @@ export interface RecoveryIo {
 }
 
 const defaultIo: RecoveryIo = {
-  appDataDir,
+  // #404：恢复区根与应用数据根同源（便携 → exe 同级 data/），否则 write_recovery_file 判越界
+  appDataDir: appDataRoot,
   async readTextFile(path) {
     const { readTextFile } = await import("./fs");
     return readTextFile(path);
