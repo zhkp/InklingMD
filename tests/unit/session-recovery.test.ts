@@ -660,6 +660,34 @@ describe("#365 启动入口（useStartupRecovery）", () => {
     expect((call?.[1] as { kind?: string }).kind).toBe("error");
     expect(text).toContain("磁盘已满");
   });
+
+  it("#404 会话标记必须先于迁移弹窗落盘（弹窗挂着时崩溃仍能提示恢复）", async () => {
+    // 迁移弹窗是模态的，会挂住后续 await：若 beginSession 在它后面，
+    // 用户不点弹窗就崩溃，本次会话没有 cleanExit:false，下次启动不会提示恢复
+    files.set(SESSION, JSON.stringify({ version: 1, cleanExit: true }));
+    portable.migration = {
+      from: "C:/Roaming/com.inklingmd.editor",
+      to: "D:/Portable/InklingMD/data",
+      copied: ["themes"],
+      failed: [],
+      skipped: [],
+      warnings: [],
+    };
+    let cleanExitFalseAtDialogTime: boolean | null = null;
+    messageMock.mockReset().mockImplementation(async () => {
+      const marker = files.get(SESSION);
+      cleanExitFalseAtDialogTime =
+        marker !== undefined && JSON.parse(marker).cleanExit === false;
+      return undefined;
+    });
+
+    const { renderHook, waitFor } = await import("@testing-library/react");
+    const { useStartupRecovery } = await import("../../src/lib/useStartupRecovery");
+    renderHook(() => useStartupRecovery());
+
+    await waitFor(() => expect(messageMock).toHaveBeenCalled());
+    expect(cleanExitFalseAtDialogTime).toBe(true);
+  });
 });
 
 describe("#365 TTL 清理", () => {

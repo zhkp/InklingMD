@@ -2,8 +2,11 @@
 //
 // 只在桌面端跑；顺序固定为：
 //   ① `beginSession()` 先把本次会话标成 `cleanExit:false`（进程被杀下次才有提示）
-//   ② 读上次标记 + 草稿 → 明确询问用户「恢复 / 丢弃 / 稍后」
-//   ③ 收尾清理「已处理且超过 TTL」的草稿
+//   ② 便携迁移结果（#404）：一次性报告，取到即告知
+//   ③ 读上次标记 + 草稿 → 明确询问用户「恢复 / 丢弃 / 稍后」
+//   ④ 收尾清理「已处理且超过 TTL」的草稿
+// ①② 都在模态弹窗之前：弹窗挂着时崩溃，本次会话仍要有 `cleanExit:false` 标记，
+// 否则下次启动不会提示恢复。
 //
 // 为什么不自动恢复：一份过期草稿直接铺到编辑器里，用户很可能顺手保存，
 // 把他在这期间对文件做的修改覆盖掉。
@@ -51,6 +54,18 @@ export function useStartupRecovery(): void {
     const restored: string[] = [];
 
     void (async () => {
+      // 先取旧标记再写新标记：`beginSession()` 会把同一个文件覆盖成 cleanExit:false，
+      // 之后再读就永远读到 false（「上次正常退出不提示」会变成死代码）
+      // 它必须在任何模态弹窗之前完成：否则弹窗挂着时崩溃，本次会话就没有
+      // `cleanExit:false` 标记，下次启动不会提示恢复
+      let previous: Awaited<ReturnType<typeof beginSession>> = null;
+      try {
+        previous = await beginSession();
+      } catch (error) {
+        // 会话标记写不进去只影响「下次启动会不会提示」，不能连带跳过后面的步骤
+        console.warn("[startup-recovery] 写会话标记失败：", error);
+      }
+
       // #404：迁移本身在 Rust setup 里完成（先于窗口创建），这里只负责告知结果。
       // 报告是**一次性**的（Rust 侧 take 即清空），所以取到就立刻显示，
       // 不能先取后放：中途 `return` / 组件卸载 / StrictMode 双跑都会让它永久丢失。
@@ -62,9 +77,7 @@ export function useStartupRecovery(): void {
         return null;
       });
       if (migration) await reportPortableMigration(migration);
-      // 先取旧标记再写新标记：`beginSession()` 会把同一个文件覆盖成 cleanExit:false，
-      // 之后再读就永远读到 false（「上次正常退出不提示」会变成死代码）
-      const previous = await beginSession();
+
       const drafts = await findRecoverableDrafts(previous);
       if (cancelled) return;
 
