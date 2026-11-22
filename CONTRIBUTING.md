@@ -488,6 +488,11 @@ gh workflow run benchmark-prod.yml -f profile=quick -f update_baseline=true   # 
 「播种深度与节奏」下的「播种遇 `exit 2`」条目）。先修超时 / 失败，再补一次完整播种；不要把整轮 `exit 2` 当成
 「播种失败、什么都没写成」而直接重跑，否则未测量场景的点位会一直缺、σ 估不准。
 
+**绝对判定包含什么**：`absolute=true` 时，除 scroll 场景的帧间隔 p95 / 掉帧率外，
+**所有场景**都会多一行 `longTaskMaxMs(绝对)`（每轮单次最长 ≤ 50ms）——这是 Epic #387
+「主线程 Long Task ≤ 50ms」的可执行判据。注意它判的是「每轮最长那一次」，不是均值：
+`longTaskMs / longTaskCount` 的平均值完全可能掩盖偶发长任务。
+
 **判定口径**：常规跑（`update_baseline` 未勾）会下发 `PERF_REQUIRE_COMPARISON=1`，
 覆盖不足时 `report` 以 exit 2 收尾，Job Summary 会写明「本次未与任何基线比较，结论
 不构成性能验证」；播种那次豁免该门禁（若同时勾 `absolute=true`，仍按 `uncapped`

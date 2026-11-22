@@ -104,6 +104,14 @@ function absoluteEnabledFor(raw) {
   return raw.absoluteEligible === true;
 }
 const JANK_RATE_LIMIT_PCT = Number(process.env.PERF_JANK_RATE_LIMIT ?? 10);
+/**
+ * 单次长任务阈值（ms）：Epic #387 的统一验收「主线程 Long Task 不超过 50ms」。
+ *
+ * Long Task 的定义本身就是 >50ms，所以 `50` 同时也是「有长任务」这件事的边界；
+ * 留出 `PERF_LONG_TASK_LIMIT_MS` 覆盖口便于维护者调阈值，但默认值必须与
+ * Epic 一致，不允许为了变绿而上调。
+ */
+const LONG_TASK_LIMIT_MS = Number(process.env.PERF_LONG_TASK_LIMIT_MS ?? 50);
 const P95_BUDGET_FACTOR = 2;
 
 function parseArgs(argv) {
@@ -222,12 +230,37 @@ function baselineP95(baseline, metric) {
 }
 
 /**
- * 绝对阈值判定：不看 baseline，直接对照"帧预算"这一硬目标。
+ * 绝对阈值判定：不看 baseline，直接对照硬目标——
+ * 帧预算（scroll：帧间隔 p95 / 掉帧率）与单次长任务（全场景：longTaskMaxMs ≤ 50ms）。
  * 没有它，「用户本机 120fps 流畅滚动」这个场景永远只能验证"没比上次差"。
  */
 function absoluteRows(raw) {
   const rows = [];
   if (!absoluteEnabledFor(raw)) return rows;
+
+  // 「单次 Long Task ≤ 50ms」（Epic #387 的统一验收项）。
+  //
+  // 这条**对所有场景**生效，不只 scroll：输入类场景恰恰是最容易长任务的。
+  // 数据取自 `longTaskMaxMs`（每轮单次最长），不能用 `longTaskMs / longTaskCount`
+  // 的均值代替——均值 20ms 完全可以由「19 次 5ms + 1 次 300ms」构成。
+  // 判据取「每轮最长」而不是 p95：n 通常只有个位数，p95 没有统计意义。
+  const longTaskMax = raw.scalars?.longTaskMaxMs;
+  // 0 是合法且有意义的值（「本轮一个长任务都没有」= 达标），必须照常出行为 PASS；
+  // 只有老 raw 缺少该字段（undefined）时才跳过。
+  if (typeof longTaskMax === "number") {
+    rows.push({
+      metric: "longTaskMaxMs(绝对)",
+      base: `≤${LONG_TASK_LIMIT_MS}`,
+      cur: longTaskMax,
+      p95: null,
+      max: longTaskMax,
+      n: raw.scalars?.longTaskCount ?? null,
+      over: longTaskMax > LONG_TASK_LIMIT_MS,
+      limit: LONG_TASK_LIMIT_MS,
+      absolute: true,
+    });
+  }
+
   const budget = raw.scalars?.frameBudgetMs;
   if (raw.scenario !== "scroll" || typeof budget !== "number") return rows;
 
@@ -818,7 +851,11 @@ function main() {
         note:
           verdict === "fail"
             ? isAbsolute
-              ? "复测仍超帧预算 + 末轮仍超"
+              ? // 绝对行有两类硬目标：帧预算（scroll）与单次长任务（全场景），
+                // 文案不能再统一写「帧预算」——那对 longTaskMaxMs 是错的。
+                row.metric.startsWith("longTaskMaxMs")
+                ? `复测仍超单次长任务阈值 ${row.limit}ms + 末轮仍超`
+                : "复测仍超帧预算 + 末轮仍超"
               : "复测仍超阈值 + 末轮仍超"
             : "末轮回落（抖动）",
       });
@@ -1254,7 +1291,7 @@ function main() {
   const absoluteCount = results.filter((r) => r.absoluteEnabled).length;
   if (absoluteCount > 0) {
     lines.push(
-      `- 绝对阈值参与判定：${absoluteCount}/${results.length} 个场景（帧间隔 p95 ≤ ${P95_BUDGET_FACTOR}× 帧预算、掉帧率 ≤ ${JANK_RATE_LIMIT_PCT}%）`,
+      `- 绝对阈值参与判定：${absoluteCount}/${results.length} 个场景（单次长任务 ≤ ${LONG_TASK_LIMIT_MS}ms；scroll 另加帧间隔 p95 ≤ ${P95_BUDGET_FACTOR}× 帧预算、掉帧率 ≤ ${JANK_RATE_LIMIT_PCT}%）`,
     );
   }
   // 名单**从 PRIMARY_METRICS 派生**，不硬编码：之前写死的名单里有一个不存在的 inputMs
@@ -1544,7 +1581,7 @@ function main() {
     }
     if (absoluteFailed.length > 0) {
       console.error(
-        `[perf] 绝对目标未达标（非回归，反映当前环境能否跑满帧预算）：${absoluteFailed
+        `[perf] 绝对目标未达标（非回归，反映当前环境能否跑满帧预算 / 单次长任务是否超 ${LONG_TASK_LIMIT_MS}ms）：${absoluteFailed
           .map((f) => f.id)
           .join(", ")}`,
       );
