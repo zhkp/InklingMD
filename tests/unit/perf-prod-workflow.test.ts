@@ -15,13 +15,33 @@ const WORKFLOW = readFileSync(
   "utf8",
 ).replace(/\r\n/g, "\n");
 
+/**
+ * 剔除尾部属于**下一个 job** 的注释行（#421 评审 R4-1）。
+ *
+ * 下一个 job 前面常带 2 空格的任务级注释（如「独立复测 job（#234）…」），
+ * 若把它们留在上一个块里，「块内出现某字符串」就不等于「该 job 自己写了它」。
+ */
+function stripTrailingNextJobComments(block: string): string {
+  const lines = block.split("\n");
+  while (lines.length > 0) {
+    const last = lines[lines.length - 1];
+    if (last.trim() === "" || /^ {2}#/.test(last)) {
+      lines.pop();
+      continue;
+    }
+    break;
+  }
+  return lines.join("\n");
+}
+
 /** 取某个 job 块（从 `  <name>:` 到下一个 job 或文件尾），避免跨 job 误判 */
 function jobBlock(name: string): string {
   const start = WORKFLOW.indexOf(`\n  ${name}:\n`);
   expect(start, `找不到 job：${name}`).toBeGreaterThan(-1);
   const rest = WORKFLOW.slice(start + 1);
   const next = rest.slice(1).search(/\n {2}[a-zA-Z0-9_-]+:\n/);
-  return next === -1 ? rest : rest.slice(0, next + 1);
+  const block = next === -1 ? rest : rest.slice(0, next + 1);
+  return stripTrailingNextJobComments(block);
 }
 
 /**
@@ -144,18 +164,35 @@ describe("benchmark-prod 工作流契约", () => {
     }
   });
 
-  it("每个 job 都有 always 的 Job Summary，且播种/常规文案分流（#421 评审 1/2）", () => {
+  it("每个 job 都有 always 的 Job Summary，且播种/常规文案分流（#421 评审 R4-1）", () => {
     for (const name of ["benchmark", "retest", "retest2"]) {
       const block = jobBlock(name);
-      expect(block, `${name} 缺少 Job Summary 步骤`).toContain("name: 写入 Job Summary");
-      expect(block).toContain('if: ${{ !cancelled() }}');
-      expect(block).toContain("GITHUB_STEP_SUMMARY");
+      // 带缩进锚点 + 步骤边界：任一位置出现该字符串不再算数（注释/别的 job 都不行）
+      expect(block, `${name} 缺少 Job Summary 步骤`).toMatch(
+        /^ {6}- name: 写入 Job Summary$/m,
+      );
+      expect(block, `${name} 的 Summary 不是 always 运行`).toMatch(
+        /^ {8}if: \$\{\{ !cancelled\(\) \}\}$/m,
+      );
+      expect(block, `${name} 的 Summary 没写 GITHUB_STEP_SUMMARY`).toMatch(
+        /^ {12}\} >> "\$GITHUB_STEP_SUMMARY"$/m,
+      );
     }
     const bench = jobBlock("benchmark");
     // 播种时不能提示「请先播种」——那是反事实
     expect(bench).toContain('if [ "${{ inputs.update_baseline }}" = "true" ]');
     expect(bench).toContain("本次是播种");
     expect(bench).toContain("本次未与任何基线比较");
+  });
+
+  it("jobBlock 不把下一个 job 的注释算进当前 job（#421 评审 R4-1）", () => {
+    // 下一个 job 前的 2 空格注释若被吞进上一块，「块内出现」就不等于「自己写了」
+    for (const name of ["benchmark", "retest"]) {
+      const block = jobBlock(name);
+      expect(block, `${name} 块吞进了下一个 job 的注释`).not.toMatch(
+        /^ {2}# .*job/m,
+      );
+    }
   });
 
   it("artifact 必须带上隐藏目录，且传不上去要报错", () => {
@@ -185,5 +222,18 @@ describe("benchmark-prod 工作流契约", () => {
     expect(doc).toContain("### prod 构建口径");
     expect(doc).toContain("prod-ci-<os>");
     expect(doc).toContain("perf-prod-<profile>");
+  });
+
+  it("文档覆盖三个会导致误判的前提（#421 评审 R4-2）", () => {
+    const doc = readFileSync("CONTRIBUTING.md", "utf8");
+    // 1) 首次前提：dispatch 只认默认分支上已存在的工作流，分支试跑要 --ref
+    expect(doc).toContain("workflow not found on the default branch");
+    expect(doc).toContain("--ref");
+    // 2) 基线身份是 profile × mode 的笛卡尔积（含 full/uncapped 这一格）
+    expect(doc).toContain("prod-ci-<os>/full/uncapped/r3/");
+    expect(doc).toContain("笛卡尔积");
+    // 3) 播种 exit 2 时已测场景的基线照常写入（与 dev 同一纪律）
+    expect(doc).toContain("逐场景写入");
+    expect(doc).toContain("已测场景的基线照常");
   });
 });

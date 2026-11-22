@@ -456,23 +456,38 @@ gh workflow run benchmark-prod.yml -f profile=quick -f update_baseline=true   # 
 
 也可在 Actions → **Benchmark (prod build)** → Run workflow 里点选。
 
+> ⚠️ **前提**：`workflow_dispatch` 只能触发**默认分支上已存在**的工作流。该文件尚未合入
+> `main` 时，上面的命令会返回 `HTTP 404: workflow not found on the default branch`。
+> 要在分支上试跑，必须显式指定含该文件的 ref：
+> `gh workflow run benchmark-prod.yml --ref <branch>`（且该 ref 里已有这个文件）。
+
 **基线落点**：`.perf-baseline/prod-ci-<os>/<profile>/<mode>/r<rounds>/`
 （如 `prod-ci-ubuntu/quick/headless/r2/`）。本机跑 `PERF_BUILD=prod` 时落在
 `prod-local/…`，该目录已 gitignore，**不要提交**。
 
-**首次/组合变化要先各自播种**：基线身份 = 测量配置，以下组合没有基线就会是「覆盖 0/N」，
-那是正常的，不是回归也不是 infra 故障：
+**首次/组合变化要先各自播种**：基线身份 = 测量配置，是 `profile × mode` 的**笛卡尔积**
+——`profile=full` + `absolute=true` 会落到 `prod-ci-ubuntu/full/uncapped/r3/`，它是与
+`quick/headless`、`full/headless`、`quick/uncapped` **互不共用**的第四套基线。没有基线
+就是「覆盖 0/N」，那是正常的，不是回归也不是 infra 故障：
 
-| 组合 | 何时需要播一次 |
-|---|---|
-| `profile=quick` + `mode=headless` | 首次启用 prod 通道 |
-| `profile=full` | 首次用 full 档跑 prod |
-| `absolute=true`（`mode=uncapped`） | 首次启用绝对判定 |
-| fixture 变更（指纹不匹配） | 换了压测文档后 |
+| `profile` × `mode` | 基线目录 | 何时需要播一次 |
+|---|---|---|
+| `quick` × `headless` | `prod-ci-<os>/quick/headless/r2/` | 首次启用 prod 通道（PR 对照的默认组合） |
+| `full` × `headless` | `prod-ci-<os>/full/headless/r3/` | 首次用 full 档跑 prod（含 2 万行） |
+| `quick` × `uncapped` | `prod-ci-<os>/quick/uncapped/r2/` | 首次启用绝对判定（`absolute=true`） |
+| `full` × `uncapped` | `prod-ci-<os>/full/uncapped/r3/` | 首次用 full + `absolute=true` |
+| 任意组合 + fixture 变更 | 同一路径重建历史 | 换了压测文档（指纹不匹配，日志 `FIXTURE_CHANGED`） |
+
+维度要**先定组合再播种**：只播 `quick/headless` 就去跑 `full`，看到的是 0/N，不是回归。
 
 **播种步骤**：勾 `update_baseline` 跑完 → 从 **Job Summary** 看该取哪个 artifacts
 （无嫌疑取 `perf-prod-<profile>`；起了复测取 `-retest`；起了确认轮取 `-retest2`；
 取错＝本次播种静默丢失）→ 把其中的 `.perf-baseline/prod-*/` 提交回仓库。
+
+⚠️ **播种遇 `exit 2`（部分场景未测量）**：`report` 是**逐场景写入**，已测场景的基线照常
+更新，缺的只是未测量场景的本轮点位——与 dev 通道的纪律完全一致（见上文「基线的身份 =
+测量配置」小节的同一条）。先修超时 / 失败，再补一次完整播种；不要把整轮 `exit 2` 当成
+「播种失败、什么都没写成」而直接重跑，否则未测量场景的点位会一直缺、σ 估不准。
 
 **判定口径**：常规跑（`update_baseline` 未勾）会下发 `PERF_REQUIRE_COMPARISON=1`，
 覆盖不足时 `report` 以 exit 2 收尾，Job Summary 会写明「本次未与任何基线比较，结论
