@@ -343,11 +343,29 @@ pub fn migrate_legacy_data(legacy: &Path, target: &Path) -> PortableMigration {
     report
 }
 
-/// 目录里是否有任何条目（不递归：空目录 / 只有空子目录都算「没内容」）
+/// 目录里是否有**文件级**条目（递归：只有空子目录也算「没内容」）。
+///
+/// 只判一层 `read_dir().next()` 会把「只有空 `.staging/`」的旧主题目录当成有数据，
+/// 结果什么都没复制却结算成 `copied`，弹窗说「已复制」，此后该子目录永远不再迁移。
+/// 符号链接算条目（不跟随，交给复制阶段登记为 skipped）；读不到目录按「没内容」处理，
+/// 不结算，下次再试。
 fn dir_has_entries(path: &Path) -> bool {
-    std::fs::read_dir(path)
-        .map(|mut entries| entries.next().is_some())
-        .unwrap_or(false)
+    let Ok(entries) = std::fs::read_dir(path) else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        let Ok(file_type) = entry.file_type() else {
+            // 类型读不到：当成有内容，让复制阶段给出可见的失败原因
+            return true;
+        };
+        if file_type.is_symlink() || !file_type.is_dir() {
+            return true;
+        }
+        if dir_has_entries(&entry.path()) {
+            return true;
+        }
+    }
+    false
 }
 
 fn write_migration_marker(target: &Path, marker: &MigrationMarker) -> Result<(), String> {
@@ -610,6 +628,31 @@ mod tests {
         assert_eq!(report.copied, vec!["themes".to_string(), "recovery".to_string()]);
         assert!(report.failed.is_empty(), "{:?}", report.failed);
         assert!(portable.join("themes/aurora/aurora.css").is_file());
+    }
+
+    #[test]
+    fn legacy_dir_with_only_empty_subdirs_does_not_settle_migration() {
+        // 旧位置的 themes 里只有空目录（导入主题留下的空 .staging 之类）：一个文件都没有，
+        // 不能结算成 copied —— 否则弹窗会说「已复制」，而且此后该子目录永远不再迁移
+        let root = TempDir::new("only-empty-dirs");
+        let legacy = root.path().join("roaming");
+        let portable = root.path().join("data");
+        fs::create_dir_all(legacy.join("themes/.staging")).expect("建空子目录");
+
+        let nothing = migrate_legacy_data(&legacy, &portable);
+
+        assert!(nothing.copied.is_empty(), "只有空子目录时不该算复制: {nothing:?}");
+        assert!(!nothing.has_report(), "没有可搬内容时不该有报告: {nothing:?}");
+        assert!(
+            !portable.join(MIGRATION_MARKER).exists(),
+            "只有空子目录不得结算（否则之后放进来就永远不迁）"
+        );
+
+        // 之后真放了一个文件 → 必须迁入
+        fs::write(legacy.join("themes/real.css"), "real").expect("写主题");
+        let later = migrate_legacy_data(&legacy, &portable);
+        assert_eq!(later.copied, vec!["themes".to_string()]);
+        assert!(portable.join("themes/real.css").is_file());
     }
 
     #[test]

@@ -10,7 +10,6 @@
 import { create } from "zustand";
 import { convertFileSrc, invoke, isTauri } from "@tauri-apps/api/core";
 import { open, message } from "@tauri-apps/plugin-dialog";
-import { appDataRoot } from "../lib/appDataRoot";
 import { loadJSON, writeJSON } from "../lib/storage";
 import {
   deleteThemeEntry,
@@ -512,16 +511,22 @@ async function syncThemes(set: SetState, get: GetState): Promise<void> {
 const BUILTIN_LIGHT_THEME: AppTheme = { id: DEFAULT_THEME_ID, name: "浅色", mode: "light", source: "builtin-base", css: { kind: "none" } };
 
 /** 读盘补主题：读文件 → 预读本地 `@import` → #306 改写 → 注入 + 落快照（#307 §6.1 第③层） */
-async function loadThemeFromDisk(set: SetState, themeId: string): Promise<void> {
+export async function loadThemeFromDisk(set: SetState, themeId: string): Promise<void> {
   const theme = getTheme(themeId);
   if (!theme || theme.css?.kind !== "file") return;
   try {
-    // `assetRoot` = assetProtocol.scope 的根（应用数据根；便携模式为 exe 同级 data/，#404）；
-    // 浏览器/E2E 无 Tauri 命令 → 回落主题目录
+    // `assetRoot` = 主题资源根 `<应用数据根>/themes`，必须与 Rust 侧 `prepare_portable_session`
+    // 放行的 asset scope 逐字一致（#404）：传整个应用数据根会让主题 CSS 的
+    // `@import "../EBWebView/..."` / `"../recovery/..."` 读到 WebView2 profile 与恢复区草稿。
+    // 浏览器/E2E 没有 Tauri 命令 → 回落主题自身目录
     let assetRoot: string;
-    try {
-      assetRoot = normalizePath(await appDataRoot());
-    } catch {
+    if (isTauri()) {
+      try {
+        assetRoot = await themesRoot();
+      } catch {
+        assetRoot = dirNameOf(theme.css.path);
+      }
+    } else {
       assetRoot = dirNameOf(theme.css.path);
     }
     const { result } = await loadThemeCss({
