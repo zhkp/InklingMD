@@ -219,8 +219,10 @@ export function fixtureFor(
  */
 export function detectEnv(): string {
   const ci = process.env.CI === "true" || process.env.GITHUB_ACTIONS === "true";
-  if (!ci) return "local";
-  return process.platform === "win32" ? "ci-windows" : "ci-ubuntu";
+  const base = !ci ? "local" : process.platform === "win32" ? "ci-windows" : "ci-ubuntu";
+  // 构建口径也是环境（#420）：dev server 带 React 开发期插桩（`jsxDEV` /
+  // `addValueToProperties`），长任务的绝对值与生产构建不可比，基线必须分开。
+  return process.env.PERF_BUILD === "prod" ? `prod-${base}` : base;
 }
 
 export interface RawFile {
@@ -241,6 +243,24 @@ export interface RawFile {
   samples: Record<string, number[]>;
   /** 标量指标（计数、占比等），直接比较 */
   scalars: Record<string, number | null>;
+  /**
+   * 归因标量的覆盖状态（#379 评审 R4）：每个标量记录了「多少轮真的采到」。
+   * 缺失时 report 按「无覆盖信息」处理；有 PARTIAL 时归因表会显式标注，
+   * 不把部分缺采写成普通完整标量。
+   */
+  attributionCoverage?: {
+    rounds: number;
+    completeRounds: number;
+    partial: boolean;
+    metrics: Record<string, { observed: number; expected: number }>;
+  };
+  /** 公式测量覆盖状态（#379 评审 R4）：预期节点数与完整样本轮数 */
+  formulaCoverage?: {
+    expectedNodes: number;
+    measuredRounds: number;
+    expectedRounds: number;
+    unmeasured: boolean;
+  };
 }
 
 /**

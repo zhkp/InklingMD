@@ -439,6 +439,66 @@ CI 上 Benchmark **不阻断合并**，只上传 `.perf-output/` 产物并写入
   真正会命中并触发重建的通常是 fixture。报告里会显式列出
   `未参与相对判定：FIXTURE_CHANGED(...)` 之类的原因。
 
+### prod 构建口径（`benchmark-prod.yml`，#420）
+
+dev server 带 React 开发期插桩（`jsxDEV` / `addValueToProperties`），长任务的绝对值会
+把开发期开销算进去。需要「在生产代码上判定」时走这条通道：它跑 `vite build` 产物 +
+`vite preview`，基线独立存放在 `prod-*` 命名空间，与 dev 通道互不覆盖。
+
+**跑法**（只有手动触发；不随 PR 运行）：
+
+```bash
+gh workflow run benchmark-prod.yml -f profile=quick      # 常规对照
+gh workflow run benchmark-prod.yml -f profile=full       # 含 2 万行档
+gh workflow run benchmark-prod.yml -f profile=quick -f absolute=true   # 绝对判定（按 uncapped 跑）
+gh workflow run benchmark-prod.yml -f profile=quick -f update_baseline=true   # 播种
+```
+
+也可在 Actions → **Benchmark (prod build)** → Run workflow 里点选。
+
+> ⚠️ **前提（分两阶段）**：
+> 1. **工作流尚未合入 `main` 时**：无法通过 `workflow_dispatch` 触发——**即使显式传 `--ref <branch>` 同样返回 `HTTP 404: workflow not found on the default branch`**（GitHub 的 dispatch API 要求工作流文件先存在于默认分支），必须先将该工作流合入 `main`；
+> 2. **合入 `main` 之后**：若需在特性分支上试跑分支代码或工作流修改，再使用 `gh workflow run benchmark-prod.yml --ref <branch>`（且该 ref 里包含该工作流文件）。
+
+**基线落点**：`.perf-baseline/prod-ci-<os>/<profile>/<mode>/r<rounds>/`
+（如 `prod-ci-ubuntu/quick/headless/r2/`）。本机跑 `PERF_BUILD=prod` 时落在
+`prod-local/…`，该目录已 gitignore，**不要提交**。
+
+**首次/组合变化要先各自播种**：基线身份 = 测量配置，是 `profile × mode` 的**笛卡尔积**
+——`profile=full` + `absolute=true` 会落到 `prod-ci-ubuntu/full/uncapped/r3/`，它是与
+`quick/headless`、`full/headless`、`quick/uncapped` **互不共用**的第四套基线。没有基线
+就是「覆盖 0/N」，那是正常的，不是回归也不是 infra 故障：
+
+| `profile` × `mode` | 基线目录 | 何时需要播一次 |
+|---|---|---|
+| `quick` × `headless` | `prod-ci-<os>/quick/headless/r2/` | 首次启用 prod 通道（PR 对照的默认组合） |
+| `full` × `headless` | `prod-ci-<os>/full/headless/r3/` | 首次用 full 档跑 prod（含 2 万行） |
+| `quick` × `uncapped` | `prod-ci-<os>/quick/uncapped/r2/` | 首次启用绝对判定（`absolute=true`） |
+| `full` × `uncapped` | `prod-ci-<os>/full/uncapped/r3/` | 首次用 full + `absolute=true` |
+| 任意组合 + fixture 变更 | 同一路径重建历史 | 换了压测文档（指纹不匹配，日志 `FIXTURE_CHANGED`） |
+
+维度要**先定组合再播种**：只播 `quick/headless` 就去跑 `full`，看到的是 0/N，不是回归。
+
+**播种步骤**：勾 `update_baseline` 跑完 → 从 **Job Summary** 看该取哪个 artifacts
+（无嫌疑取 `perf-prod-<profile>`；起了复测取 `-retest`；起了确认轮取 `-retest2`；
+取错＝本次播种静默丢失）→ 把其中的 `.perf-baseline/prod-*/` 提交回仓库。
+
+⚠️ **播种遇 `exit 2`（部分场景未测量）**：`report` 是**逐场景写入**，已测场景的基线照常
+更新，缺的只是未测量场景的本轮点位——与 dev 通道的纪律完全一致（见上文「基线维护」→
+「播种深度与节奏」下的「播种遇 `exit 2`」条目）。先修超时 / 失败，再补一次完整播种；不要把整轮 `exit 2` 当成
+「播种失败、什么都没写成」而直接重跑，否则未测量场景的点位会一直缺、σ 估不准。
+
+**判定口径**：常规跑（`update_baseline` 未勾）会下发 `PERF_REQUIRE_COMPARISON=1`，
+覆盖不足时 `report` 以 exit 2 收尾，Job Summary 会写明「本次未与任何基线比较，结论
+不构成性能验证」；播种那次豁免该门禁（若同时勾 `absolute=true`，仍按 `uncapped`
+测量并写入 `uncapped/` 目录，但下发 `PERF_ABSOLUTE=0` 跳过播种期绝对失败判定，
+避免无 GPU CI 触发三段并 `exit 1` 判红）。三段 job（`benchmark` → `retest` → `retest2`）
+与 dev 通道同构，FAIL 必须由第三个独立 runner 确认。
+
+**调试钩子**：`force_suspects` / `force_suspects2` 可以把指定场景强制当成「疑似回归 /
+确认轮候选」，用来确定性演练三段路径与 artifact 传递——prod 通道不随 PR 运行，
+这是它在首次真回归之前唯一的验证手段。
+
 ### 发版验证（tag 运行）
 
 > 发版的五阶段流程与「发版检查清单」见 [`docs/发布流程.md`](./docs/发布流程.md)；本节只覆盖 tag 运行的性能验证口径。

@@ -98,3 +98,24 @@ export async function focusEditorEnd(page: Page): Promise<void> {
   await page.locator(".ProseMirror").click();
   await moveCaretToDocEnd(page);
 }
+
+/** 切换页面顶部「源代码模式」按钮，等 CodeMirror 就位（issue #379） */
+export async function enterSourceMode(
+  page: Page,
+  timeout = 60_000,
+): Promise<void> {
+  await page.locator('.topbar-btn[title*="源代码模式"]').click();
+  const editor = page.getByTestId("source-mode-editor");
+  await expect(editor).toBeVisible({ timeout });
+  await expect(editor.locator(".cm-content")).toBeVisible({ timeout });
+  await expect(page.locator(".ProseMirror")).toBeHidden({ timeout });
+}
+
+/** 聚焦源码编辑器并把光标移到文档末尾 */
+export async function focusSourceModeEnd(page: Page): Promise<void> {
+  await page
+    .getByTestId("source-mode-editor")
+    .locator(".cm-content")
+    .click();
+  await moveCaretToDocEnd(page);
+}

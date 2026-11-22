@@ -7,7 +7,10 @@ import { openSearchPanel, replaceNext } from "@codemirror/search";
 import { createSourceModeExtensions } from "../../lib/codemirror-shared";
 import {
   extractMarkdownOutline,
+  findActiveMarkdownHeadingIndexByLine,
   findSourceModeHeadingOffset,
+  isSameMarkdownOutline,
+  type EditorOutlineHeading,
   type EditorOutlineSnapshot,
 } from "../../lib/outline";
 import {
@@ -20,7 +23,19 @@ import {
 } from "../../lib/source-mode-search";
 import { mapScrollTop } from "../../lib/source-mode-cursor";
 import { readDetachSafeScrollMetrics } from "../../lib/detachSafeScroll";
+import {
+  perfProbeCount,
+  perfProbeEnd,
+  perfProbeStart,
+} from "../../lib/perf-probe";
+import {
+  createRestartableDebounce,
+  SOURCE_OUTLINE_DEBOUNCE_MS,
+} from "../../lib/restartable-debounce";
 import { useSettings } from "../../store/settings";
+
+/** 视口顶部采样偏移（与 WYSIWYG outline-tracker 的 VIEWPORT_HEADING_OFFSET 一致） */
+const VIEWPORT_HEADING_OFFSET = 12;
 
 export interface SourceModeSnapshot {
   cursor: number;
@@ -82,35 +97,53 @@ export function SourceModeEditor({
   // 用 useLayoutEffect 确保卸载 cleanup 在父组件 layout effect 读取快照之前执行
   useLayoutEffect(() => {
     if (!hostRef.current) return;
+    let disposed = false;
+    let documentVersion = 0;
+    const headingDocumentVersions = new WeakMap<EditorOutlineHeading, number>();
+    const stampHeadingVersion = (headings: EditorOutlineHeading[]) => {
+      for (const heading of headings) {
+        headingDocumentVersions.set(heading, documentVersion);
+      }
+    };
     const safeCursor = Math.max(0, Math.min(initialCursor, value.length));
     const themeComp = themeCompRef.current;
 
-    // 辅助函数：根据当前滚动条位置估算当前活动标题
-    const computeActiveHeadingIndex = (
+    // 视口顶部 → 当前标题：一次几何读取（lineBlockAtHeight）+ 对标题行号二分。
+    // 旧实现对每个标题调用 lineBlockAt，1500 个标题时单次 4ms+，且随标题数线性增长。
+    const locateActiveHeading = (
       view: EditorView,
-      headings: ReturnType<typeof extractMarkdownOutline>,
+      headings: EditorOutlineHeading[],
     ): number => {
-      if (headings.length === 0) return -1;
-      const scroller = view.scrollDOM;
-      const targetTop = scroller.scrollTop + 12;
-
-      let bestIndex = 0;
-      for (let i = 0; i < headings.length; i++) {
-        const lineInfo = view.lineBlockAt(
-          Math.min(headings[i].pos, view.state.doc.length),
-        );
-        if (lineInfo.top <= targetTop) {
-          bestIndex = i;
-        } else {
-          break;
-        }
+      const probeStart = perfProbeStart();
+      if (headings.length === 0) {
+        perfProbeEnd("headingLocate", probeStart);
+        return -1;
       }
-      return bestIndex;
+      const scroller = view.scrollDOM;
+      const height = Math.min(
+        view.contentHeight,
+        Math.max(0, scroller.scrollTop + VIEWPORT_HEADING_OFFSET),
+      );
+      const line = view.state.doc.lineAt(
+        view.lineBlockAtHeight(height).from,
+      ).number;
+      const located = findActiveMarkdownHeadingIndexByLine(headings, line);
+      perfProbeEnd("headingLocate", probeStart);
+      // 视口在首个标题之上时归到首标题（与旧行为/ WYSIWYG tracker 一致，
+      // 避免顶部小幅滚动时高亮消失再出现）
+      return located ?? headings[0].index;
     };
 
     let scrollRaf: number | null = null;
     let activeHeadings = extractMarkdownOutline(value);
+    stampHeadingVersion(activeHeadings);
+    let publishedHeadings = activeHeadings;
     let currentActiveIndex = -1;
+    /** 最近一次内容变化的时间点（探针未启用时为 null） */
+    let outlineSettleStart: number | null = null;
+    // 防抖窗口内旧标题的行号已失效：滚动采样与发布一律跳过，
+    // 重算完成后按当前视口一次性定位（沿用 WYSIWYG tracker 的 stale 语义）
+    let outlineStale = false;
     // 持续缓存的几何与光标可见性（#136）：layout-effect cleanup 在 DOM 移除
     // 之后才运行，脱链容器的 clientHeight/scrollHeight 读 0；过渡期还可能在
     // 容器塌缩的中间帧读到偏小值。策略：容器高度取「可信读数的峰值」
@@ -122,7 +155,10 @@ export function SourceModeEditor({
     // 现场读为 0；与高度不同它非单调，不能用峰值，只能缓存「最后可信读数」。
     // 用户若真的滚回顶部，缓存同样是 0，回退不产生错误恢复。
     let cachedScrollTop = 0;
-    let cursorVisibleCache = true;
+    // 未拿到任何可信几何之前不能假定「光标可见」：否则 cleanup 在容器脱链后
+    // 重算时会用现场 scrollTop=0 把陈旧光标当成可见，重新打开 caretPos 门控
+    // （#375 评审 R5-5）。
+    let cursorVisibleCache = false;
     const refreshCursorVisible = (v: EditorView) => {
       const el = v.scrollDOM;
       // 只有现场布局可信（>1）才参与峰值缓存：挂载首帧布局未完成、或过渡期
@@ -136,19 +172,64 @@ export function SourceModeEditor({
       if (cachedClientHeight <= 1) return;
       const head = v.state.selection.main.head;
       const block = v.lineBlockAt(Math.min(head, v.state.doc.length));
-      const st = el.scrollTop;
+      // 与 cleanup 写快照时同一套读数口径（#174）：脱链/塌缩时 el.scrollTop
+      // 会读成 0，必须回退最后一次可信缓存，否则「视口已滚离光标」会被
+      // 误判成「光标仍在视口内」。
+      const st = readDetachSafeScrollMetrics(el, {
+        scrollTop: cachedScrollTop,
+        scrollHeight: cachedScrollHeight,
+      }).scrollTop;
       cursorVisibleCache =
         block.bottom >= st - 1 && block.top <= st + cachedClientHeight + 1;
     };
 
-    const notifyOutline = (view: EditorView) => {
-      const activeIdx = computeActiveHeadingIndex(view, activeHeadings);
-      currentActiveIndex = activeIdx;
-      onOutlineChangeRef.current?.({
-        headings: activeHeadings,
-        activeIndex: activeIdx,
-      });
+    const publishOutline = (
+      headings: EditorOutlineHeading[],
+      activeIndex: number,
+    ) => {
+      currentActiveIndex = activeIndex;
+      stampHeadingVersion(headings);
+      publishedHeadings = headings;
+      perfProbeCount("outlinePublish");
+      onOutlineChangeRef.current?.({ headings, activeIndex });
     };
+
+    const notifyOutline = (view: EditorView) => {
+      publishOutline(activeHeadings, locateActiveHeading(view, activeHeadings));
+    };
+
+    // 停笔后重算并发布（#375）：用回调时刻的最新文档（防抖窗口内可能还有
+    // 别的更新路径），重算 + 发布在定时器回调内同步完成，不再等下一帧。
+    const outlineDebounce = createRestartableDebounce({
+      delayMs: SOURCE_OUTLINE_DEBOUNCE_MS,
+      run: () => {
+        const v = viewRef.current;
+        if (disposed || !v || v !== view) {
+          return;
+        }
+        const nextHeadings = extractMarkdownOutline(v.state.doc.toString());
+        const nextActive = locateActiveHeading(v, nextHeadings);
+        const structureChanged = !isSameMarkdownOutline(
+          activeHeadings,
+          nextHeadings,
+        );
+        // 结构未变时不发布，避免面板重渲染。防抖期间面板保留的标题对象仍
+        // 属于旧文档 revision，点击会 no-op；防抖完成后重新认证这些对象。
+        activeHeadings = nextHeadings;
+        if (structureChanged || nextActive !== currentActiveIndex) {
+          publishOutline(activeHeadings, nextActive);
+        } else {
+          // 结构不变时面板保留原对象，重新认证这些对象即可保持正常导航；
+          // 标题顺序/文本/层级/行号一旦变化，则发布新对象，旧对象保持 stale。
+          stampHeadingVersion(publishedHeadings);
+        }
+        outlineStale = false;
+        // 计时结束放在重算/发布之后：outlineSettle 表示「停笔 → 大纲更新完成」
+        // 的完整时延，而不是只含防抖等待的定时器延迟（#379 归因口径）
+        perfProbeEnd("outlineSettle", outlineSettleStart);
+        outlineSettleStart = null;
+      },
+    });
 
     const state = EditorState.create({
       doc: value,
@@ -156,15 +237,18 @@ export function SourceModeEditor({
       extensions: [
         themeComp.of(createSourceModeExtensions({ codeBlockTheme, spellcheck })),
         EditorView.updateListener.of((update) => {
-          if (update.docChanged) {
-            const md = update.state.doc.toString();
-            if (md !== lastEmittedRef.current) {
-              lastEmittedRef.current = md;
-              onChangeRef.current(md);
-            }
-            activeHeadings = extractMarkdownOutline(md);
-            notifyOutline(update.view);
+          if (!update.docChanged) return;
+          documentVersion += 1;
+          const md = update.state.doc.toString();
+          if (md !== lastEmittedRef.current) {
+            lastEmittedRef.current = md;
+            onChangeRef.current(md);
           }
+          // 不在按键路径上重解析全文/逐标题定位：只重置防抖，停笔后统一重算。
+          // 结构未变时不发布，避免 OutlinePanel 整表重渲染。
+          outlineStale = true;
+          outlineSettleStart = perfProbeStart();
+          outlineDebounce.schedule();
         }),
       ],
     });
@@ -175,18 +259,37 @@ export function SourceModeEditor({
     registerSourceModeScroll(filePath, {
       scrollToHeading: (heading) => {
         const v = viewRef.current;
-        if (!v) return;
+        if (disposed || !v || v !== view) {
+          return;
+        }
         const currentDoc = v.state.doc.toString();
-        const offset = findSourceModeHeadingOffset(currentDoc, heading);
+        // A stale snapshot cannot use text-only matching; same-shape outlines are
+        // re-stamped after debounce, while changed structures publish new objects.
+        if (headingDocumentVersions.get(heading) !== documentVersion) return;
 
+        const offset = findSourceModeHeadingOffset(currentDoc, heading);
         let targetPos = offset ?? -1;
-        if (targetPos < 0 || targetPos > currentDoc.length) {
-          // 若大纲匹配未命中，且原 heading.pos 合法，则尝试原 heading.pos
-          if (heading.pos >= 0 && heading.pos <= currentDoc.length) {
-            targetPos = heading.pos;
-          } else {
+        if (
+          !Number.isInteger(targetPos) ||
+          targetPos < 0 ||
+          targetPos > currentDoc.length
+        ) {
+          // 旧 offset 只有来自当前文档 revision 才能作为 fallback。
+          if (
+            !Number.isInteger(heading.pos) ||
+            heading.pos < 0 ||
+            heading.pos > currentDoc.length
+          ) {
             return;
           }
+          targetPos = heading.pos;
+        }
+        if (
+          !Number.isInteger(targetPos) ||
+          targetPos < 0 ||
+          targetPos > currentDoc.length
+        ) {
+          return;
         }
 
         // 移动光标并平滑滚动到该行
@@ -211,21 +314,21 @@ export function SourceModeEditor({
       },
     });
 
-    // 监听滚动更新大纲高亮（Issue #118）
+    // 监听滚动更新大纲高亮（Issue #118）：定位只做一次行块读取 + 二分
     const handleScroll = () => {
+      if (disposed) return;
       if (scrollRaf !== null) return;
       scrollRaf = requestAnimationFrame(() => {
         scrollRaf = null;
         const v = viewRef.current;
-        if (!v) return;
+        if (disposed || !v || v !== view) {
+          return;
+        }
         refreshCursorVisible(v);
-        const nextActive = computeActiveHeadingIndex(v, activeHeadings);
+        if (outlineStale) return;
+        const nextActive = locateActiveHeading(v, activeHeadings);
         if (nextActive !== currentActiveIndex) {
-          currentActiveIndex = nextActive;
-          onOutlineChangeRef.current?.({
-            headings: activeHeadings,
-            activeIndex: nextActive,
-          });
+          publishOutline(activeHeadings, nextActive);
         }
       });
     };
@@ -237,7 +340,9 @@ export function SourceModeEditor({
       typeof ResizeObserver !== "undefined"
         ? new ResizeObserver(() => {
             const v = viewRef.current;
-            if (v) refreshCursorVisible(v);
+            if (!disposed && v === view) {
+              refreshCursorVisible(v);
+            }
           })
         : null;
     resizeObs?.observe(view.scrollDOM);
@@ -268,6 +373,10 @@ export function SourceModeEditor({
     // 「只滚动未动光标」场景下把视口拽回旧光标处，覆盖正确结果。
     const scroller = view.scrollDOM;
     let restoreRaf: number | null = null;
+    let focusRaf: number | null = null;
+    const isCurrentView = () =>
+      !disposed &&
+      viewRef.current === view;
     const computeTarget = () => {
       if (initialAnchorOffset != null && initialAnchorOffset > 0) {
         const off = Math.min(initialAnchorOffset, view.state.doc.length);
@@ -281,13 +390,15 @@ export function SourceModeEditor({
     };
     if (initialScrollTop > 0 || (initialAnchorOffset ?? 0) > 0) {
       const apply = () => {
-        if (scroller.isConnected) scroller.scrollTop = computeTarget();
+        if (isCurrentView() && scroller.isConnected) {
+          scroller.scrollTop = computeTarget();
+        }
       };
       apply();
       let frames = 0;
       const settle = () => {
         restoreRaf = null;
-        if (!scroller.isConnected) return;
+        if (!isCurrentView() || !scroller.isConnected) return;
         const target = computeTarget();
         if (Math.abs(scroller.scrollTop - target) < 1 || ++frames > 30) return;
         apply();
@@ -295,17 +406,26 @@ export function SourceModeEditor({
       };
       restoreRaf = requestAnimationFrame(settle);
     }
-    requestAnimationFrame(() => view.focus());
+    focusRaf = requestAnimationFrame(() => {
+      focusRaf = null;
+      if (isCurrentView() && view.dom.isConnected) view.focus();
+    });
 
     return () => {
+      disposed = true;
       if (restoreRaf !== null) cancelAnimationFrame(restoreRaf);
+      if (focusRaf !== null) cancelAnimationFrame(focusRaf);
       if (scrollRaf !== null) cancelAnimationFrame(scrollRaf);
+      outlineDebounce.cancel();
+      outlineSettleStart = null;
       resizeObs?.disconnect();
       unregisterSourceModeScroll(filePath);
       unregisterSourceModeSearch(filePath);
       view.scrollDOM.removeEventListener("scroll", handleScroll);
       {
-        // 脱链后 clientHeight/scrollHeight/scrollTop 读 0：刷新是幂等的，仅更新缓存
+        // 脱链后 clientHeight/scrollHeight/scrollTop 读 0：refresh 现在用
+        // readDetachSafeScrollMetrics 的缓存读数重算可见性（与下面写快照的
+        // scrollTop 同源），不再拿脱链容器的现场 0 值判「光标可见」。
         refreshCursorVisible(view);
         const head = view.state.selection.main.head;
         // issue #174：scrollTop/anchorOffset 此前是现场读，cleanup 若在容器已

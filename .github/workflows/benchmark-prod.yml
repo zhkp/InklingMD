@@ -1,0 +1,413 @@
+name: Benchmark (prod build)
+
+# 生产构建口径的性能基准（#420）
+#
+# 为什么单独一个工作流：dev server 带 React 开发期插桩（`jsxDEV` /
+# `addValueToProperties`），会把开发期开销算进长任务。这里跑 `vite build` 产物 +
+# `vite preview`，让测量落在用户实际运行的那份代码上。dev 通道（benchmark.yml）
+# 保持不变；两套基线按 `detectEnv()` 的 `prod-*` 命名空间隔离，互不覆盖。
+#
+# 编排与 dev 通道同构：**三段 job + 三个独立 runner**。同 runner 顺序复测无法过滤
+# 「整台 runner 变慢」的会话（#234），两个会话还可能被跨工作流并发同时拖慢
+# （#294）——所以 FAIL 必须由第三个独立 runner 确认，否则只能落 UNCONFIRMED。
+#
+# 只在手动触发时运行：构建 + 预览会让每个 PR 多几分钟，且 prod 基线播种前没有
+# 对照价值。跑法与播种步骤见 CONTRIBUTING.md 的「prod 构建口径」一节。
+
+on:
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: "档位（quick = 1k/5k 行；full = 含 2 万行，长任务判定用 full）"
+        required: false
+        default: "quick"
+        type: choice
+        options:
+          - quick
+          - full
+      scenario:
+        description: "只跑指定场景（逗号分隔；空 = 该档位全量场景）"
+        required: false
+        default: ""
+        type: string
+      update_baseline:
+        # 默认 false：常规跑必须保留既有基线。若默认 true，任何一次 dispatch 都会
+        # 用本次结果重写基线，反复播种会把回归慢慢「正常化」进对照历史。
+        description: "用本次结果重建 prod 基线（仅首次启用 / fixture 变更时手动打勾；首播那次不计回归）"
+        required: false
+        default: false
+        type: boolean
+      force_suspects:
+        description: "调试用：强制把指定场景当作「疑似回归」（逗号分隔），确定性演练 retest job 的接线"
+        required: false
+        default: ""
+        type: string
+      force_suspects2:
+        description: "调试用：强制把指定场景当作「确认轮候选」（逗号分隔），确定性演练 retest2 job（需同时填 force_suspects）"
+        required: false
+        default: ""
+        type: string
+      absolute:
+        # CI runner 无显示设备：打开时按 uncapped 跑（解除 vsync 上限），否则绝对行
+        # 衡量的是 60Hz 地板而不是代码。
+        description: "启用绝对阈值判定（按 uncapped 跑；默认关闭——CI 无 GPU，绝对结论要看多轮）"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+# 与 dev 通道共用同一测量队列：两组并发会互相抢 CPU，让长任务测量失真。
+concurrency:
+  group: benchmark
+  queue: max
+  cancel-in-progress: false
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    outputs:
+      suspects: ${{ steps.verdict.outputs.suspects }}
+      # 用 step 输出而不是直接 `inputs.profile`：与 dev 通道同款写法，避免
+      # 在 job outputs 里依赖 inputs 上下文（不同 runner 版本的求值时机有差异）。
+      profile: ${{ steps.profile.outputs.value }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: 决定档位
+        id: profile
+        shell: bash
+        run: echo "value=${{ inputs.profile }}" >> "$GITHUB_OUTPUT"
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v5
+        with:
+          version: 10
+
+      - name: Setup Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install frontend deps
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Playwright browsers
+        run: pnpm exec playwright install chromium
+
+      - name: Install Playwright system deps
+        shell: bash
+        # sudo 会重置 PATH 导致找不到 pnpm，用 sudo env 透传（与 benchmark.yml 一致）
+        run: sudo env "PATH=$PATH" pnpm exec playwright install-deps chromium
+
+      # `PERF_BUILD=prod` 让 playwright.perf.config.ts 走 `npm run build &&
+      # npm run preview`（webServer），并把基线写进 `prod-*` 命名空间；构建期
+      # vite `define` 注入 `__PERF_MOCK__`，`main.tsx` 把 mock 内容挂到 window，
+      # 基准才能在静态产物上注入测试文档。
+      - name: Run benchmark (prod build)
+        env:
+          PERF_BUILD: prod
+          PERF_PROFILE: ${{ steps.profile.outputs.value }}
+          PERF_SCENARIO: ${{ inputs.scenario }}
+          PERF_UPDATE_BASELINE: ${{ inputs.update_baseline && '1' || '0' }}
+          # 首播豁免：播种那次本来就没有可比基线；常规跑必须真的比出结论，
+          # 覆盖不足时 report 退出 2（与 dev 通道 tag 运行的语义对齐）。
+          PERF_REQUIRE_COMPARISON: ${{ inputs.update_baseline && '0' || '1' }}
+          # 播种期跳过绝对失败判定（PERF_ABSOLUTE=0），仍保持 PERF_UNCAPPED 写进 uncapped/ 目录，
+          # 避免无 GPU CI 因 scroll-* 未达帧预算触发三段并 exit 1 判红（首播不计回归）。
+          PERF_ABSOLUTE: ${{ inputs.absolute && !inputs.update_baseline && '1' || '0' }}
+          PERF_UNCAPPED: ${{ inputs.absolute && '1' || '' }}
+          # 拆出独立复测 job（#234）：有嫌疑时本 job 只测 + check。
+          PERF_SPLIT_RETEST: "1"
+          PERF_FORCE_SUSPECTS: ${{ inputs.force_suspects }}
+          CI: "true"
+        run: pnpm run benchmark
+
+      - name: 判定是否需要独立复测
+        id: verdict
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          # 显式判数组：非数组 JSON 时 `.length` 是 undefined，会让整步报错 →
+          # suspects 输出为空 → 复测被静默跳过。
+          N=$(node -e "const p='.perf-output/retest.json';let l=null;try{l=JSON.parse(require('fs').readFileSync(p,'utf8'))}catch{};console.log(Array.isArray(l)?l.length:0)")
+          echo "疑似场景数=$N"
+          if [ "$N" -gt 0 ]; then echo "suspects=true" >> "$GITHUB_OUTPUT"; else echo "suspects=false" >> "$GITHUB_OUTPUT"; fi
+
+      # `.perf-output` / `.perf-baseline` 都是**隐藏目录**：upload-artifact 默认
+      # 跳过隐藏文件，必须显式 `include-hidden-files: true`。配 `if-no-files-found:
+      # error` 而不是 warn——否则「什么都没传上去」也会绿，播种产物就静默丢了。
+      - name: Upload perf output
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: perf-prod-${{ steps.profile.outputs.value }}
+          path: |
+            .perf-output/
+            .perf-baseline/
+          include-hidden-files: true
+          retention-days: 14
+          if-no-files-found: error
+
+      - name: 写入 Job Summary
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          if [ -f .perf-output/report.md ]; then
+            COVERAGE=$(grep -oE '判定覆盖：[0-9]+/[0-9]+' .perf-output/report.md | head -1 || true)
+            {
+              echo "## 性能 Benchmark · prod 构建（档位：${{ steps.profile.outputs.value }}）"
+              echo ""
+              [ -n "$COVERAGE" ] && echo "**$COVERAGE**"
+              case "$COVERAGE" in
+                "判定覆盖：0/"*)
+                  echo ""
+                  if [ "${{ inputs.update_baseline }}" = "true" ]; then
+                    echo "> 📦 **本次是播种**：覆盖 0/N 属正常（首播本来就没有可比基线）。"
+                    echo "> 请取回 \`perf-prod-${{ steps.profile.outputs.value }}\` 里的 \`.perf-baseline/prod-*/\` 提交回仓库，之后的运行才有对照。"
+                  else
+                    echo "> ⚠️ **本次未与任何基线比较**：结论**不构成性能验证**。prod 基线需先播种（dispatch 勾 update_baseline，取回产物后提交）。"
+                  fi
+                  ;;
+              esac
+              echo ""
+              cat .perf-output/report.md
+              echo ""
+              echo "> 📦 产物：\`perf-prod-${{ steps.profile.outputs.value }}\`（含 \`.perf-output/\` 与 \`.perf-baseline/\`）"
+            } >> "$GITHUB_STEP_SUMMARY"
+          elif [ -f .perf-output/retest.json ]; then
+            {
+              echo "## 性能 Benchmark · prod 构建（档位：${{ steps.profile.outputs.value }}）"
+              echo ""
+              echo "⏳ 检出疑似回归，复测与 final 判定已移交独立的 **retest job**（新 runner，#234）。"
+              echo ""
+              echo "**疑似场景**："
+              echo ""
+              node -e "let l=null;try{l=JSON.parse(require('fs').readFileSync('.perf-output/retest.json','utf8'))}catch{};console.log(Array.isArray(l)&&l.length?l.map(x=>'- \`'+x+'\`').join('\n'):'- （空）')"
+              echo ""
+              echo "> ⚠️ 若本次是**播种**（\`update_baseline=true\`）：基线更新发生在最终出报告的下游 job（retest 或 retest2），"
+              echo "> 请取回 \`perf-prod-${{ steps.profile.outputs.value }}-retest\`（若又移交确认轮则取 \`perf-prod-${{ steps.profile.outputs.value }}-retest2\`）产物提交——"
+              echo "> 本 job 的 \`perf-prod-${{ steps.profile.outputs.value }}\` 里仍是旧基线（取错＝本次播种静默丢失）。"
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "⚠️ 未生成 .perf-output/report.md（benchmark 未跑完，属 infra 故障）" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  # 独立复测 job（#234）：在**新的 runner** 上重测疑似场景；同时做 confirm 相位，
+  # 有确认候选时移交 retest2 job，不自己出 final。
+  retest:
+    needs: benchmark
+    if: needs.benchmark.outputs.suspects == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      suspects2: ${{ steps.confirm.outputs.suspects2 }}
+      profile: ${{ needs.benchmark.outputs.profile }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v5
+        with:
+          version: 10
+
+      - name: Setup Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: 下载首轮产物
+        uses: actions/download-artifact@v7
+        with:
+          name: perf-prod-${{ needs.benchmark.outputs.profile }}
+
+      - name: Install frontend deps
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Playwright browsers
+        run: pnpm exec playwright install chromium
+
+      - name: Install Playwright system deps
+        shell: bash
+        run: sudo env "PATH=$PATH" pnpm exec playwright install-deps chromium
+
+      - name: 复测 + 判定是否需要确认轮
+        env:
+          PERF_BUILD: prod
+          PERF_PROFILE: ${{ needs.benchmark.outputs.profile }}
+          PERF_UPDATE_BASELINE: ${{ inputs.update_baseline && '1' || '0' }}
+          PERF_REQUIRE_COMPARISON: ${{ inputs.update_baseline && '0' || '1' }}
+          # 播种期跳过绝对失败判定（PERF_ABSOLUTE=0），仍保持 PERF_UNCAPPED 写进 uncapped/ 目录
+          PERF_ABSOLUTE: ${{ inputs.absolute && !inputs.update_baseline && '1' || '0' }}
+          PERF_UNCAPPED: ${{ inputs.absolute && '1' || '' }}
+          PERF_RETEST_ONLY: "1"
+          # 不可省（#294 评审 P0）：它决定 planConfirmPhases 是否返回 handoff；
+          # 缺了确认轮会跑在与 R2 同一台 runner 上。
+          PERF_SPLIT_RETEST: "1"
+          # 确定性演练钩子（与 dev 同款）：没有它，三段路径只能等真回归触发，
+          # 而 prod 通道不随 PR 运行，接线在首次真回归前无法验证。
+          PERF_FORCE_SUSPECTS: ${{ inputs.force_suspects }}
+          PERF_FORCE_SUSPECTS2: ${{ inputs.force_suspects2 }}
+          CI: "true"
+        run: pnpm run benchmark
+
+      - name: 判定是否需要确认轮
+        id: confirm
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          N=$(node -e "const p='.perf-output/retest2.json';let l=null;try{l=JSON.parse(require('fs').readFileSync(p,'utf8'))}catch{};console.log(Array.isArray(l)?l.length:0)")
+          echo "确认轮候选数=$N"
+          if [ "$N" -gt 0 ]; then echo "suspects2=true" >> "$GITHUB_OUTPUT"; else echo "suspects2=false" >> "$GITHUB_OUTPUT"; fi
+
+      - name: Upload perf output（复测轮）
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: perf-prod-${{ needs.benchmark.outputs.profile }}-retest
+          path: |
+            .perf-output/
+            .perf-baseline/
+          include-hidden-files: true
+          retention-days: 14
+          if-no-files-found: error
+
+      - name: 写入 Job Summary
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          if [ -f .perf-output/report.md ]; then
+            COVERAGE=$(grep -oE '判定覆盖：[0-9]+/[0-9]+' .perf-output/report.md | head -1 || true)
+            {
+              echo "## 性能 Benchmark · prod 构建 · 独立复测（新 runner，#234）"
+              echo ""
+              [ -n "$COVERAGE" ] && echo "**$COVERAGE**"
+              case "$COVERAGE" in
+                "判定覆盖：0/"*)
+                  echo ""
+                  if [ "${{ inputs.update_baseline }}" = "true" ]; then
+                    echo "> 📦 **本次是播种**：覆盖 0/N 属正常（首播本来就没有可比基线）。"
+                    echo "> 基线已在**本 job** 更新，请取回 \`perf-prod-${{ needs.benchmark.outputs.profile }}-retest\` 里的 \`.perf-baseline/prod-*/\` 提交回仓库；上游产物里仍是旧基线（取错＝本次播种静默丢失）。"
+                  else
+                    echo "> ⚠️ **本次未与任何基线比较**：结论**不构成性能验证**。prod 基线需先播种（dispatch 勾 update_baseline，取回产物后提交）。"
+                  fi
+                  ;;
+              esac
+              echo ""
+              cat .perf-output/report.md
+              echo ""
+              echo "> 📦 若本次是播种（\`update_baseline=true\`）：基线已在**本 job** 更新，"
+              echo "> 请取 \`perf-prod-${{ needs.benchmark.outputs.profile }}-retest\`；上游 \`perf-prod-${{ needs.benchmark.outputs.profile }}\` 里是旧基线（取错＝本次播种静默丢失）。"
+            } >> "$GITHUB_STEP_SUMMARY"
+          elif [ -f .perf-output/retest2.json ]; then
+            {
+              echo "## 性能 Benchmark · prod 构建 · 独立复测（新 runner，#234）"
+              echo ""
+              echo "⏳ 确认轮与 final 判定已移交 **retest2 job**（第三个 runner，#294）。"
+              echo ""
+              echo "**确认轮候选**："
+              echo ""
+              node -e "let l=null;try{l=JSON.parse(require('fs').readFileSync('.perf-output/retest2.json','utf8'))}catch{};console.log(Array.isArray(l)&&l.length?l.map(x=>'- \`'+x+'\`').join('\n'):'- （空）')"
+              echo ""
+              echo "> ⚠️ 若本次是**播种**（\`update_baseline=true\`）：基线更新发生在 retest2 job，"
+              echo "> 请取回 \`perf-prod-${{ needs.benchmark.outputs.profile }}-retest2\` 产物提交——"
+              echo "> 本 job 的 \`perf-prod-${{ needs.benchmark.outputs.profile }}-retest\` 里仍是旧基线（取错＝本次播种静默丢失）。"
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "⚠️ 未生成 .perf-output/report.md（复测 job 未跑完，属 infra 故障）" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  # 确认轮 job（#294）：第三个独立 runner 上重测确认候选并出 final 判定。
+  retest2:
+    needs: retest
+    if: needs.retest.outputs.suspects2 == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v5
+        with:
+          version: 10
+
+      - name: Setup Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: 下载复测产物
+        uses: actions/download-artifact@v7
+        with:
+          name: perf-prod-${{ needs.retest.outputs.profile }}-retest
+
+      - name: Install frontend deps
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Playwright browsers
+        run: pnpm exec playwright install chromium
+
+      - name: Install Playwright system deps
+        shell: bash
+        run: sudo env "PATH=$PATH" pnpm exec playwright install-deps chromium
+
+      - name: 确认轮 + final 判定
+        env:
+          PERF_BUILD: prod
+          PERF_PROFILE: ${{ needs.retest.outputs.profile }}
+          PERF_UPDATE_BASELINE: ${{ inputs.update_baseline && '1' || '0' }}
+          PERF_REQUIRE_COMPARISON: ${{ inputs.update_baseline && '0' || '1' }}
+          # 播种期跳过绝对失败判定（PERF_ABSOLUTE=0），仍保持 PERF_UNCAPPED 写进 uncapped/ 目录
+          PERF_ABSOLUTE: ${{ inputs.absolute && !inputs.update_baseline && '1' || '0' }}
+          PERF_UNCAPPED: ${{ inputs.absolute && '1' || '' }}
+          PERF_RETEST2_ONLY: "1"
+          CI: "true"
+        run: pnpm run benchmark
+
+      - name: Upload perf output（确认轮）
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: perf-prod-${{ needs.retest.outputs.profile }}-retest2
+          path: |
+            .perf-output/
+            .perf-baseline/
+          include-hidden-files: true
+          retention-days: 14
+          if-no-files-found: error
+
+      - name: 写入 Job Summary
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          if [ -f .perf-output/report.md ]; then
+            COVERAGE=$(grep -oE '判定覆盖：[0-9]+/[0-9]+' .perf-output/report.md | head -1 || true)
+            {
+              echo "## 性能 Benchmark · prod 构建 · 确认轮（第三个 runner，#294）"
+              echo ""
+              [ -n "$COVERAGE" ] && echo "**$COVERAGE**"
+              case "$COVERAGE" in
+                "判定覆盖：0/"*)
+                  echo ""
+                  if [ "${{ inputs.update_baseline }}" = "true" ]; then
+                    echo "> 📦 **本次是播种**：覆盖 0/N 属正常（首播本来就没有可比基线）。"
+                    echo "> 基线已在**本 job** 更新，请取回 \`perf-prod-${{ needs.retest.outputs.profile }}-retest2\` 里的 \`.perf-baseline/prod-*/\` 提交回仓库；上游两个产物里仍是旧基线（取错＝本次播种静默丢失）。"
+                  else
+                    echo "> ⚠️ **本次未与任何基线比较**：结论**不构成性能验证**。prod 基线需先播种（dispatch 勾 update_baseline，取回产物后提交）。"
+                  fi
+                  ;;
+              esac
+              echo ""
+              cat .perf-output/report.md
+              echo ""
+              echo "> 📦 若本次是播种（\`update_baseline=true\`）：基线已在**本 job** 更新，"
+              echo "> 请取 \`perf-prod-${{ needs.retest.outputs.profile }}-retest2\`；上游两个产物里都是旧基线（取错＝本次播种静默丢失）。"
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "⚠️ 未生成 .perf-output/report.md（确认轮 job 未跑完，属 infra 故障）" >> "$GITHUB_STEP_SUMMARY"
+          fi

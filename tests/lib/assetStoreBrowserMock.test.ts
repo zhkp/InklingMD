@@ -1,5 +1,7 @@
 // 浏览器 mock 分支（pnpm dev / E2E）的图片落盘与远程下载（#220）
 // 与桌面端同语义：写入记录到内存二进制表、按目录 + 内容哈希查重、fetch 结果按 Rust 端规则判定。
+// 锚点（图片所属文档）不在原处或被同名目录占位时**拒绝写入**，分别抛 TARGET_MISSING / NOT_A_FILE，
+// 查重命中也要先确认锚点（#392）——否则 E2E 会掩盖「文档已不在原处仍落盘」。
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -12,6 +14,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 import { downloadRemoteImage, RemoteImageError, writeBinaryFile } from "../../src/lib/fs";
 import { MOCK_BINARY_FILES, findMockBinaryByHash } from "../../src/lib/mockFs";
 import { saveImageAsset, sha256Hex } from "../../src/lib/assetStore";
+import { writeErrorCode } from "../../src/lib/writeErrors";
 
 const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 7]);
 
@@ -42,6 +45,53 @@ describe("mock 二进制表", () => {
     expect(first).toBe("assets/1.png");
     expect(second).toBe("assets/1.png");
     expect(MOCK_BINARY_FILES.size).toBe(1);
+  });
+
+  it("锚点文档已不在原处：拒绝写入（与 Rust 侧同语义，#392）", async () => {
+    const err = await writeBinaryFile("assets/x.png", PNG, {
+      createParentDir: true,
+      anchorPath: "/mock-workspace/notes/gone.md",
+    }).catch((e) => e);
+    expect(writeErrorCode(err)).toBe("TARGET_MISSING");
+    expect(MOCK_BINARY_FILES.has("assets/x.png")).toBe(false);
+  });
+
+  it("空串锚点按「缺失」拒绝，与 Rust Some(\"\") 同判（#392 复核 F3）", async () => {
+    const err = await writeBinaryFile("assets/x.png", PNG, { anchorPath: "" }).catch((e) => e);
+    expect(writeErrorCode(err)).toBe("TARGET_MISSING");
+    expect(MOCK_BINARY_FILES.has("assets/x.png")).toBe(false);
+  });
+
+  it("目录型锚点报 NOT_A_FILE，与 check_write_target 分类一致（#392 复核 F3）", async () => {
+    const err = await writeBinaryFile("assets/x.png", PNG, {
+      anchorPath: "/mock-workspace/notes",
+    }).catch((e) => e);
+    expect(writeErrorCode(err)).toBe("NOT_A_FILE");
+    expect(MOCK_BINARY_FILES.has("assets/x.png")).toBe(false);
+  });
+
+  it("查重命中但文档已不在原处：不返回复用路径（#392 复核 F1）", async () => {
+    await saveImageAsset("/mock-workspace/notes/readme.md", PNG, "1.png");
+    const err = await saveImageAsset("/mock-workspace/notes/gone.md", PNG, "2.png").catch((e) => e);
+    expect(writeErrorCode(err)).toBe("TARGET_MISSING");
+    expect(MOCK_BINARY_FILES.size).toBe(1);
+    expect(MOCK_BINARY_FILES.has("assets/2.png")).toBe(false);
+  });
+
+  it("查重命中但锚点是目录：报 NOT_A_FILE，与 file_stat 分类一致（#392 复核 F2）", async () => {
+    await saveImageAsset("/mock-workspace/notes/readme.md", PNG, "1.png");
+    const err = await saveImageAsset("/mock-workspace/notes", PNG, "2.png").catch((e) => e);
+    expect(writeErrorCode(err)).toBe("NOT_A_FILE");
+    expect(MOCK_BINARY_FILES.size).toBe(1);
+  });
+
+  it("写入分支（查重未命中）锚点是目录：同一条件同一文案（#392 复核）", async () => {
+    // 换内容让查重必然未命中，走 writeBinaryFile 的锚点校验（而不是复用前的 fileStat）
+    const other = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 8, 8]);
+    const err = await saveImageAsset("/mock-workspace/notes", other, "2.png").catch((e) => e);
+    expect(writeErrorCode(err)).toBe("NOT_A_FILE");
+    expect(err.message).toBe("文档已不在原处，图片未插入");
+    expect(MOCK_BINARY_FILES.size).toBe(0);
   });
 });
 

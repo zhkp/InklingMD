@@ -422,6 +422,367 @@ export function createSessionProbe() {
 export const INPUT_LANDING_RETRIES = 2;
 
 /**
+ * 源码模式连续输入采集（issue #379）。
+ *
+ * 与 runInputBurst 同范式（页面内 rAF + execCommand，避免 CDP 往返），
+ * 但落点换成 CodeMirror：`.cm-content` 会视口化，不能按整篇 textContent 判落地，
+ * 因此用**活动行**长度增长做假阴性守卫。
+ */
+export function runSourceInputBurst(opts: {
+  count: number;
+  text: string;
+}): Promise<{ sync: number[]; paint: number[]; inserted: number; allApplied: boolean }> {
+  const root = document.querySelector(
+    '[data-testid="source-mode-editor"]',
+  ) as HTMLElement | null;
+  const content = root?.querySelector(".cm-content") as HTMLElement | null;
+  if (!root || !content) throw new Error("perf: 未找到源码模式编辑器");
+  const activeLine = (): HTMLElement | null =>
+    root.querySelector(".cm-activeLine");
+  const before = (activeLine()?.textContent ?? "").length;
+  const sync: number[] = [];
+  const paint: number[] = [];
+  let allApplied = true;
+
+  const nextFrame = (): Promise<void> =>
+    new Promise<void>((r) => requestAnimationFrame(() => r()));
+
+  return (async () => {
+    for (let i = 0; i < opts.count; i += 1) {
+      await nextFrame();
+      const t0 = performance.now();
+      const applied = document.execCommand("insertText", false, opts.text);
+      const t1 = performance.now();
+      await nextFrame();
+      const t2 = performance.now();
+      if (!applied) allApplied = false;
+      sync.push(t1 - t0);
+      paint.push(t2 - t0);
+    }
+    const after = (activeLine()?.textContent ?? "").length;
+    return { sync, paint, inserted: after - before, allApplied };
+  })();
+}
+
+/**
+ * 安装归因探针（issue #379）。探针本身由生产代码里的 `perf-probe` 读取：
+ * 未安装时生产侧只有一次属性读取，不记录任何东西。
+ */
+export function installPerfProbe(): void {
+  (window as unknown as { __inklingPerfProbe?: unknown }).__inklingPerfProbe = {
+    enabled: true,
+    buckets: {},
+  };
+}
+
+export interface PerfProbeBuckets {
+  [name: string]: { count: number; totalMs: number; maxMs: number };
+}
+
+/** 读出归因桶；未安装时返回空对象（不伪造 0） */
+export function readPerfProbe(): PerfProbeBuckets {
+  const state = (window as unknown as {
+    __inklingPerfProbe?: { buckets?: PerfProbeBuckets };
+  }).__inklingPerfProbe;
+  return state?.buckets ?? {};
+}
+
+/**
+ * 等指定归因桶出现（Node 侧轮询）。
+ *
+ * 固定 waitForTimeout 不可靠：WYSIWYG 的发布防抖要等全文序列化（L 档可达秒级），
+ * 之后还有 300ms 统计防抖；同样的 700ms 在 M 档够、L 档不够。轮询到桶出现为止，
+ * 超时则按「未采集」返回（不伪造 0），调用方不用为采集延迟调整判定口径。
+ */
+export async function waitForProbeBuckets(
+  page: { evaluate: (fn: () => PerfProbeBuckets) => Promise<PerfProbeBuckets> },
+  names: readonly string[],
+  opts: { timeoutMs?: number; intervalMs?: number } = {},
+): Promise<PerfProbeBuckets> {
+  const timeoutMs = opts.timeoutMs ?? 4000;
+  const intervalMs = opts.intervalMs ?? 100;
+  const deadline = Date.now() + timeoutMs;
+  let buckets = await page.evaluate(readPerfProbe);
+  while (!names.every((name) => buckets[name]) && Date.now() < deadline) {
+    await new Promise<void>((resolve) => setTimeout(resolve, intervalMs));
+    buckets = await page.evaluate(readPerfProbe);
+  }
+  // 超时不能静默：缺桶会让归因表少一行，读者却以为「这项成本为 0/未发生」。
+  // 仍不算测量失败（场景主指标有效），按未采集处理并在输出里点名。
+  const missing = names.filter((name) => !buckets[name]);
+  if (missing.length > 0) {
+    console.warn(
+      `[perf] 归因桶等待 ${timeoutMs}ms 仍未出现：${missing.join(", ")}` +
+        "（按未采集处理，不伪造 0）",
+    );
+  }
+  return buckets;
+}
+
+/**
+ * 等待公式真正渲染完成（issue #379 / #376）。
+ *
+ * 返回节点数、已出现 KaTeX 输出的数量、空公式数量与完成时刻。
+ * 空公式（如 `$ $`）渲染的是占位提示而不是 `.katex`，把它们算进「未渲染」会让
+ * 全等断言在含空公式的 fixture 上永远失败；完成条件因此是 rendered + empty >= nodeViews。
+ * TTI 的既有定义不因它改变：调用方在读完 TTI 观测值之后再调用，用于单独归因
+ * 「KaTeX 模块加载 + 逐公式渲染」的 JS 尾部耗时（不覆盖 DOM 布局/绘制）。
+ */
+export function waitFormulaSettled(opts: {
+  maxFrames: number;
+  /**
+   * fixture 预期公式节点数（#379 评审 R4）。>0 时，调用瞬间 NodeView 尚未挂载
+   * （nodeViews=0）不能算完成：否则 `0 >= 0` 会让 open 场景以为「没有公式」，
+   * 直接沿用 #376 的测量结论。纯文本档传 0 仍可合法完成。
+   */
+  expectedNodes?: number;
+  /**
+   * 判定「节点已挂载」的数量门禁（#375 评审 R6-1 / R7-1）。缺省等于 `expectedNodes`。
+   *
+   * - `> 0`：至少要挂载这么多 NodeView 才算 ready（生成档位用完整预期数，
+   *   这样「预期 76 个但一个都没挂」不会因 `0 >= 0` 直接判完成）。
+   * - `= 0`：**完全不做数量门禁**（custom 档）。完成条件退化为「当前已挂载的
+   *   节点都渲染完」；`nodeViews=0` 时首帧即 `complete=true`。custom 直接读
+   *   用户文档，预期值来自只挂 remark-math 的管线，而编辑器还挂 GFM 表格与
+   *   frontmatter，这两处会吃掉 `$`，实际节点数可能为 0 且完全正常——数量差异
+   *   一律由 `unmeasured`（实际 < 预期）披露，不判红、也不写 `formulaReadyMs`。
+   */
+  minNodes?: number;
+}): Promise<{
+  at: number;
+  nodeViews: number;
+  rendered: number;
+  empty: number;
+  frames: number;
+  /** 是否真的等到了完成条件（节点就绪 + 渲染完全）；false = 帧预算耗尽 */
+  complete: boolean;
+  /**
+   * 预期有公式但实际节点数少于预期 → 口径差异或未挂载，不是「渲染耗时」。
+   * 与 `complete` 解耦：custom 档可能 complete=true 同时 unmeasured=true。
+   */
+  unmeasured: boolean;
+}> {
+  /** 逐帧重读 DOM：节点数/KaTeX 输出/空公式都可能在首次采样之后才出现 */
+  const readDom = () => ({
+    nodeViews: document.querySelectorAll(
+      "[data-math-inline], [data-math-display]",
+    ).length,
+    empty: document.querySelectorAll(
+      '[data-math-inline][data-value=""], [data-math-display][data-value=""]',
+    ).length,
+    rendered: document.querySelectorAll(
+      "[data-math-inline] .katex, [data-math-display] .katex",
+    ).length,
+  });
+  const expected = Math.max(0, Math.floor(opts.expectedNodes ?? 0));
+  const minNodes = Math.max(
+    0,
+    Math.min(
+      expected,
+      Math.floor(opts.minNodes ?? expected),
+    ),
+  );
+  let frames = 0;
+  return new Promise<{
+    at: number;
+    nodeViews: number;
+    rendered: number;
+    empty: number;
+    frames: number;
+    complete: boolean;
+    unmeasured: boolean;
+  }>((resolve) => {
+    const settle = (): void => {
+      const dom = readDom();
+      // 纯文本档不要求节点数；含公式档必须等到 `minNodes` 真的挂载
+      const nodesReady = minNodes === 0 || dom.nodeViews >= minNodes;
+      const complete =
+        nodesReady &&
+        (minNodes === 0 || dom.nodeViews > 0) &&
+        dom.rendered + dom.empty >= dom.nodeViews;
+      // 超时与完成必须区分（#379 评审 P1）：帧预算耗尽时 `at` 只是超时时刻，
+      // 拿它当 formulaReadyMs 会把「还没渲染完」记成「渲染耗时」。
+      if (complete || frames >= opts.maxFrames) {
+        resolve({
+          at: performance.now(),
+          ...dom,
+          frames,
+          complete,
+          // 数量差异独立于完成判定：custom 档可以 complete 但少于预期
+          unmeasured: expected > 0 && dom.nodeViews < expected,
+        });
+        return;
+      }
+      frames += 1;
+      requestAnimationFrame(settle);
+    };
+    requestAnimationFrame(settle);
+  });
+}
+
+// 公式节点预期计数已迁到 `./math-nodes.ts`（#375 评审 R5-2）：它需要用
+// remark-math 管线解析 mdast，属于 Node 侧依赖；本文件里的函数都要能被
+// page.evaluate 序列化到浏览器，不能带 Node import。
+
+/**
+ * 归因桶的轮次聚合（Node 侧，issue #379）。
+ *
+ * 每个桶输出 `<name>Ms`（每轮总耗时均值）、`<name>MaxMs`（单次最大耗时均值）、
+ * `<name>Count`（每轮调用次数均值）。缺失的桶不输出——纯文本档没有公式，
+ * 伪造 0 会让「未测量」看起来像「零成本」。
+ *
+ * 例外是**只计次桶**：调用方通过 `countOnly` 声明「本次场景已按契约安装该探针」，
+ * 此时「每轮都没有桶」本身就是测量结果（0 次事件），必须输出 0（见 scalars）。
+ */
+export const ATTRIBUTION_BUCKETS = [
+  "stats",
+  "statsSettle",
+  "outlineExtract",
+  "outlineSettle",
+  "headingLocate",
+  "outlinePublish",
+  "katexLoad",
+  "katexRender",
+  "formulaNodeView",
+] as const;
+
+/**
+ * 只计次数的桶（`perfProbeCount`）——totalMs/maxMs 恒为 0，不是「耗时为零」。
+ * 对它们只派生 `<name>Count`，否则归因表会显示一列 0ms，把「未计时」读成「无成本」。
+ */
+export const COUNT_ONLY_BUCKETS: ReadonlySet<string> = new Set([
+  "outlinePublish",
+]);
+
+export function createAttributionAggregator(
+  opts: {
+    /**
+     * 已按场景契约安装的只计次探针（如 input-source 的 `outlinePublish`）。
+     * 安装后「所有轮次都没有桶」= 每轮 0 次事件，必须输出 0；
+     * 未声明的场景（没装探针）仍按「未测量」跳过，不能伪造成 0。
+     *
+     * 写错名字会静默失效（效果与「整列从基线消失」完全一致），构造时直接抛错。
+     */
+    countOnly?: readonly string[];
+  } = {},
+) {
+  // 每轮除了桶，还要记「这一轮的测量窗口是否真的走完」（见 add 的 complete 参数）
+  const rounds: { buckets: PerfProbeBuckets; complete: boolean }[] = [];
+  const round2 = (n: number): number => Math.round(n * 100) / 100;
+  const declaredCountOnly = new Set(opts.countOnly ?? []);
+  for (const name of declaredCountOnly) {
+    if (!COUNT_ONLY_BUCKETS.has(name)) {
+      throw new Error(
+        `[perf] countOnly 声明了非只计次桶「${name}」；` +
+          `只计次桶为 ${[...COUNT_ONLY_BUCKETS].join(", ")}`,
+      );
+    }
+  }
+
+  return {
+    /**
+     * 记录一轮。
+     *
+     * `complete` 表示「本轮的测量窗口确实走完」（如 outlineSettle 桶出现 =
+     * 防抖回调真的执行过）。缺省 true 以兼容不声明 countOnly 的场景。
+     * 窗口没走完时，「没有发布桶」既可能是 0 次发布、也可能是根本没跑到，
+     * 此时不得派生 0（否则「没测」被写成「每轮 0 次」进入基线）。
+     */
+    add(buckets: PerfProbeBuckets, options: { complete?: boolean } = {}): void {
+      rounds.push({ buckets: buckets ?? {}, complete: options.complete ?? true });
+    },
+    scalars(): Record<string, number> {
+      const out: Record<string, number> = {};
+      if (rounds.length === 0) return out;
+      const completeRounds = rounds.filter((r) => r.complete);
+      for (const name of ATTRIBUTION_BUCKETS) {
+        if (COUNT_ONLY_BUCKETS.has(name)) {
+          // 只计次桶：分母是「窗口走完的轮数」，这些轮里缺桶按 0 次计入——
+          // 这是「3 轮里只发生 1 次」不被算成「每轮 1 次」的前提。
+          //   · 全部轮次都缺桶且场景声明了探针已装 → 0 次（真实测量结果）；
+          //   · 全部轮次都缺桶且未声明 → 未装探针，按未测量跳过；
+          //   · 窗口没走完的轮次直接剔除，不能用「没测」冒充「0 次」。
+          if (completeRounds.length === 0) continue;
+          const seen = completeRounds.some((r) => r.buckets[name]);
+          if (!seen && !declaredCountOnly.has(name)) continue;
+          const sum = completeRounds.reduce(
+            (acc, r) => acc + (r.buckets[name]?.count ?? 0),
+            0,
+          );
+          out[`${name}Count`] = round2(sum / completeRounds.length);
+          continue;
+        }
+        // 计时桶同样只统计窗口走完的轮（#379 评审 R4）：不完整轮里的桶是
+        // 「测到一半」的样本，混进均值会把未测量写成普通完整标量。
+        const entries = completeRounds
+          .map((r) => r.buckets[name])
+          .filter((b): b is { count: number; totalMs: number; maxMs: number } =>
+            Boolean(b),
+          );
+        // 计时桶缺桶无法区分「0ms」与「没测」：只对有桶的轮取均值（不伪造 0ms）
+        if (entries.length === 0) continue;
+        const avg = (pick: (b: (typeof entries)[number]) => number): number =>
+          entries.reduce((sum, b) => sum + pick(b), 0) / entries.length;
+        out[`${name}Ms`] = round2(avg((b) => b.totalMs));
+        out[`${name}MaxMs`] = round2(avg((b) => b.maxMs));
+        out[`${name}Count`] = round2(avg((b) => b.count));
+      }
+      return out;
+    },
+    /**
+     * 归因标量的覆盖状态（#379 评审 R4）。
+     *
+     * `scalars()` 只输出数值，读者无从分辨「2 轮里只有 1 轮采到 statsSettle」
+     * 与「2 轮都采到」。`expected` 是**总轮数**而不是完整轮数：窗口没走完的
+     * 轮次本身就是缺采，若把它们从分母里也剔掉，归因表会把「1/2 轮测得」
+     * 显示成满覆盖。场景把结果写进 raw，report 的覆盖列据 observed/expected
+     * 显示 `PARTIAL n/m`，latest.json 与 baseline 也带这份状态。
+     */
+    coverage(): {
+      rounds: number;
+      completeRounds: number;
+      partial: boolean;
+      metrics: Record<string, { observed: number; expected: number }>;
+    } {
+      const metrics: Record<string, { observed: number; expected: number }> = {};
+      const complete = rounds.filter((r) => r.complete);
+      const expectedRounds = rounds.length;
+      for (const name of ATTRIBUTION_BUCKETS) {
+        /**
+         * 强制不变量（#375 评审 R5-4）：`observed` 必须等于 `scalars()` 里
+         * 该标量的实际分母，否则同一个数字会同时被声明成「3 轮均值」和
+         * 「1 轮测得」。
+         *   · 只计次桶：只要会产出标量，分母就是全部完整轮（缺桶按 0 次
+         *     计入均值），无论是否声明 countOnly；
+         *   · 计时桶：分母是有桶的完整轮（缺桶无法伪造 0ms）。
+         * `expected` 始终是总轮数，两者之差即 PARTIAL 的来源。
+         */
+        const countOnly = COUNT_ONLY_BUCKETS.has(name);
+        const declared = countOnly && declaredCountOnly.has(name);
+        const seen = complete.some((r) => r.buckets[name]);
+        if (!seen && !declared) continue;
+        const observed = countOnly
+          ? complete.length
+          : complete.filter((r) => r.buckets[name]).length;
+        if (observed === 0) continue;
+        const keys = COUNT_ONLY_BUCKETS.has(name)
+          ? [`${name}Count`]
+          : [`${name}Ms`, `${name}MaxMs`, `${name}Count`];
+        for (const k of keys) {
+          metrics[k] = { observed, expected: expectedRounds };
+        }
+      }
+      return {
+        rounds: expectedRounds,
+        completeRounds: complete.length,
+        partial: complete.length < rounds.length,
+        metrics,
+      };
+    },
+  };
+}
+
+/**
  * 连续输入采集：每个字符一次 execCommand('insertText')（走真实 beforeinput 路径，
  * 全程在页面内，不受 CDP 往返噪声污染）。
  * 返回两类延迟 + 实际插入长度，供上层做「是否真的插进去了」的假阴性校验。

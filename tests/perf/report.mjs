@@ -34,8 +34,11 @@
 
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { resolve, join } from "node:path";
-import { baselineComparability, MODE_FALLBACK, ROUNDS_FALLBACK } from "./comparability.js";
+import { baselineComparability } from "./comparability.js";
+import { baselinePath as baselinePathFor } from "./baseline-path.mjs";
+import { runtimeDescription } from "./report-header.mjs";
 import {
+  ATTRIBUTION_METRICS,
   COMPARED_SCALARS,
   confirmVerdict,
   COUNT_FLOOR_FACTOR,
@@ -165,9 +168,13 @@ function readPwReport() {
   }
 }
 
-/** baseline 路径：本地基线隔离在 local/ 下，避免与 CI 基线互相污染 */
 /**
- * 基线文件路径 = **测量配置** 的函数：`<BASE_DIR>/[local/]<profile>/<mode>/r<rounds>/<id>.json`
+ * 基线文件路径 = **测量配置** 的函数：
+ * `<BASE_DIR>/<envPrefix><profile>/<mode>/r<rounds>/<id>.json`
+ *
+ * 前缀规则见 `baseline-path.mjs` 的 `envDirPrefix`：**白名单**式——只有
+ * `ci-ubuntu` / `ci-windows` 沿用无前缀的历史布局；`local` 走 `local/`，其余任何
+ * env（`prod-*`、将来的 `ci-macos` 等）都用自己的命名空间，避免新口径静默写进历史共享目录。
  *
  * 为什么把 mode / rounds 放进路径（而不是只靠 comparability 拦截）：
  * 它们是**测量配置**，不同配置的绝对值不可比。放在路径里，headless 日常回归与
@@ -180,10 +187,9 @@ function readPwReport() {
  * 所以它不进路径，由 comparability 的指纹校验负责。
  */
 function baselinePath(env, profile, id, mode, rounds) {
-  const envPrefix = env === "local" ? "local/" : "";
-  const modeSegment = mode ?? MODE_FALLBACK;
-  const roundsSegment = `r${rounds ?? ROUNDS_FALLBACK}`;
-  return resolve(BASE_DIR, `${envPrefix}${profile}/${modeSegment}/${roundsSegment}/${id}.json`);
+  // 路径规则见 `baseline-path.mjs`（#420）：`prod-*` 环境有自己的命名空间，
+  // 不会把生产口径的数值写进 dev 基线目录。抽成纯函数是为了让单测直接锁住。
+  return baselinePathFor(BASE_DIR, env, profile, id, mode, rounds);
 }
 
 function readBaseline(env, profile, id, mode, rounds) {
@@ -254,6 +260,35 @@ function absoluteRows(raw) {
       over: jankRate > JANK_RATE_LIMIT_PCT,
       limit: JANK_RATE_LIMIT_PCT,
       absolute: true,
+    });
+  }
+  return rows;
+}
+
+/**
+ * 归因行（issue #379）：只披露、不判定。
+ * base 缺失时保留 `—`（新指标尚未播种进基线），不能伪造成 0。
+ *
+ * 可比性门禁与主判定**同一份**（#379 评审 P1）：baseline 只在
+ * `baselineComparability().ok` 时传入。归因行同样要显示变化率，若拿不同
+ * fixture / 不同环境的旧参考值来算，「钱花在哪」会变成伪对照——连"没有变化"
+ * 都是假的。不可比时传 incomparableReason，报告里替代参考值并显式标注原因。
+ */
+function attributionRows(raw, baseline, incomparableReason) {
+  const rows = [];
+  for (const metric of ATTRIBUTION_METRICS) {
+    const cur = raw.scalars?.[metric];
+    if (typeof cur !== "number") continue;
+    const base = baseline ? baselineValue(baseline, metric) : undefined;
+    // 覆盖状态（#379 评审 R4）：随 raw.attributionCoverage 落到归因表和
+    // latest.json，部分缺采不再以「普通完整标量」的面貌出现。
+    const coverage = raw.attributionCoverage?.metrics?.[metric] ?? null;
+    rows.push({
+      metric,
+      base: typeof base === "number" ? base : null,
+      cur,
+      incomparable: incomparableReason ?? null,
+      coverage,
     });
   }
   return rows;
@@ -364,12 +399,32 @@ function buildStats(raw) {
   for (const [metric, samples] of Object.entries(raw.samples ?? {})) {
     metrics[metric] = statsFor(samples);
   }
-  // 判定白名单 + 会话标定指标：标定值必须**持久化**（否则基线没有参考值与 3σ 门槛，
-  // 「环境归因」永远判不出来），但它不参与判定——见 judgment.SESSION_PROBE_METRICS 的说明。
-  for (const metric of [...COMPARED_SCALARS, ...SESSION_PROBE_METRICS]) {
+  // 判定白名单 + 会话标定指标 + 归因指标：后两者必须**持久化**（否则基线没有参考值，
+  // 「环境归因 / 钱花在哪」永远看不出来），但都不参与判定——见 judgment 里的说明。
+  for (const metric of [
+    ...COMPARED_SCALARS,
+    ...SESSION_PROBE_METRICS,
+    ...ATTRIBUTION_METRICS,
+  ]) {
     if (metric in (raw.scalars ?? {})) {
       const v = raw.scalars[metric];
-      metrics[metric] = { median: v, p95: null, max: null, n: null, scalar: true };
+      const cov = raw.attributionCoverage?.metrics?.[metric];
+      metrics[metric] = {
+        median: v,
+        p95: null,
+        max: null,
+        n: null,
+        scalar: true,
+        // 进基线的覆盖状态（#379 评审 R4）：播种时若只有部分轮采到，
+        // 基线自身就带 PARTIAL 标记，后续对照不会被当成完整参考值。
+        ...(cov
+          ? {
+              observedRounds: cov.observed,
+              expectedRounds: cov.expected,
+              partial: cov.observed < cov.expected,
+            }
+          : {}),
+      };
     }
   }
   return metrics;
@@ -788,6 +843,9 @@ function main() {
             rounds: source.rounds,
             fixture: source.fixture,
             metrics: withHistory(buildStats(source), previous, source),
+            // 公式测量覆盖状态进基线（#379 评审 R4）：播种时若公式节点
+            // 未挂载 / 完整样本不足，基线自身必须带 UNMEASURED 标记。
+            formulaCoverage: source.formulaCoverage ?? null,
             updatedAt: new Date().toISOString(),
           },
           null,
@@ -809,6 +867,18 @@ function main() {
       baselineState: state.reason,
       metrics: verdicts,
       overMetrics,
+      // 归因指标（#379）：不参与判定，只披露统计 / 大纲 / 公式各花在哪。
+      // baseline 与主判定同一门禁：不可比时不传，避免把旧 fixture / 旧环境的
+      // 参考值算成变化率（归因行也显示百分比，同样会误导）。
+      attribution: attributionRows(
+        raw,
+        state.ok ? baseline : null,
+        state.ok ? null : state.reason,
+      ),
+      // 覆盖状态（#379 评审 R4）：归因标量的 observed/expected、公式节点预期数
+      // 与完整样本轮数都随 latest.json 落地，不把部分缺采写成普通完整标量。
+      attributionCoverage: raw.attributionCoverage ?? null,
+      formulaCoverage: raw.formulaCoverage ?? null,
       // 会话标定（#236）：不参与判定，只供「环境归因」披露使用（首轮 / 复测 / 确认轮三轮对账）
       sessionProbe: probe,
       // 该场景是否进入了确认轮（#294）：由 retest2.json 决定，不是「碰巧有第三轮数据」。
@@ -854,6 +924,21 @@ function main() {
           baselineState: `UNMEASURED(${status})`,
           metrics: [],
           overMetrics: [],
+          attribution: [],
+          // 字段集必须与正常场景完全一致；合成对象没有 raw，归因覆盖一律为 null。
+          // open 场景被判 UNMEASURED（超时/公式节点未挂载导致测试失败、raw 不落盘）
+          // 时，公式测量同样没拿到完整样本——显式标出来，避免 latest.json 里
+          // 「公式节点没挂载」与「场景超时」看起来完全一样。
+          attributionCoverage: null,
+          formulaCoverage:
+            parsed?.scenario === "open"
+              ? {
+                  expectedNodes: 0,
+                  measuredRounds: 0,
+                  expectedRounds: first.rounds ?? 0,
+                  unmeasured: true,
+                }
+              : null,
           sessionProbe: null,
           // 合成对象没进任何轮次，#294 的新字段一律置空（它不参与判定，也不该被披露成候选）。
           // 字段集必须与正常场景**完全一致**——否则 latest.json 里同一份 schema
@@ -951,9 +1036,9 @@ function main() {
   const lines = [];
   lines.push("# 性能 Benchmark 报告");
   lines.push("");
-  lines.push(
-    `> 运行时：Playwright chromium + vite dev server（未压缩、含 HMR）。**绝对值不代表生产构建**，仅用于同环境纵向对比。`,
-  );
+  // 运行时描述必须跟着口径走（#421 评审 4）：prod 通道跑的是 `vite build` 产物 +
+  // `vite preview`，写「dev server / 绝对值不代表生产构建」会与整份报告的目的相反。
+  lines.push(runtimeDescription(payload.env));
   lines.push("");
   lines.push(`- env：${payload.env}　profile：${payload.profile}　生成时间：${payload.generatedAt}`);
   if (runMeta) {
@@ -1242,6 +1327,83 @@ function main() {
           m.verdict
         }${m.note ? `（${m.note}）` : ""} |`,
       );
+    }
+  }
+  // 归因指标（issue #379）：与判定表分开，避免被读成 PASS/FAIL 行。
+  const attributionRowsAll = results.flatMap((r) =>
+    (r.attribution ?? []).map((row) => ({ id: r.id, ...row })),
+  );
+  if (attributionRowsAll.length > 0) {
+    lines.push("");
+    lines.push("### 归因指标（进基线、不参与判定，issue #379）");
+    lines.push("");
+    lines.push("| 场景 | 指标 | 基线参考 | 本次 | 变化 | 覆盖 |");
+    lines.push("|---|---|---|---|---|---|");
+    for (const row of attributionRowsAll) {
+      // 不可比：不展示旧参考值，也不展示变化率（那会是伪对照），只标原因
+      const baseCell = row.incomparable
+        ? `不可比：${row.incomparable}`
+        : (row.base ?? "—");
+      const delta =
+        row.incomparable ||
+        typeof row.base !== "number" ||
+        row.base === 0
+          ? "—"
+          : `${(((row.cur - row.base) / row.base) * 100).toFixed(1)}%`;
+      // 部分缺采显式标注（#379 评审 R4）：n/m 轮采到，不让读者把「1/2」
+      // 的均值当成「2 轮都测过」。
+      const cov = row.coverage;
+      const coverageCell = cov
+        ? cov.observed < cov.expected
+          ? `PARTIAL ${cov.observed}/${cov.expected}`
+          : `${cov.observed}/${cov.expected}`
+        : "—";
+      lines.push(
+        `| ${row.id} | ${row.metric} | ${baseCell} | ${round(row.cur)} | ${delta} | ${coverageCell} |`,
+      );
+    }
+  }
+  // 消费 coverage().partial（#375 评审 R5-4）：逐指标 PARTIAL 之外，还要在
+  // 场景级披露「有测量窗口没走完的轮」，否则读者只看表格会以为每轮都完整。
+  //
+  // 必须放在归因表分支**之外**：若某场景所有轮次都没走完，
+  // `scalars()` 与归因行会全空（整表跳过），而「0/N 轮完整」恰恰是最该
+  // 披露的最坏情形——放进表内会让它彻底静默（终审 F1）。
+  {
+    const partialScenarios = results.filter(
+      (r) => r.attributionCoverage?.partial,
+    );
+    if (partialScenarios.length > 0) {
+      lines.push("");
+      lines.push(
+        `> 有 ${partialScenarios.length} 个场景存在未走完的测量轮（PARTIAL）：` +
+          partialScenarios
+            .map(
+              (r) =>
+                `${r.id} ${r.attributionCoverage.completeRounds}/${r.attributionCoverage.rounds} 轮完整`,
+            )
+            .join("、") +
+          "。这些轮的计时/计次标量已被聚合器剔除。",
+      );
+    }
+  }
+  // 公式测量未覆盖（#379 评审 R4）：含公式档位若没拿到完整样本，显式标
+  // UNMEASURED，不让读者把「没有 formulaReadyMs」误读成「纯文本档」。
+  const formulaUnmeasured = results.filter(
+    (r) => r.formulaCoverage?.unmeasured,
+  );
+  if (formulaUnmeasured.length > 0) {
+    lines.push("");
+    lines.push("### 公式测量未覆盖（UNMEASURED）");
+    lines.push("");
+    for (const r of formulaUnmeasured) {
+      const c = r.formulaCoverage;
+      const detail =
+        c.expectedNodes > 0
+          ? `预期 ${c.expectedNodes} 个公式节点，` +
+            `只有 ${c.measuredRounds}/${c.expectedRounds} 轮拿到完整样本`
+          : `场景未测量（${r.baselineState}），公式节点数与完整样本轮数均不可用`;
+      lines.push(`- ${r.id}：${detail}`);
     }
   }
   lines.push("");

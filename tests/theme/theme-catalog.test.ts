@@ -13,8 +13,14 @@ interface StubOptions {
   bundledFiles?: Record<string, string>;
   manifest?: unknown;
   skipped?: string[];
+  bundledSkipped?: string[];
+  skippedPaths?: string[];
+  bundledSkippedPaths?: string[];
+  bundledScans?: Record<string, { skipped: string[]; skippedPaths: string[] }>;
   failRead?: string[];
   dirs?: Record<string, boolean>;
+  bundledRootExists?: boolean;
+  bundledResourcesExpected?: boolean;
 }
 
 function stubIo(opts: StubOptions): CatalogIo {
@@ -22,10 +28,16 @@ function stubIo(opts: StubOptions): CatalogIo {
   return {
     themesRoot: THEMES,
     bundledRoot: BUNDLED,
+    bundledResourcesExpected: opts.bundledResourcesExpected ?? false,
     manifestRaw: opts.manifest,
     join,
-    scanDir: async (dir: string) => {
+    scanDir: async (dir) => {
       const base = dir.replace(/\/+$/, "");
+      const nestedBundledScan = dir === THEMES ? undefined : opts.bundledScans?.[dir];
+      const skipped = dir === THEMES ? opts.skipped ?? [] : nestedBundledScan?.skipped ?? opts.bundledSkipped ?? [];
+      const skippedPaths =
+        dir === THEMES ? opts.skippedPaths ?? [] : nestedBundledScan?.skippedPaths ?? opts.bundledSkippedPaths ?? [];
+      const skippedNames = new Set(skippedPaths.map((name) => name.toLowerCase()));
       const entries = new Map<string, { name: string; path: string; is_dir: boolean; size: number }>();
       const all = dir === THEMES ? opts.files : (opts.bundledFiles ?? {});
       for (const [path, content] of Object.entries(all)) {
@@ -33,14 +45,20 @@ function stubIo(opts: StubOptions): CatalogIo {
         const rest = path.slice(base.length + 1);
         const [head, ...tail] = rest.split("/");
         if (!head) continue;
+        if (skippedNames.has(head.toLowerCase())) continue;
         if (tail.length === 0) entries.set(head, { name: head, path, is_dir: false, size: content.length });
         else if (!entries.has(head)) entries.set(head, { name: head, path: join(base, head), is_dir: true, size: 0 });
       }
       for (const [rel, isDir] of Object.entries(opts.dirs ?? {})) {
         const name = rel.split("/").pop()!;
-        if (isDir && !entries.has(name)) entries.set(name, { name, path: join(base, name), is_dir: true, size: 0 });
+        if (isDir && !skippedNames.has(name.toLowerCase()) && !entries.has(name)) {
+          entries.set(name, { name, path: join(base, name), is_dir: true, size: 0 });
+        }
       }
-      return { entries: [...entries.values()], skipped: opts.skipped ?? [] };
+      const exists = dir === THEMES
+        ? true
+        : opts.bundledRootExists ?? Object.keys(opts.bundledFiles ?? {}).some((path) => path.startsWith(`${base}/`));
+      return { entries: [...entries.values()], skipped, skippedPaths, exists };
     },
     readFile: async (abs: string) => {
       if (opts.failRead?.includes(abs)) throw new Error("读取失败");
@@ -148,6 +166,67 @@ describe("#307 N13 幂等补齐计划", () => {
     expect(copyPlan).toEqual([]);
   });
 
+  it("预装源 CSS 被扫描跳过（符号链接）→ 登记诊断且不生成补齐计划", async () => {
+    const css = "vue.css";
+    const result = await buildThemeCatalog(
+      stubIo({
+        files: { [`${THEMES}/${css}`]: "h1{color:red}" },
+        // mockReadFile 仍能读到目标内容，以模拟底层 readFile 会跟随 symlink 的风险。
+        bundledFiles: { [`${BUNDLED}/${css}`]: "h1{color:blue}" },
+        bundledSkipped: [`${css}（符号链接，不跟随）`],
+        bundledSkippedPaths: [css],
+        manifest: {
+          v: 1,
+          themes: [{ slug: "vue", css, name: "Vue", mode: "light" }],
+        },
+      }),
+    );
+
+    expect(result.issues).toContain(`预装源目录：${css}（符号链接，不跟随）`);
+    expect(result.missingSourceDiagnostics.map(({ path }) => path)).toEqual([css]);
+    expect(result.copyPlan).toEqual([]);
+  });
+
+  it("嵌套 manifest CSS 的祖先符号链接被扫描跳过时不跟随读取或生成补齐计划", async () => {
+    const css = "assets/vue.css";
+    const result = await buildThemeCatalog(
+      stubIo({
+        files: {},
+        // readFile 仍能返回链接目标内容，验证 catalog 不会绕过目录扫描去跟随链接。
+        bundledFiles: { [`${BUNDLED}/${css}`]: "h1{color:blue}" },
+        bundledScans: {
+          [`${BUNDLED}/assets`]: {
+            skipped: ["vue.css（符号链接，不跟随）"],
+            skippedPaths: ["vue.css"],
+          },
+        },
+        manifest: { v: 1, themes: [{ slug: "vue", css, name: "Vue", mode: "light" }] },
+      }),
+    );
+
+    expect(result.issues).toContain("预装源目录/assets：vue.css（符号链接，不跟随）");
+    expect(result.missingSourceDiagnostics.map(({ path }) => path)).toEqual([css]);
+    expect(result.copyPlan).toEqual([]);
+  });
+
+  it("预装资源目录被跳过时过滤目录复制，但仍可安全补齐独立 CSS", async () => {
+    const result = await buildThemeCatalog(
+      stubIo({
+        files: {},
+        bundledFiles: { [`${BUNDLED}/vue.css`]: "h1{}" },
+        bundledSkipped: ["vue（符号链接，不跟随）"],
+        bundledSkippedPaths: ["vue"],
+        manifest: {
+          v: 1,
+          themes: [{ slug: "vue", css: "vue.css", dir: "vue", name: "Vue", mode: "light" }],
+        },
+      }),
+    );
+
+    expect(result.issues).toContain("预装源目录：vue（符号链接，不跟随）");
+    expect(result.copyPlan.map(({ from }) => from)).toEqual([`${BUNDLED}/vue.css`]);
+  });
+
   it("运行时被改动（hash 不一致）→ 按源副本覆盖并给原因", async () => {
     const files = {
       [`${THEMES}/vue.css`]: "h1{color:#999}",
@@ -160,7 +239,7 @@ describe("#307 N13 幂等补齐计划", () => {
   });
 
   it("源副本缺失 → 只登记不补齐（不删运行时副本；N15「补齐」与「用户意志」不冲突）", async () => {
-    const { copyPlan, issues } = await buildThemeCatalog(
+    const { copyPlan, issues, missingSourceDiagnostics } = await buildThemeCatalog(
       stubIo({
         files: {},
         // 清单声明了 vue（含资源目录），但源副本只有 night → vue 既不能补齐也不该误报为「已就绪」
@@ -170,6 +249,28 @@ describe("#307 N13 幂等补齐计划", () => {
     );
     expect(copyPlan).toEqual([]);
     expect(issues.join("\n")).toContain("预装源副本缺失或不可读：vue.css");
+    expect(missingSourceDiagnostics.map(({ path }) => path)).toEqual(["vue.css"]);
+  });
+
+  it("结构化保留包含告警分隔文本的不同缺失源 CSS 路径", async () => {
+    const paths = ["themes/one（清单 slug=blue.css", "themes/one（清单 slug=green.css"];
+    const { issues, missingSourceDiagnostics } = await buildThemeCatalog(
+      stubIo({
+        files: {},
+        manifest: {
+          v: 1,
+          themes: paths.map((css, index) => ({
+            slug: `source-${index}`,
+            css,
+            name: `Source ${index}`,
+            mode: index === 0 ? "light" : "dark",
+          })),
+        },
+      }),
+    );
+    expect(missingSourceDiagnostics.map(({ path }) => path)).toEqual(paths);
+    expect(missingSourceDiagnostics.map(({ issue }) => issue)).toEqual(issues);
+    expect(issues).toHaveLength(2);
   });
 
   it("清单登记了资源目录：目录副本也进计划（带字体的预装主题才不缺字）", async () => {
@@ -177,6 +278,46 @@ describe("#307 N13 幂等补齐计划", () => {
       stubIo({ files: {}, bundledFiles, manifest }),
     );
     expect(copyPlan.some((c) => c.from === `${BUNDLED}/vue` && c.to === `${THEMES}/vue`)).toBe(true);
+  });
+});
+
+describe("#403 预装源状态判定", () => {
+  it("非桌面预览没有预装资源目录时不误报", async () => {
+    const { issues } = await buildThemeCatalog(
+      stubIo({ files: {}, bundledRootExists: false }),
+    );
+    expect(issues).toEqual([]);
+  });
+
+  it("桌面应用预期携带资源，源目录缺失时提示", async () => {
+    const { issues } = await buildThemeCatalog(
+      stubIo({ files: {}, bundledRootExists: false, bundledResourcesExpected: true }),
+    );
+    expect(issues.join("\n")).toContain("预装主题不可用：预装主题源目录整体缺失");
+  });
+
+  it("浏览器已有用户主题但无预装资源时不登记预装缺失告警", async () => {
+    const { issues } = await buildThemeCatalog(
+      stubIo({
+        files: { [`${THEMES}/custom.css`]: "h1{}" },
+        bundledRootExists: false,
+        bundledResourcesExpected: false,
+      }),
+    );
+    expect(issues.some((issue) => issue.startsWith("预装主题不可用："))).toBe(false);
+  });
+
+  it("源目录存在但清单缺失或损坏时登记预装主题不可用", async () => {
+    const missing = await buildThemeCatalog(
+      stubIo({ files: {}, bundledFiles: { [`${BUNDLED}/vue.css`]: "h1{}" }, bundledRootExists: true }),
+    );
+    expect(missing.issues.join("\n")).toContain("源目录存在，但 manifest.json 缺失");
+
+    const invalid = await buildThemeCatalog(
+      stubIo({ files: {}, bundledFiles: {}, bundledRootExists: true, manifest: { v: 1 } }),
+    );
+    expect(invalid.issues.join("\n")).toContain("预装主题不可用：源 manifest.json 无效");
+    expect(invalid.issues).toHaveLength(1);
   });
 });
 

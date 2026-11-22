@@ -11,8 +11,10 @@ import type { EditorView } from "@milkdown/kit/prose/view";
 import {
   flushAllMarkdownPublishers,
 } from "./markdown-publisher";
+import { markOutlineImmediateRefresh } from "./outline-tracker";
 import { useSettings } from "../../store/settings";
 import { useWorkspace } from "../../store/workspace";
+import { selectOutlineForFile, useOutline } from "../../store/outline";
 import {
   mapScrollTop,
   markdownNormLine,
@@ -153,6 +155,12 @@ interface SourceModeTransitionOptions {
   getWysiwygTopPos?: () => number;
 }
 
+interface PendingRestoreFrames {
+  filePath: string;
+  cancelled: boolean;
+  frameIds: Set<number>;
+}
+
 /**
  * 管理源码模式的进入/退出过渡。
  * 返回 enterSnapshot（供 SourceModeEditor 挂载时恢复光标）
@@ -179,6 +187,31 @@ export function useSourceModeTransition({
   );
   const getEditorRef = useRef(getEditor);
   getEditorRef.current = getEditor;
+  const currentFilePathRef = useRef(filePath);
+  currentFilePathRef.current = filePath;
+  const currentSourceModeRef = useRef(sourceMode);
+  currentSourceModeRef.current = sourceMode;
+  const mountedRef = useRef(false);
+  const pendingRestoreRef = useRef<PendingRestoreFrames | null>(null);
+  const cancelPendingRestoreRef = useRef<() => void>(() => {});
+  cancelPendingRestoreRef.current = () => {
+    const pending = pendingRestoreRef.current;
+    if (!pending) return;
+    pending.cancelled = true;
+    for (const frameId of pending.frameIds) cancelAnimationFrame(frameId);
+    pending.frameIds.clear();
+    pendingRestoreRef.current = null;
+  };
+
+  // Keep pending exit frames scoped to the mounted file/mode generation. React
+  // runs this cleanup before setting up the next generation and on unmount.
+  useLayoutEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      cancelPendingRestoreRef.current();
+    };
+  }, [filePath, sourceMode]);
 
   useLayoutEffect(() => {
     const prev = prevSourceModeRef.current;
@@ -290,10 +323,53 @@ export function useSourceModeTransition({
             const view = ctx.get(editorViewCtx);
             const parser = ctx.get(parserCtx);
             const newDoc = parser(value);
-            let tr = view.state.tr.replaceWith(
-              0,
-              view.state.doc.content.size,
-              newDoc.content,
+            // 整文档替换挂「同帧刷新大纲」标记（#375）：否则面板在退出后的
+            // 首个可见帧仍是源码模式退出前的快照，新增标题要等 tracker 的
+            // 150ms 防抖才出现。
+            //
+            // 首帧高亮用「源码视口锚点（阅读位置）+ 源码光标（编辑位置）」换算到
+            // **新文档**的 PM 位置（#375 评审 R4）：store 快照可能滞后一个防抖
+            // 窗口，且遇到「活动项前插入同身份标题」时光靠标题身份无法消歧。
+            // 两条护栏（R4 验收 F1/F6）：
+            //   · 没有卸载快照时**不传位置**——否则 offset 退化成 0 会算出文档
+            //     开头的 pos，把身份兜底永久屏蔽、首帧被钉在首章；
+            //   · 光标只在快照明确标记「光标在源码视口内」时参与：只滚动未编辑
+            //     的往返里 snap.cursor 是旧值，用它取 max 会把高亮留在旧章节。
+            // resolveAnchorProsePos 只读 view.state.doc，因此用 newDoc 造一个
+            // 轻量 view 即可，不必等 dispatch 后重开事务。
+            const docView = {
+              state: { doc: newDoc },
+            } as unknown as EditorView;
+            const anchorPos = snap
+              ? resolveAnchorProsePos(
+                  docView,
+                  value,
+                  snap.anchorOffset ?? snap.cursor,
+                  newDoc.content.size,
+                )
+              : null;
+            const caretPos =
+              snap && snap.cursorVisible
+                ? resolveAnchorProsePos(
+                    docView,
+                    value,
+                    snap.cursor,
+                    newDoc.content.size,
+                  )
+                : null;
+            // 快照按 filePath 取（selectOutlineForFile）：切到别的文件时拿到
+            // 空快照 → activeIndex 为 null，不会把旧文件的高亮串过来。
+            let tr = markOutlineImmediateRefresh(
+              view.state.tr.replaceWith(
+                0,
+                view.state.doc.content.size,
+                newDoc.content,
+              ),
+              {
+                active: selectOutlineForFile(useOutline.getState(), filePath),
+                anchorPos,
+                caretPos,
+              },
             );
             // 重置撤销历史（issue #27）：整文档替换后旧 PM undo 步骤指向
             // 切换前的快照，Ctrl+Z 会退回与当前 markdown 不一致的旧文档。
@@ -338,11 +414,44 @@ export function useSourceModeTransition({
           return;
         }
         setEnterSnapshot(null);
-        if (parseOk && snap) {
-          requestAnimationFrame(() => {
-            requestAnimationFrame(() => {
-              const ed = getEditorRef.current();
-              if (!ed) return;
+        if (parseOk && snap && editor) {
+          cancelPendingRestoreRef.current();
+          const task: PendingRestoreFrames = {
+            filePath,
+            cancelled: false,
+            frameIds: new Set(),
+          };
+          pendingRestoreRef.current = task;
+          const isCurrentTask = () =>
+            mountedRef.current &&
+            !task.cancelled &&
+            pendingRestoreRef.current === task &&
+            currentFilePathRef.current === task.filePath &&
+            !currentSourceModeRef.current &&
+            getEditorRef.current() === editor;
+          const finishTask = () => {
+            task.cancelled = true;
+            for (const frameId of task.frameIds) cancelAnimationFrame(frameId);
+            task.frameIds.clear();
+            if (pendingRestoreRef.current === task) {
+              pendingRestoreRef.current = null;
+            }
+          };
+          const scheduleFrame = (callback: () => void) => {
+            const frameId = requestAnimationFrame(() => {
+              task.frameIds.delete(frameId);
+              if (!isCurrentTask()) {
+                finishTask();
+                return;
+              }
+              callback();
+            });
+            task.frameIds.add(frameId);
+          };
+
+          scheduleFrame(() => {
+            scheduleFrame(() => {
+              const ed = editor;
               ed.action((ctx) => {
                 const view = ctx.get(editorViewCtx);
                 const docSize = view.state.doc.content.size;
@@ -377,6 +486,7 @@ export function useSourceModeTransition({
                 // 之后 tab 切走再切回，恢复的是模式切换结束时的位置，
                 // 而非进入源码模式前被容器塌缩钳 0 污染的旧值
                 const persist = (scrollTop: number) => {
+                  if (!isCurrentTask()) return;
                   useWorkspace
                     .getState()
                     .saveCursorState(
@@ -419,7 +529,9 @@ export function useSourceModeTransition({
                     }
                   };
                   const applyScroll = () => {
-                    if (scrollEl.isConnected) scrollEl.scrollTop = computeTarget();
+                    if (isCurrentTask() && scrollEl.isConnected) {
+                      scrollEl.scrollTop = computeTarget();
+                    }
                   };
                   applyScroll();
                   let frames = 0;
@@ -460,22 +572,27 @@ export function useSourceModeTransition({
                     persist(scrollEl.isConnected ? scrollEl.scrollTop : target);
                   };
                   const settle = () => {
-                    if (!scrollEl.isConnected) return;
+                    if (!isCurrentTask() || !scrollEl.isConnected) {
+                      finishTask();
+                      return;
+                    }
                     const target = computeTarget();
                     if (
                       Math.abs(scrollEl.scrollTop - target) < 1 ||
                       ++frames > 30
                     ) {
                       finalize(target);
+                      finishTask();
                       return;
                     }
                     applyScroll();
-                    requestAnimationFrame(settle);
+                    scheduleFrame(settle);
                   };
-                  requestAnimationFrame(settle);
+                  scheduleFrame(settle);
                 } else {
                   // 无滚动容器（罕见）：仍写回源码侧原值，保持记忆与实际一致
                   persist(snap.scrollTop);
+                  finishTask();
                 }
               });
             });

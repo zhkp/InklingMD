@@ -1,17 +1,17 @@
-import { useMemo } from "react";
 import { useWorkspace } from "../../store/workspace";
 import { useSettings, ZOOM_DEFAULT } from "../../store/settings";
-import { countStats } from "../../lib/stats";
+import { useDeferredStats } from "../../lib/useDeferredStats";
 import "./StatusBar.css";
 
 export function StatusBar() {
   const currentFile = useWorkspace((s) => s.currentFile);
   const content = useWorkspace((s) => s.currentContent);
+  const saving = useWorkspace((s) => s.saving);
   const editorZoom = useSettings((s) => s.editorZoom);
   const resetEditorZoom = useSettings((s) => s.resetEditorZoom);
 
-  // 内容变化时重新统计（useMemo 依赖 content）
-  const stats = useMemo(() => countStats(content), [content]);
+  // 输入停顿后才重新统计；切 tab / 保存时立即刷新（issue #374）
+  const stats = useDeferredStats(content, currentFile, saving);
 
   if (!currentFile) return null;
 
