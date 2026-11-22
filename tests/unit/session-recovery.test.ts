@@ -955,20 +955,22 @@ describe("#409 旧 crashed 归档回收", () => {
       },
     });
 
-    await beginSession(2_222);
-
-    const archive = "/appdata/recovery/main/crashed-1111.json";
-    const archived = JSON.parse(files.get(archive)!);
-    expect(archived.draftsEnumerated).toBe(false);
-    expect(archived.fullyHandled).toBe(false);
-
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
+      await beginSession(2_222);
+
+      const archive = "/appdata/recovery/main/crashed-1111.json";
+      const archived = JSON.parse(files.get(archive)!);
+      expect(archived.draftsEnumerated).toBe(false);
+      expect(archived.fullyHandled).toBe(false);
+      // 归档侧不能静默：这份账本会永久不可回收，需要诊断线索
+      expect(warn).toHaveBeenCalled();
+
+      warn.mockClear();
       await cleanupExpiredDrafts(NOW);
       // 那次枚举失败，谁也不知道还有没有草稿：账本与草稿都必须留着
       expect(files.has(archive)).toBe(true);
       expect(files.has(draft)).toBe(true);
-      // 归档侧不能静默：这份账本会永久不可回收，需要诊断线索
       expect(warn).toHaveBeenCalled();
     } finally {
       warn.mockRestore();
@@ -1032,7 +1034,9 @@ describe("#409 旧 crashed 归档回收", () => {
       const archived = JSON.parse(files.get(archive)!);
       expect(archived.draftsEnumerated).toBe(false);
       expect(archived.fullyHandled).toBe(false);
+      expect(warn).toHaveBeenCalled();
 
+      warn.mockClear();
       await cleanupExpiredDrafts(NOW);
       expect(files.has(archive)).toBe(true);
       expect(files.has(draft)).toBe(true);
