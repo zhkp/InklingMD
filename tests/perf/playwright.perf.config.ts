@@ -20,6 +20,8 @@ import { defineConfig, devices } from "@playwright/test";
 const PORT = Number(process.env.PERF_PORT ?? 1420);
 const BASE_URL = `http://localhost:${PORT}`;
 const HEADED = process.env.PERF_HEADED === "1";
+/** 生产构建口径（#420）：webServer 先 build 再 preview */
+const PROD = process.env.PERF_BUILD === "prod";
 const UNCAPPED = process.env.PERF_UNCAPPED === "1";
 
 export default defineConfig({
@@ -69,10 +71,21 @@ export default defineConfig({
       use: { ...devices["Desktop Chrome"] },
     },
   ],
-  webServer: {
-    command: `npm run dev -- --port ${PORT}`,
-    url: BASE_URL,
-    reuseExistingServer: false,
-    timeout: 120_000,
-  },
+  // `PERF_BUILD=prod`（#420）：先构建再起静态预览服务，让绝对阈值在「用户实际
+  // 运行的那份代码」上判定——dev server 的 `jsxDEV` / `addValueToProperties`
+  // 会把 React 开发期开销算进长任务。基线按 `detectEnv()` 的 `prod-*` 命名空间
+  // 隔离，两套口径互不污染。
+  webServer: PROD
+    ? {
+        command: `npm run build && npm run preview -- --port ${PORT} --strictPort`,
+        url: BASE_URL,
+        reuseExistingServer: false,
+        timeout: 300_000,
+      }
+    : {
+        command: `npm run dev -- --port ${PORT}`,
+        url: BASE_URL,
+        reuseExistingServer: false,
+        timeout: 120_000,
+      },
 });

@@ -32,9 +32,11 @@ coverage/
 
 # 性能 Benchmark 产物与本地基线
 # 提交进仓库的是 CI 基线：.perf-baseline/<profile>/<mode>/r<rounds>/（如 quick/headless/r2/）
-# 本地基线独立于 CI：.perf-baseline/local/<profile>/<mode>/r<rounds>/
+#         与 prod 通道的 CI 基线：.perf-baseline/prod-ci-<os>/<profile>/<mode>/r<rounds>/
+# 本机口径（local / prod-local）一律不入库——它们只反映这台机器的构建与负载。
 .perf-output/
 .perf-baseline/local/
+.perf-baseline/prod-local/
 
 # 本地过程性产物（agent / 调试工作区，严禁入库；过程文档放这里或随用随删，不进 docs/）
 tmp/
