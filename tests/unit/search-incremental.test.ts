@@ -18,6 +18,8 @@ import { EditorView, Decoration, DecorationSet } from "@milkdown/kit/prose/view"
 import {
   searchKey,
   searchPlugin,
+  replaceAll,
+  replaceCurrent,
   type SearchOpts,
 } from "../../src/components/Editor/search";
 
@@ -211,6 +213,37 @@ describe("#192 增量更新正确性（增量结果 ≡ 全量重算）", () => 
     expect(currents[0].to).toBe(s.matches[2].to);
     // 其余两个是普通匹配类
     expect(decos.filter((d) => decoClass(d) === "search-match")).toHaveLength(2);
+    view.destroy();
+  });
+  it("窗外命名组平移后保留组数据，并可用于当前替换", () => {
+    const view = makeView(["one foo", "two foo"], {
+      find: "(?<name>foo)",
+      caseSensitive: false,
+      useRegex: true,
+    });
+    view.dispatch(view.state.tr.setMeta(searchKey, { type: "next" }));
+    expect(searchKey.getState(view.state)?.current).toBe(1);
+
+    // 编辑第一段，当前的第二段匹配位于增量扫描窗口之外，只应平移并保留 captures。
+    view.dispatch(view.state.tr.insertText("prefix ", paraTextStart(view, 0)));
+    replaceCurrent(view, "$1|$&|$<name>");
+    expect(view.state.doc.child(0).textContent).toBe("prefix one foo");
+    expect(view.state.doc.child(1).textContent).toBe("two foo|foo|foo");
+    view.destroy();
+  });
+
+  it("窗外命名组平移后保留组数据，并可用于全部替换", () => {
+    const view = makeView(["one foo", "two foo"], {
+      find: "(?<name>foo)",
+      caseSensitive: false,
+      useRegex: true,
+    });
+
+    // 改动第一段，第二段匹配经 mapping 平移后留在重扫窗口外。
+    view.dispatch(view.state.tr.insertText("prefix ", paraTextStart(view, 0)));
+    replaceAll(view, "$1|$&|$<name>");
+    expect(view.state.doc.child(0).textContent).toBe("prefix one foo|foo|foo");
+    expect(view.state.doc.child(1).textContent).toBe("two foo|foo|foo");
     view.destroy();
   });
 

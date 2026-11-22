@@ -20,6 +20,7 @@ interface SearchMatch {
   to: number;
   text: string;
   captures: (string | undefined)[];
+  groups: Record<string, string | undefined>;
 }
 
 interface SearchState {
@@ -121,6 +122,7 @@ function computeMatchesInRange(
           to: runPos + m.index + m[0].length,
           text: m[0],
           captures: m.slice(1),
+          groups: m.groups ?? {},
         });
       }
     });
@@ -326,32 +328,77 @@ export function scrollToCurrent(view: EditorView): void {
   );
 }
 
-/** 展开正则替换引用；不存在的捕获组保留字面量，未参与匹配的组展开为空串。 */
+/**
+ * 展开正则替换引用；不存在的捕获组保留字面量，未参与匹配的组展开为空串。
+ * 逐字符解析而不是再次调用 String.replace，避免捕获文本中的 `$` 被递归解释。
+ */
 function expandRegexReplacement(replacement: string, match: SearchMatch): string {
-  return replacement.replace(/\$(\$|&|\d{1,2})/g, (token, reference: string) => {
-    if (reference === "$") return "$";
-    if (reference === "&") return match.text;
-
-    if (reference[0] === "0") {
-      const groupNumber = Number(reference[1]);
-      if (reference.length === 2 && groupNumber > 0 && groupNumber <= match.captures.length) {
-        return match.captures[groupNumber - 1] ?? "";
-      }
-      return token;
+  let expanded = "";
+  for (let i = 0; i < replacement.length; i += 1) {
+    if (replacement[i] !== "$" || i + 1 >= replacement.length) {
+      expanded += replacement[i];
+      continue;
     }
 
-    const groupNumber = Number(reference);
-    if (groupNumber <= match.captures.length) {
-      return match.captures[groupNumber - 1] ?? "";
+    const next = replacement[i + 1];
+    if (next === "$" || next === "&") {
+      expanded += next === "$" ? "$" : match.text;
+      i += 1;
+      continue;
     }
-    if (reference.length === 2) {
-      const firstGroupNumber = Number(reference[0]);
-      if (firstGroupNumber <= match.captures.length) {
-        return `${match.captures[firstGroupNumber - 1] ?? ""}${reference[1]}`;
+
+    if (next === "<") {
+      const close = replacement.indexOf(">", i + 2);
+      if (close < 0) {
+        expanded += "$";
+        continue;
       }
+      const name = replacement.slice(i + 2, close);
+      if (Object.prototype.hasOwnProperty.call(match.groups, name)) {
+        expanded += match.groups[name] ?? "";
+      } else {
+        expanded += replacement.slice(i, close + 1);
+      }
+      i = close;
+      continue;
     }
-    return token;
-  });
+
+    if (next >= "0" && next <= "9") {
+      const second = replacement[i + 2];
+      const hasTwoDigits = second >= "0" && second <= "9";
+      const reference = hasTwoDigits ? next + second : next;
+      const groupNumber = Number(reference);
+
+      // $0 and $00 are literal. $01 follows the JS replacement rule: use
+      // group 1 when it exists, otherwise preserve the whole token.
+      if (next === "0") {
+        if (hasTwoDigits && groupNumber > 0 && groupNumber <= match.captures.length) {
+          expanded += match.captures[groupNumber - 1] ?? "";
+          i += 2;
+        } else {
+          expanded += `$${reference}`;
+          i += hasTwoDigits ? 2 : 1;
+        }
+        continue;
+      }
+
+      if (groupNumber <= match.captures.length) {
+        expanded += match.captures[groupNumber - 1] ?? "";
+        i += hasTwoDigits ? 2 : 1;
+      } else if (hasTwoDigits && Number(next) <= match.captures.length) {
+        // $10/$11 fall back to $1 + "0"/"1" when that two-digit group is absent.
+        expanded += `${match.captures[Number(next) - 1] ?? ""}${second}`;
+        i += 2;
+      } else {
+        expanded += `$${reference}`;
+        i += hasTwoDigits ? 2 : 1;
+      }
+      continue;
+    }
+
+    expanded += "$";
+  }
+  return expanded;
 }
 
 function applyReplacement(

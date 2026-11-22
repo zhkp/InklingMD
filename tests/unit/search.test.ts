@@ -138,8 +138,8 @@ describe("replaceAll 全部替换", () => {
       caseSensitive: false,
       useRegex: true,
     });
-    replaceAll(view, "$1-$&-$$-$2-$01");
-    expect(view.state.doc.textContent).toBe("$1-foo-$-$2-$01");
+    replaceAll(view, "$1-$&-$$-$2-$01-$<name>");
+    expect(view.state.doc.textContent).toBe("$1-foo-$-$2-$01-$<name>");
     view.destroy();
   });
 
@@ -151,6 +151,57 @@ describe("replaceAll 全部替换", () => {
     });
     replaceAll(view, "[$1]");
     expect(view.state.doc.textContent).toBe("[]");
+    view.destroy();
+  });
+  it("正则命名组：未匹配为空、未知名称保留且不命中原型链", () => {
+    const view = makeViewWithSearch("ab b", {
+      find: "(?<name>a)?b",
+      caseSensitive: false,
+      useRegex: true,
+    });
+    replaceAll(view, "[$<name>]-$<missing>-$<toString>-$<constructor>-$<__proto__>");
+    const unresolved = "$<missing>-$<toString>-$<constructor>-$<__proto__>";
+    expect(view.state.doc.textContent).toBe(`[a]-${unresolved} []-${unresolved}`);
+    view.destroy();
+  });
+  it("正则命名组的 $$<name> 不二次展开", () => {
+    const view = makeViewWithSearch("a", {
+      find: "(?<name>a)",
+      caseSensitive: false,
+      useRegex: true,
+    });
+    replaceAll(view, "$$<name>");
+    expect(view.state.doc.textContent).toBe("$<name>");
+    view.destroy();
+  });
+  it("正则替换支持 $10/$11 回退、$0/$00、$$1 与 $$$1", () => {
+    const view = makeViewWithSearch("abcdefghijk", {
+      find: "(a)(b)(c)(d)(e)(f)(g)(h)(i)(j)(k)",
+      caseSensitive: false,
+      useRegex: true,
+    });
+    replaceAll(view, "$10/$11/$0/$00/$$1/$$$1");
+    expect(view.state.doc.textContent).toBe("j/k/$0/$00/$1/$a");
+    view.destroy();
+  });
+  it("缺少十位捕获组时 $10/$11 回退为 $1 加字面尾数字", () => {
+    const view = makeViewWithSearch("a", {
+      find: "(a)",
+      caseSensitive: false,
+      useRegex: true,
+    });
+    replaceAll(view, "$10/$11");
+    expect(view.state.doc.textContent).toBe("a0/a1");
+    view.destroy();
+  });
+  it("捕获文本不会再次展开替换引用", () => {
+    const view = makeViewWithSearch("$2x", {
+      find: "(\\$2)(x)",
+      caseSensitive: false,
+      useRegex: true,
+    });
+    replaceAll(view, "$1");
+    expect(view.state.doc.textContent).toBe("$2");
     view.destroy();
   });
 });
@@ -180,6 +231,50 @@ describe("空替换串（#178：删除全部匹配而不是抛 RangeError）", (
     const view = makeViewWithSearch("foo foo foo", plainOpts("foo"));
     expect(() => replaceCurrent(view, "")).not.toThrow();
     expect(view.state.doc.textContent).toBe(" foo foo");
+    view.destroy();
+  });
+  it("正则模式 replaceCurrent 的字面空串删除当前匹配且不抛错", () => {
+    const view = makeViewWithSearch("foo foo", {
+      find: "foo",
+      caseSensitive: false,
+      useRegex: true,
+    });
+    expect(() => replaceCurrent(view, "")).not.toThrow();
+    expect(view.state.doc.textContent).toBe(" foo");
+    view.destroy();
+  });
+  it("正则替换展开为空串时，replaceCurrent 删除匹配且不抛错", () => {
+    const view = makeViewWithSearch("b", {
+      find: "(a)?b",
+      caseSensitive: false,
+      useRegex: true,
+    });
+    expect(() => replaceCurrent(view, "$1")).not.toThrow();
+    expect(view.state.doc.textContent).toBe("");
+    view.destroy();
+  });
+  it("正则替换展开为空串与非空串混合时，replaceAll 正确删除并保留非空展开", () => {
+    const view = makeViewWithSearch("b ab b", {
+      find: "(a)?b",
+      caseSensitive: false,
+      useRegex: true,
+    });
+    let n = 0;
+    expect(() => {
+      n = replaceAll(view, "$1");
+    }).not.toThrow();
+    expect(n).toBe(3);
+    expect(view.state.doc.textContent).toBe(" a ");
+    view.destroy();
+  });
+  it("正则模式的字面空替换串删除所有匹配且不抛错", () => {
+    const view = makeViewWithSearch("foo foo", {
+      find: "foo",
+      caseSensitive: false,
+      useRegex: true,
+    });
+    expect(() => replaceAll(view, "")).not.toThrow();
+    expect(view.state.doc.textContent).toBe(" ");
     view.destroy();
   });
 });
@@ -212,6 +307,12 @@ describe("replaceCurrent 替换当前匹配", () => {
     });
     replaceCurrent(view, "$1-$&-$$-$2-$01");
     expect(view.state.doc.textContent).toBe("$1-foo-$-$2-$01");
+    view.destroy();
+  });
+  it("普通文本 replaceAll 保留替换串中的字面美元符", () => {
+    const view = makeViewWithSearch("foo foo", plainOpts("foo"));
+    replaceAll(view, "$1-$&-$$-$<name>");
+    expect(view.state.doc.textContent).toBe("$1-$&-$$-$<name> $1-$&-$$-$<name>");
     view.destroy();
   });
 
