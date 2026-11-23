@@ -27,6 +27,7 @@ import {
 import { oneDark } from "@codemirror/theme-one-dark";
 import { replaceNext, search, searchKeymap } from "@codemirror/search";
 import type { CodeBlockTheme } from "../store/settings";
+import { namedGroupReplacementSupport } from "./source-mode-search";
 
 /**
  * 与 App.css `.code-block-placeholder` 保持一致的等宽字体族。
@@ -195,6 +196,9 @@ export function createSourceModeExtensions(opts: SourceModeExtensionOpts): Exten
     // 新版 @codemirror/search 已把替换框内建进搜索面板，Mod-r 用 replaceNext
     // （未选中匹配时打开面板，选中匹配时逐个替换）。
     search({ top: true }),
+    // 替换引用口径与 WYSIWYG 对齐（issue #428）：上游只展开 `$n`/`$&`/`$$`，
+    // 这里补上 `$<name>`，面板按钮 / Mod-r / 全部替换共用同一套展开规则。
+    namedGroupReplacementSupport(),
     keymap.of([...searchKeymap, { key: "Mod-r", run: replaceNext }]),
     // 源码模式用带 --editor-font 的宿主主题；顺序无所谓（见 cmHostTheme 注释）
     sourceModeCodeMirrorTheme,

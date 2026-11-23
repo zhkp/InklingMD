@@ -630,4 +630,31 @@ test.describe("源代码模式", () => {
       timeout: 10_000,
     });
   });
+
+  test("SM12 源码模式替换支持 $<name> 命名组引用（#428）", async ({ page }) => {
+    // #428：CM 内置面板只展开 $n/$&/$$，$<name> 会整串写进正文。
+    // 走真实面板按钮（唯一能触发 replaceAll 的入口）断言正文为捕获文本。
+    await page.locator('.topbar-btn[title*="源代码模式"]').click();
+    await expect(page.getByTestId("source-mode-editor")).toBeVisible({
+      timeout: 5_000,
+    });
+
+    const content = page
+      .getByTestId("source-mode-editor")
+      .locator(".cm-content");
+    await content.click();
+    await page.keyboard.press(`${MOD}+KeyA`);
+    await page.keyboard.type("alpha-12 beta-34");
+    await expect(content).toHaveText("alpha-12 beta-34");
+
+    await page.keyboard.press(`${MOD}+KeyR`);
+    const panel = page.locator(".cm-search");
+    await expect(panel).toBeVisible({ timeout: 5_000 });
+    await panel.locator('input[name="search"]').fill("(?<word>\\w+)-(?<num>\\d+)");
+    await panel.locator('input[name="re"]').check();
+    await panel.locator('input[name="replace"]').fill("$<num>:$<word>");
+    await panel.locator('button[name="replaceAll"]').click();
+
+    await expect(content).toHaveText("12:alpha 34:beta");
+  });
 });
