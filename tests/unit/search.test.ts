@@ -119,6 +119,134 @@ describe("replaceAll 全部替换", () => {
     expect(view.state.doc.textContent).toBe("a0 b0 c0 d0");
     view.destroy();
   });
+
+  it("正则全部替换展开 $1、$2、$& 与 $$", () => {
+    const view = makeViewWithSearch("alpha-12 beta-34", {
+      find: "(\\w+)-(\\d+)",
+      caseSensitive: false,
+      useRegex: true,
+    });
+    const n = replaceAll(view, "$2:$1:$&:$$");
+    expect(n).toBe(2);
+    expect(view.state.doc.textContent).toBe("12:alpha:alpha-12:$ 34:beta:beta-34:$");
+    view.destroy();
+  });
+
+  it("正则无捕获组时保留 $1/$2 字面量，仍展开 $& 与 $$", () => {
+    const view = makeViewWithSearch("foo", {
+      find: "foo",
+      caseSensitive: false,
+      useRegex: true,
+    });
+    replaceAll(view, "$1-$&-$$-$2-$01-$<name>");
+    expect(view.state.doc.textContent).toBe("$1-foo-$-$2-$01-$<name>");
+    view.destroy();
+  });
+
+  it("正则中已定义但未参与匹配的捕获组展开为空串", () => {
+    const view = makeViewWithSearch("b", {
+      find: "(a)?b",
+      caseSensitive: false,
+      useRegex: true,
+    });
+    replaceAll(view, "[$1]");
+    expect(view.state.doc.textContent).toBe("[]");
+    view.destroy();
+  });
+  it("正则命名组：未匹配为空、未知名称保留且不命中原型链", () => {
+    const view = makeViewWithSearch("ab b", {
+      find: "(?<name>a)?b",
+      caseSensitive: false,
+      useRegex: true,
+    });
+    replaceAll(view, "[$<name>]-$<missing>-$<toString>-$<constructor>-$<__proto__>");
+    const unresolved = "$<missing>-$<toString>-$<constructor>-$<__proto__>";
+    expect(view.state.doc.textContent).toBe(`[a]-${unresolved} []-${unresolved}`);
+    view.destroy();
+  });
+  it("正则命名组的 $$<name> 不二次展开", () => {
+    const view = makeViewWithSearch("a", {
+      find: "(?<name>a)",
+      caseSensitive: false,
+      useRegex: true,
+    });
+    replaceAll(view, "$$<name>");
+    expect(view.state.doc.textContent).toBe("$<name>");
+    view.destroy();
+  });
+  it("未知尖括号引用中的编号、整串与转义引用仍会展开", () => {
+    const view = makeViewWithSearch("alpha", {
+      find: "(alpha)",
+      caseSensitive: false,
+      useRegex: true,
+    });
+    replaceAll(view, "$<$1>|$< $1 <b>USD</b>|$<foo$&bar>|$<foo$$bar>");
+    expect(view.state.doc.textContent).toBe(
+      "$<alpha>|$< alpha <b>USD</b>|$<fooalphabar>|$<foo$bar>",
+    );
+    view.destroy();
+  });
+  it("未知或未闭合尖括号文本中的嵌套合法引用仍会展开", () => {
+    const view = makeViewWithSearch("alpha", {
+      find: "(?<word>alpha)",
+      caseSensitive: false,
+      useRegex: true,
+    });
+    const replacement = [
+      "$<a $<word>>",
+      "$<$1>",
+      "$<unclosed $1>",
+      "$<missing>",
+      "$<toString>",
+      "$$<name>",
+      "$<unclosed $1",
+    ].join("|");
+    replaceCurrent(view, replacement);
+    expect(view.state.doc.textContent).toBe(
+      "$<a alpha>|$<alpha>|$<unclosed alpha>|$<missing>|$<toString>|$<name>|$<unclosed alpha",
+    );
+    view.destroy();
+  });
+  it("未闭合未知片段中的 $&、$$ 与嵌套命名组引用仍会展开", () => {
+    const view = makeViewWithSearch("alpha", {
+      find: "(?<word>alpha)",
+      caseSensitive: false,
+      useRegex: true,
+    });
+    replaceCurrent(view, "$<unclosed $& $$ $<word>");
+    expect(view.state.doc.textContent).toBe("$<unclosed alpha $ alpha");
+    view.destroy();
+  });
+  it("正则替换支持 $10/$11 回退、$0/$00、$$1 与 $$$1", () => {
+    const view = makeViewWithSearch("abcdefghijk", {
+      find: "(a)(b)(c)(d)(e)(f)(g)(h)(i)(j)(k)",
+      caseSensitive: false,
+      useRegex: true,
+    });
+    replaceAll(view, "$10/$11/$0/$00/$$1/$$$1");
+    expect(view.state.doc.textContent).toBe("j/k/$0/$00/$1/$a");
+    view.destroy();
+  });
+  it("缺少十位捕获组时 $10/$11 回退为 $1 加字面尾数字", () => {
+    const view = makeViewWithSearch("a", {
+      find: "(a)",
+      caseSensitive: false,
+      useRegex: true,
+    });
+    replaceAll(view, "$10/$11");
+    expect(view.state.doc.textContent).toBe("a0/a1");
+    view.destroy();
+  });
+  it("捕获文本不会再次展开替换引用", () => {
+    const view = makeViewWithSearch("$2x", {
+      find: "(\\$2)(x)",
+      caseSensitive: false,
+      useRegex: true,
+    });
+    replaceAll(view, "$1");
+    expect(view.state.doc.textContent).toBe("$2");
+    view.destroy();
+  });
 });
 
 describe("空替换串（#178：删除全部匹配而不是抛 RangeError）", () => {
@@ -148,6 +276,50 @@ describe("空替换串（#178：删除全部匹配而不是抛 RangeError）", (
     expect(view.state.doc.textContent).toBe(" foo foo");
     view.destroy();
   });
+  it("正则模式 replaceCurrent 的字面空串删除当前匹配且不抛错", () => {
+    const view = makeViewWithSearch("foo foo", {
+      find: "foo",
+      caseSensitive: false,
+      useRegex: true,
+    });
+    expect(() => replaceCurrent(view, "")).not.toThrow();
+    expect(view.state.doc.textContent).toBe(" foo");
+    view.destroy();
+  });
+  it("正则替换展开为空串时，replaceCurrent 删除匹配且不抛错", () => {
+    const view = makeViewWithSearch("b", {
+      find: "(a)?b",
+      caseSensitive: false,
+      useRegex: true,
+    });
+    expect(() => replaceCurrent(view, "$1")).not.toThrow();
+    expect(view.state.doc.textContent).toBe("");
+    view.destroy();
+  });
+  it("正则替换展开为空串与非空串混合时，replaceAll 正确删除并保留非空展开", () => {
+    const view = makeViewWithSearch("b ab b", {
+      find: "(a)?b",
+      caseSensitive: false,
+      useRegex: true,
+    });
+    let n = 0;
+    expect(() => {
+      n = replaceAll(view, "$1");
+    }).not.toThrow();
+    expect(n).toBe(3);
+    expect(view.state.doc.textContent).toBe(" a ");
+    view.destroy();
+  });
+  it("正则模式的字面空替换串删除所有匹配且不抛错", () => {
+    const view = makeViewWithSearch("foo foo", {
+      find: "foo",
+      caseSensitive: false,
+      useRegex: true,
+    });
+    expect(() => replaceAll(view, "")).not.toThrow();
+    expect(view.state.doc.textContent).toBe(" ");
+    view.destroy();
+  });
 });
 
 describe("replaceCurrent 替换当前匹配", () => {
@@ -156,6 +328,41 @@ describe("replaceCurrent 替换当前匹配", () => {
     replaceCurrent(view, "BAR");
     // 默认 current=0，替换第一个
     expect(view.state.doc.textContent).toBe("BAR foo foo");
+    view.destroy();
+  });
+
+  it("正则替换当前项展开 $1、$2、$& 与 $$", () => {
+    const view = makeViewWithSearch("alpha-12 beta-34", {
+      find: "(\\w+)-(\\d+)",
+      caseSensitive: false,
+      useRegex: true,
+    });
+    replaceCurrent(view, "$1|$2|$&|$$|$01");
+    expect(view.state.doc.textContent).toBe("alpha|12|alpha-12|$|alpha beta-34");
+    view.destroy();
+  });
+
+  it("正则当前替换无捕获组时保留 $1/$2 字面量", () => {
+    const view = makeViewWithSearch("foo", {
+      find: "foo",
+      caseSensitive: false,
+      useRegex: true,
+    });
+    replaceCurrent(view, "$1-$&-$$-$2-$01");
+    expect(view.state.doc.textContent).toBe("$1-foo-$-$2-$01");
+    view.destroy();
+  });
+  it("普通文本 replaceAll 保留替换串中的字面美元符", () => {
+    const view = makeViewWithSearch("foo foo", plainOpts("foo"));
+    replaceAll(view, "$1-$&-$$-$<name>");
+    expect(view.state.doc.textContent).toBe("$1-$&-$$-$<name> $1-$&-$$-$<name>");
+    view.destroy();
+  });
+
+  it("普通文本查找时替换串中的 $ 引用保持字面量", () => {
+    const view = makeViewWithSearch("foo", plainOpts("foo"));
+    replaceCurrent(view, "$1-$&-$$");
+    expect(view.state.doc.textContent).toBe("$1-$&-$$");
     view.destroy();
   });
 });
