@@ -349,17 +349,17 @@ function expandRegexReplacement(replacement: string, match: SearchMatch): string
 
     if (next === "<") {
       const close = replacement.indexOf(">", i + 2);
-      if (close < 0) {
-        expanded += "$";
-        continue;
+      if (close >= 0) {
+        const name = replacement.slice(i + 2, close);
+        if (Object.prototype.hasOwnProperty.call(match.groups, name)) {
+          expanded += match.groups[name] ?? "";
+          i = close;
+          continue;
+        }
       }
-      const name = replacement.slice(i + 2, close);
-      if (Object.prototype.hasOwnProperty.call(match.groups, name)) {
-        expanded += match.groups[name] ?? "";
-      } else {
-        expanded += replacement.slice(i, close + 1);
-      }
-      i = close;
+      // Leave unknown $<...> text to the normal scan so valid references
+      // inside it (such as $1 or a nested $<name>) are still expanded.
+      expanded += "$";
       continue;
     }
 

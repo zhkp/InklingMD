@@ -174,6 +174,49 @@ describe("replaceAll 全部替换", () => {
     expect(view.state.doc.textContent).toBe("$<name>");
     view.destroy();
   });
+  it("未知尖括号引用中的编号、整串与转义引用仍会展开", () => {
+    const view = makeViewWithSearch("alpha", {
+      find: "(alpha)",
+      caseSensitive: false,
+      useRegex: true,
+    });
+    replaceAll(view, "$<$1>|$< $1 <b>USD</b>|$<foo$&bar>|$<foo$$bar>");
+    expect(view.state.doc.textContent).toBe(
+      "$<alpha>|$< alpha <b>USD</b>|$<fooalphabar>|$<foo$bar>",
+    );
+    view.destroy();
+  });
+  it("未知或未闭合尖括号文本中的嵌套合法引用仍会展开", () => {
+    const view = makeViewWithSearch("alpha", {
+      find: "(?<word>alpha)",
+      caseSensitive: false,
+      useRegex: true,
+    });
+    const replacement = [
+      "$<a $<word>>",
+      "$<$1>",
+      "$<unclosed $1>",
+      "$<missing>",
+      "$<toString>",
+      "$$<name>",
+      "$<unclosed $1",
+    ].join("|");
+    replaceCurrent(view, replacement);
+    expect(view.state.doc.textContent).toBe(
+      "$<a alpha>|$<alpha>|$<unclosed alpha>|$<missing>|$<toString>|$<name>|$<unclosed alpha",
+    );
+    view.destroy();
+  });
+  it("未闭合未知片段中的 $&、$$ 与嵌套命名组引用仍会展开", () => {
+    const view = makeViewWithSearch("alpha", {
+      find: "(?<word>alpha)",
+      caseSensitive: false,
+      useRegex: true,
+    });
+    replaceCurrent(view, "$<unclosed $& $$ $<word>");
+    expect(view.state.doc.textContent).toBe("$<unclosed alpha $ alpha");
+    view.destroy();
+  });
   it("正则替换支持 $10/$11 回退、$0/$00、$$1 与 $$$1", () => {
     const view = makeViewWithSearch("abcdefghijk", {
       find: "(a)(b)(c)(d)(e)(f)(g)(h)(i)(j)(k)",
