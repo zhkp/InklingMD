@@ -120,11 +120,11 @@ pnpm tauri build  # 打包桌面应用
 
 ## 性能 Benchmark（性能回归防线）
 
-一条命令跑完 6 个场景（打开 / 输入 / 滚动 / 编辑内查找 / 标签切换 / 保存），与基线自动比较，
+一条命令跑完 7 个场景（打开 / 富文本输入 / 源码模式输入 / 滚动 / 编辑内查找 / 标签切换 / 保存），与基线自动比较，
 用于回答「这次改动有没有把性能改坏」。详细设计见 `tests/perf/` 目录内的注释。
 
 ```bash
-pnpm run benchmark                       # quick 档：1k 行 + 5k 行，共 16 个组合
+pnpm run benchmark                       # quick 档：1k 行 + 5k 行，共 18 个组合
 pnpm run benchmark -- --profile=full     # 追加 2 万行档
 pnpm run benchmark -- --profile=xl       # 追加 5 万行档（仅本地，CI 不跑）
 pnpm run benchmark -- --update-baseline  # 用本次结果重建基线
@@ -186,8 +186,12 @@ PERF_DOC_FILE=md_editor_stress_test.md pnpm run benchmark
   （实测 `scroll-M-rich.longFrameCount` 的 history 极差就是 3，登记地板也是 3 → 门槛贴着噪声走，
   0.64 个计数的差就能顶出 FAIL，见 issue #270）。该推导**只收紧不放松**，被抬高的行会在报告里
   单独列出；大基数场景（full 档 L/XL，计数可达 100+）不启用——那里的百分比规则本就有效。
-- 绝对判定（不依赖基线，首次运行也生效）：滚动场景的帧间隔 p95 不得超过 `2 × 帧预算`，
-  掉帧率不得超过 10%（`PERF_JANK_RATE_LIMIT` 可调整）。
+- 绝对判定（不依赖基线，首次运行也生效）：
+  - **所有场景**（7 个采集场景：`open` / `input` / `input-source` / `scroll` / `search` / `tab-switch` / `save`）：
+    单次最长主线程长任务 `longTaskMaxMs(绝对)` 不得超过 `50ms`（`PERF_LONG_TASK_LIMIT_MS` 可覆盖，
+    空串或非法值回退默认值 `50`；默认值与 Epic #387 一致，不允许为变绿而上调）。判据取「每轮单次最长」
+    而非均值（`longTaskMs / longTaskCount` 会掩盖偶发长任务）；`0` 为合法 PASS，仅缺该字段的老 raw 跳过。
+  - **滚动场景（`scroll`）另加**：帧间隔 p95 不得超过 `2 × 帧预算`，掉帧率不得超过 10%（`PERF_JANK_RATE_LIMIT` 可调整）。
   **默认只在定向模式下启用**：`PERF_HEADED=1`（vsync 跟随显示器）或 `PERF_UNCAPPED=1`
   （解除帧率上限，帧间隔反映单帧真实工作耗时）。
   headless（本地默认，与 CI 一致）**不产出绝对判定**——此时 vsync 锁 60Hz，帧间隔反映的是
@@ -243,7 +247,7 @@ PERF_DOC_FILE=md_editor_stress_test.md pnpm run benchmark
   环境异常时应用指标的恶化很可能来自 runner（请换 runner 重跑确认）；**环境正常 ≠ 排除环境**
   （见下条覆盖边界：范围内的偏慢会话同样能顶出假 FAIL），FAIL 最终以换 runner 重跑为准。
   - **判定门槛用「是否超出历史范围」，而不是 3σ**：标定值的分布就是**机器档位的分布**
-    （实测两档 ≈31ms / ≈50ms；同一次运行内 16 个场景彼此只差 ~2ms），σ 自然很大 → 3σ 会几乎永不触发。
+    （#236 实测两档 ≈31ms / ≈50ms；同一次运行内当时 16 个场景彼此只差 ~2ms），σ 自然很大 → 3σ 会几乎永不触发。
     因此：落在历史范围内 = 与历史档位一致（报告会写明本次比基线参考快/慢多少，供判断 FAIL 是否只是档位差异）；
     **超出历史上限 10%** 才判「会话环境异常」。
   - **每轮都对账，不只是首轮与复测**（#294 扩到三轮）：只看首轮会得出与事实相反的结论
@@ -297,6 +301,7 @@ PERF_DOC_FILE=md_editor_stress_test.md pnpm run benchmark
     |---|---|
     | `R1` 未超 / 被地板噪声抑制 | `PASS` / `WARN`（沿用现有语义） |
     | `R1` 超、无 `R2` | `WARN（未复测）` |
+    | `R1` 超、`R2` 缺该指标 | `WARN（复测缺该指标）` |
     | `R1` 超、`R2` 未超 | `WARN（复测回落（抖动））`（**不进 R3**） |
     | `R1∧R2` 超、`R3` 存在且超 | **`FAIL`** |
     | `R1∧R2` 超、`R3` 存在但未超 | `WARN（末轮回落（抖动））` |
@@ -381,8 +386,8 @@ CI 上 Benchmark **不阻断合并**，只上传 `.perf-output/` 产物并写入
 - CI：Actions → **Benchmark** → Run workflow，勾选 `update_baseline`，跑完从 artifact 取回
   `.perf-baseline/<profile>/<mode>/r<rounds>/` 并提交；不勾选时 CI 只做比较，不会写仓库。
   仓库里维护**两套** CI 基线（因为触发场景用不同档位）：
-  - `.perf-baseline/quick/headless/r2/` —— PR 运行与 main push 用（16 个场景）
-  - `.perf-baseline/full/headless/r3/` —— **tag 运行（发版验证）用**（24 个场景，含 2 万行档）
+  - `.perf-baseline/quick/headless/r2/` —— PR 运行与 main push 用（18 个场景）
+  - `.perf-baseline/full/headless/r3/` —— **tag 运行（发版验证）用**（27 个场景，含 2 万行档）
 
   重建/补充某一套：`workflow_dispatch(profile=<quick|full>, update_baseline=true)` → 取回产物提交。
   ⚠️ **产物名要对**：基线更新发生在**跑到 `final` 的那个 job**，而它取决于本次走到第几段：
@@ -487,6 +492,11 @@ gh workflow run benchmark-prod.yml -f profile=quick -f update_baseline=true   # 
 更新，缺的只是未测量场景的本轮点位——与 dev 通道的纪律完全一致（见上文「基线维护」→
 「播种深度与节奏」下的「播种遇 `exit 2`」条目）。先修超时 / 失败，再补一次完整播种；不要把整轮 `exit 2` 当成
 「播种失败、什么都没写成」而直接重跑，否则未测量场景的点位会一直缺、σ 估不准。
+
+**绝对判定包含什么**：`absolute=true` 时，除 scroll 场景的帧间隔 p95 / 掉帧率外，
+**所有场景**（7 个采集场景）都会多一行 `longTaskMaxMs(绝对)`（每轮单次最长 ≤ 50ms，`PERF_LONG_TASK_LIMIT_MS`
+可覆盖，与上文「判定规则」的绝对判定口径一致）——这是 Epic #387「主线程 Long Task ≤ 50ms」的可执行判据。
+注意它判的是「每轮最长那一次」，不是均值：`longTaskMs / longTaskCount` 的平均值完全可能掩盖偶发长任务。
 
 **判定口径**：常规跑（`update_baseline` 未勾）会下发 `PERF_REQUIRE_COMPARISON=1`，
 覆盖不足时 `report` 以 exit 2 收尾，Job Summary 会写明「本次未与任何基线比较，结论

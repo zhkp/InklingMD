@@ -79,6 +79,8 @@ export function installObservers(): void {
 export function readObservers(): {
   longTaskCount: number;
   longTaskMs: number;
+  /** 单次最长长任务（#387 验收「单次 Long Task ≤ 50ms」的数据来源） */
+  longTaskMaxMs: number;
   cls: number;
   heapStartMB: number | null;
   heapEndMB: number | null;
@@ -87,6 +89,11 @@ export function readObservers(): {
   const state = w.__perf;
   const longTaskMs = state
     ? state.longTasks.reduce((sum, d) => sum + d, 0)
+    : 0;
+  // 单次最长长任务（#387 验收：单次 Long Task ≤ 50ms）。`longTaskMs` 是总和、
+  // `longTaskCount` 是次数，两者都推不出「最长那一次」，必须单独记。
+  const longTaskMaxMs = state
+    ? state.longTasks.reduce((max, d) => (d > max ? d : max), 0)
     : 0;
   const perf = performance as Performance & {
     memory?: { usedJSHeapSize?: number };
@@ -99,6 +106,7 @@ export function readObservers(): {
   return {
     longTaskCount: state ? state.longTasks.length : 0,
     longTaskMs: Math.round(longTaskMs * 100) / 100,
+    longTaskMaxMs: Math.round(longTaskMaxMs * 100) / 100,
     cls: state ? Math.round(state.cls * 10000) / 10000 : 0,
     heapStartMB: state ? state.heapStartMB : null,
     heapEndMB,

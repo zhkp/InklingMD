@@ -66,6 +66,7 @@ for (const tier of ctx.tiers) {
       const ttiSamples: number[] = [];
       const longTaskCount: number[] = [];
       const longTaskMs: number[] = [];
+      const longTaskMax: number[] = [];
       const clsValues: number[] = [];
       const heapDeltas: number[] = [];
       const formulaReadyMs: number[] = [];
@@ -90,7 +91,8 @@ for (const tier of ctx.tiers) {
         const startAt = await page.evaluate(readTimingStart);
         const observers = await page.evaluate(readObservers);
 
-        // TTI 的既有口径不变（上面已读完判定用观测值）；公式归因在其后单独等待：
+        // TTI 与既有相对判定指标的口径不变（上面已读完 TTI / 相对判定用观测值）；
+        // 公式归因在其后单独等待（单次长任务绝对判定另在下方取前后全窗口最大值）：
         // KaTeX 动态导入可能在 TTI 之后才落地，若不等待就会把「还没渲染」记成「零成本」。
         // 参数统一由 formulaWaitOptions 构造（#375 评审 R8-1）：就地拼盘时
         // `minNodes` 这一行被删掉也不会被任何单测/CI 场景抓到（默认场景都是
@@ -169,6 +171,12 @@ for (const tier of ctx.tiers) {
           ttiSamples.push(endAt - startAt);
           longTaskCount.push(observers.longTaskCount);
           longTaskMs.push(observers.longTaskMs);
+          // 单次最长长任务（#387 验收项）：覆盖打开到公式渲染落地的全窗口——
+          // KaTeX 动态导入与渲染可能在 TTI 之后才完成，必须把 observersAfterFormula 的
+          // 最大值一并纳入，避免公式尾部渲染产生 >50ms 长任务却漏出绝对判定。
+          longTaskMax.push(
+            Math.max(observers.longTaskMaxMs, observersAfterFormula.longTaskMaxMs),
+          );
           clsValues.push(observers.cls);
           heapDeltas.push(
             observers.heapStartMB !== null && observers.heapEndMB !== null
@@ -226,6 +234,7 @@ for (const tier of ctx.tiers) {
             : {}),
           longTaskCount: avg(longTaskCount),
           longTaskMs: avg(longTaskMs),
+          longTaskMaxMs: maxOf(longTaskMax),
           cls: avg(clsValues),
           heapDeltaMB: avg(heapDeltas),
         },
@@ -249,4 +258,10 @@ for (const tier of ctx.tiers) {
 function avg(values: number[]): number {
   if (values.length === 0) return 0;
   return Math.round((values.reduce((s, v) => s + v, 0) / values.length) * 100) / 100;
+}
+
+/** 轮次聚合：取最坏一次（单次长任务用，均值会掩盖偶发长任务） */
+function maxOf(values: number[]): number {
+  if (values.length === 0) return 0;
+  return Math.round(values.reduce((m, v) => (v > m ? v : m), 0) * 100) / 100;
 }

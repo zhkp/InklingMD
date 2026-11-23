@@ -23,6 +23,7 @@
 // 三轮判定表（每场景每指标行）：
 //   R1 未超 / 被抑制                 → PASS / WARN（沿用现有语义）
 //   R1 超、无 R2                     → WARN（未复测）
+//   R1 超、R2 缺该指标               → WARN（复测缺该指标）
 //   R1 超、R2 未超                   → WARN（复测回落（抖动））—— 不进 R3
 //   R1∧R2 超、R3 存在且超            → FAIL
 //   R1∧R2 超、R3 存在但未超          → WARN（末轮回落（抖动））
@@ -75,12 +76,13 @@ const RETEST2_DIR = resolve(process.env.PERF_RETEST2_DIR ?? ".perf-output/raw-re
 const BASE_DIR = resolve(process.env.PERF_BASELINE_DIR ?? ".perf-baseline");
 
 /**
- * 绝对阈值（不依赖 baseline，首次运行也能判；评审 P1-1）：
- * 相对比较只能回答「有没有比上次差」，回答不了「120fps 目标达没达到」。
- * - 帧间隔 p95 不得超过 2 × 帧预算（60Hz → 33.4ms，120Hz → 16.6ms）
- * - 掉帧率不得超过该百分比
+ * 绝对阈值（不依赖 baseline，首次运行也能判；评审 P1-1 / Epic #387）：
+ * 相对比较只能回答「有没有比上次差」，回答不了硬目标达没达到：
+ * - 全场景：单次最长长任务 longTaskMaxMs ≤ 50ms（PERF_LONG_TASK_LIMIT_MS 可覆盖）
+ * - scroll 场景另加：帧间隔 p95 ≤ 2 × 帧预算（60Hz → 33.4ms，120Hz → 16.6ms），
+ *   掉帧率 ≤ JANK_RATE_LIMIT_PCT（默认 10%）
  *
- * 注意：绝对阈值带有**环境属性**——它衡量的是"这份文档在当前机器上能否跑满帧预算"。
+ * 注意：绝对阈值带有**环境属性**——它衡量的是"这份文档在当前机器上能否达到硬目标"。
  * 无 GPU 的共享 CI runner 上，大档位掉帧是真实结论（实测 M 档 jankRate 21.7%），
  * 但它说的是 runner 而不是用户机器。团队若觉得 CI 上噪声大于价值，可用 PERF_ABSOLUTE=0 关闭
  * （关闭后仍保留相对回归判定）。
@@ -104,6 +106,24 @@ function absoluteEnabledFor(raw) {
   return raw.absoluteEligible === true;
 }
 const JANK_RATE_LIMIT_PCT = Number(process.env.PERF_JANK_RATE_LIMIT ?? 10);
+/**
+ * 单次长任务阈值（ms）：Epic #387 的统一验收「主线程 Long Task 不超过 50ms」。
+ *
+ * Long Task 的定义本身就是 >50ms，所以 `50` 同时也是「有长任务」这件事的边界；
+ * 留出 `PERF_LONG_TASK_LIMIT_MS` 覆盖口便于维护者调阈值，但默认值必须与
+ * Epic 一致，不允许为了变绿而上调。
+ */
+function parseLongTaskLimitMs(raw) {
+  const trimmed = typeof raw === "string" ? raw.trim() : "";
+  if (trimmed === "") return 50;
+  const parsed = Number(trimmed);
+  if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  console.warn(
+    `[perf] 忽略非法的 PERF_LONG_TASK_LIMIT_MS=${JSON.stringify(raw)}，回退默认值 50ms`,
+  );
+  return 50;
+}
+const LONG_TASK_LIMIT_MS = parseLongTaskLimitMs(process.env.PERF_LONG_TASK_LIMIT_MS);
 const P95_BUDGET_FACTOR = 2;
 
 function parseArgs(argv) {
@@ -222,12 +242,37 @@ function baselineP95(baseline, metric) {
 }
 
 /**
- * 绝对阈值判定：不看 baseline，直接对照"帧预算"这一硬目标。
+ * 绝对阈值判定：不看 baseline，直接对照硬目标——
+ * 帧预算（scroll：帧间隔 p95 / 掉帧率）与单次长任务（全场景：longTaskMaxMs ≤ 50ms）。
  * 没有它，「用户本机 120fps 流畅滚动」这个场景永远只能验证"没比上次差"。
  */
 function absoluteRows(raw) {
   const rows = [];
   if (!absoluteEnabledFor(raw)) return rows;
+
+  // 「单次 Long Task ≤ 50ms」（Epic #387 的统一验收项）。
+  //
+  // 这条**对所有场景**生效，不只 scroll：输入类场景恰恰是最容易长任务的。
+  // 数据取自 `longTaskMaxMs`（每轮单次最长），不能用 `longTaskMs / longTaskCount`
+  // 的均值代替——均值 20ms 完全可以由「19 次 5ms + 1 次 300ms」构成。
+  // 判据取「每轮最长」而不是 p95：n 通常只有个位数，p95 没有统计意义。
+  const longTaskMax = raw.scalars?.longTaskMaxMs;
+  // 0 是合法且有意义的值（「本轮一个长任务都没有」= 达标），必须照常出行为 PASS；
+  // 只有老 raw 缺少该字段（undefined）或非有限数值时才跳过。
+  if (typeof longTaskMax === "number" && Number.isFinite(longTaskMax)) {
+    rows.push({
+      metric: "longTaskMaxMs(绝对)",
+      base: `≤${LONG_TASK_LIMIT_MS}`,
+      cur: longTaskMax,
+      p95: null,
+      max: longTaskMax,
+      n: raw.scalars?.longTaskCount ?? null,
+      over: longTaskMax > LONG_TASK_LIMIT_MS,
+      limit: LONG_TASK_LIMIT_MS,
+      absolute: true,
+    });
+  }
+
   const budget = raw.scalars?.frameBudgetMs;
   if (raw.scenario !== "scroll" || typeof budget !== "number") return rows;
 
@@ -504,7 +549,7 @@ function withHistory(stats, previous, source) {
  */
 function coverageState(result) {
   if (result.baselineState !== "OK") return result.baselineState;
-  // 只统计**相对**行：绝对行（帧预算 p95 / 掉帧率）不依赖基线，它的存在不能说明"比较过了"。
+  // 只统计**相对**行：绝对行（单次长任务 / 帧预算 p95 / 掉帧率）不依赖基线，它的存在不能说明"比较过了"。
   // 否则 PERF_ABSOLUTE=1 / headed / uncapped + 「元数据可比但没有可用指标」的基线时，
   // 绝对行会让覆盖虚报为 OK、EMPTY_BASELINE 不触发——同一族假绿灯的最后一角。
   return result.metrics.some((m) => m.absolute !== true) ? "OK" : "EMPTY_BASELINE";
@@ -615,7 +660,7 @@ function main() {
     const baseline = readBaseline(env, profile, id, raw.mode, raw.rounds);
     const state = baselineComparability(raw, baseline);
 
-    // 相对（对 baseline）+ 绝对（对帧预算硬目标）两路判定并行
+    // 相对（对 baseline）+ 绝对（对单次长任务 / 帧预算硬目标）两路判定并行
     const rows1 = [
       ...(state.ok ? compareRun(raw, baseline) : []),
       ...absoluteRows(raw),
@@ -725,12 +770,12 @@ function main() {
     // 进 UNCONFIRMED 且绝不判 FAIL。若只按 confirmExpected 记账，老产物会退化成
     // 「未确认列表为空」+ 报告打「均已给出可信结论」——与事实相反。
     const legacyDoubleOver = doubleOver && !confirmExpected;
-    if (doubleOver && (!confirmTrusted || legacyDoubleOver)) unconfirmedIds.push(id);
 
     // 最终判定（#294 三轮）：R1∧R2 双超只是**候选**，必须由确认轮确认才判 FAIL；
     // 确认轮自身不可信/缺失/缺该指标时一律不确认 FAIL（落 UNCONFIRMED）。
-    // 绝对行与相对行的结论文案必须分开：前者是"帧预算目标未达标"，后者才是"相对基线回归"
+    // 绝对行与相对行的结论文案必须分开：前者按「单次长任务阈值」或「帧预算」区分，后者才是"相对基线回归"
     const verdicts = [];
+    let rowUnconfirmed = false;
     for (const row of rows1) {
       const second = rows2.find((r) => r.metric === row.metric);
       const third = rows3.find((r) => r.metric === row.metric);
@@ -772,7 +817,19 @@ function main() {
         verdicts.push({ ...row, verdict: "WARN", note: "未复测" });
         continue;
       }
-      const reproduced = Boolean(second && second.over);
+      if (!second) {
+        // 复测轮存在（可能有其他指标行），但缺少当前指标（如老 raw 缺 longTaskMaxMs）：
+        // 不可当作「复测回落」，也不能访问 second.cur。
+        verdicts.push({
+          ...row,
+          verdict: "WARN",
+          retest: null,
+          retest2: third ? third.cur : null,
+          note: "复测缺该指标",
+        });
+        continue;
+      }
+      const reproduced = Boolean(second.over);
       if (!reproduced) {
         // 复测回落 = 抖动，且**不进确认轮**（确认轮只跑 R1∧R2 双超的候选）
         verdicts.push({
@@ -809,6 +866,17 @@ function main() {
         });
         continue;
       }
+      if (!third) {
+        // 确认轮存在（如含其他指标行，rows3.length > 0）但缺当前指标（如 R3 缺 longTaskMaxMs）：
+        // 逐行落 WARN（未确认：确认轮缺该指标），并把该场景记入 UNCONFIRMED，绝不访问 third.over 崩溃。
+        rowUnconfirmed = true;
+        verdicts.push({
+          ...disclose,
+          verdict: "WARN",
+          note: "未确认：确认轮缺该指标",
+        });
+        continue;
+      }
       // 三轮齐备且确认轮可信 → 交给纯函数聚合（judgment.confirmVerdict）。
       // 只有「每一轮都超」才确认 FAIL；末轮回落即降 WARN（抖动）。
       const verdict = confirmVerdict([row.over, second.over, third.over]);
@@ -818,11 +886,22 @@ function main() {
         note:
           verdict === "fail"
             ? isAbsolute
-              ? "复测仍超帧预算 + 末轮仍超"
+              ? // 绝对行有两类硬目标：帧预算（scroll）与单次长任务（全场景），
+                // 文案不能再统一写「帧预算」——那对 longTaskMaxMs 是错的。
+                row.metric.startsWith("longTaskMaxMs")
+                ? `复测仍超单次长任务阈值 ${row.limit}ms + 末轮仍超`
+                : "复测仍超帧预算 + 末轮仍超"
               : "复测仍超阈值 + 末轮仍超"
             : "末轮回落（抖动）",
       });
     }
+    if (confirmExpected && rowUnconfirmed && confirmTrusted) {
+      confirmTrusted = false;
+      confirmMissingReason = "确认轮缺该指标";
+    }
+    const isUnconfirmed =
+      (doubleOver && (!confirmTrusted || legacyDoubleOver)) || rowUnconfirmed;
+    if (isUnconfirmed) unconfirmedIds.push(id);
     // 更新 baseline：优先用该场景最新一轮的数据（确认轮 > 复测轮 > 首轮，#294）
     if (args["update-baseline"] === "1" || args["update-baseline"] === "true") {
       const source = raw3 ?? raw2 ?? raw;
@@ -890,7 +969,7 @@ function main() {
       confirmMissingReason,
       // UNCONFIRMED（#294）：本来会确认 FAIL（双超）、但确认轮没给出可信结论。
       // 非候选场景不记；老产物（无 retest2.json）下双超也算——它同样拿不到第三轮证据。
-      unconfirmed: doubleOver && (!confirmTrusted || legacyDoubleOver),
+      unconfirmed: isUnconfirmed,
     });
   }
 
@@ -1254,7 +1333,7 @@ function main() {
   const absoluteCount = results.filter((r) => r.absoluteEnabled).length;
   if (absoluteCount > 0) {
     lines.push(
-      `- 绝对阈值参与判定：${absoluteCount}/${results.length} 个场景（帧间隔 p95 ≤ ${P95_BUDGET_FACTOR}× 帧预算、掉帧率 ≤ ${JANK_RATE_LIMIT_PCT}%）`,
+      `- 绝对阈值参与判定：${absoluteCount}/${results.length} 个场景（单次长任务 ≤ ${LONG_TASK_LIMIT_MS}ms；scroll 另加帧间隔 p95 ≤ ${P95_BUDGET_FACTOR}× 帧预算、掉帧率 ≤ ${JANK_RATE_LIMIT_PCT}%）`,
     );
   }
   // 名单**从 PRIMARY_METRICS 派生**，不硬编码：之前写死的名单里有一个不存在的 inputMs
@@ -1410,9 +1489,9 @@ function main() {
   writeFileSync(resolve(OUT_DIR, "report.md"), lines.join("\n"), "utf8");
   console.log(lines.join("\n"));
 
-  // WARN 有五种成因（复测回落 / 未复测 / 无主指标佐证 / 运行噪声内 / 低于绝对地板），
-  // 按成因分组输出。早期这里把所有 WARN 统一写成「疑似超阈值但复测回落（抖动）」，
-  // 既与表格正文不符，也与上面按成因分列的行重复。
+  // WARN 按成因分组输出（复测回落 / 复测缺该指标 / 未复测 / 末轮回落 / 未确认 /
+  // 无主指标佐证 / 运行噪声内 / 低于绝对地板）。早期这里把所有 WARN 统一写成
+  // 「疑似超阈值但复测回落（抖动）」，既与表格正文不符，也与上面按成因分列的行重复。
   const warnGroups = new Map();
   for (const r of results) {
     for (const m of r.metrics) {
@@ -1544,7 +1623,7 @@ function main() {
     }
     if (absoluteFailed.length > 0) {
       console.error(
-        `[perf] 绝对目标未达标（非回归，反映当前环境能否跑满帧预算）：${absoluteFailed
+        `[perf] 绝对目标未达标（非回归，反映当前环境能否跑满帧预算 / 单次长任务是否超 ${LONG_TASK_LIMIT_MS}ms）：${absoluteFailed
           .map((f) => f.id)
           .join(", ")}`,
       );
