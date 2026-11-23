@@ -9,3 +9,9 @@ docs/licenses/* -text
 src-tauri/resources/themes/manifest.json text eol=lf
 docs/theme-licenses.json text eol=lf
 THIRD-PARTY.md text eol=lf
+
+# Logo v3 定稿素材（#398）：文本容器也禁止换行归一化，确保与设计包逐字节一致
+src-tauri/icons/**/*.xml -text
+brand/*.svg -text
+public/favicon.svg -text
+public/logo.svg -text
