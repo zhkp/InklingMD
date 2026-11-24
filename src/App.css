@@ -450,6 +450,12 @@ button.save-indicator:focus-visible {
   color: var(--text-muted);
   animation: fade-in 0.3s var(--ease);
 }
+.empty-state-logo {
+  display: block;
+  width: 72px;
+  height: 72px;
+  margin: 0 auto 1rem;
+}
 @keyframes fade-in {
   from {
     opacity: 0;

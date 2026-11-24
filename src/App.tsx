@@ -289,6 +289,7 @@ function App() {
           </>
         ) : (
           <div className="empty-state">
+            <img className="empty-state-logo" src="/logo.svg" width={72} height={72} alt="" />
             <h2>InklingMD</h2>
             <p>从左侧侧边栏「打开」文件夹，或「打开文件」直接打开一个 .md 开始编辑</p>
             {!sidebarVisible && (

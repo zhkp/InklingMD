@@ -1,3 +1,10 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="brand/logo-horizontal-dark.png">
+    <img src="brand/logo-horizontal-light.png" width="380" alt="InklingMD">
+  </picture>
+</p>
+
 # InklingMD
 
 一款「所见即所得」的本地 Markdown 编辑器，对标 Typora。基于 Tauri 2 + React 19 + Milkdown 构建，编辑与预览融为一体——无需左右分栏、无需切换模式，输入 Markdown 语法后立即渲染成富文本，底层保存的始终是标准 Markdown 纯文本。
