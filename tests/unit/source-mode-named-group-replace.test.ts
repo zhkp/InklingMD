@@ -2,7 +2,7 @@
 // CM 的 RegExpQuery.getReplacement 只认 `$n` / `$&` / `$$`，`$<name>` 整串原样返回，
 // 于是同一份文档、同一个查找正则与替换串，源码模式与 WYSIWYG 结果不同。
 // 这里用真实 CM EditorView + 真实 CM 替换命令（面板按钮 / Mod-r 走的同一条路径）
-// 验证源码模式与 WYSIWYG 逐字一致。
+// 验证源码模式命名组展开，并比较两模式语义相同的场景；替换串转义另测各自既有行为。
 
 import { describe, it, expect, afterEach } from "vitest";
 import { EditorSelection, EditorState } from "@codemirror/state";
@@ -175,11 +175,31 @@ describe("源码模式命名组替换（#428）", () => {
     view.destroy();
   });
 
-  it("替换串里的 \\n 转义仍被解成换行", () => {
+  it("源码模式按 CodeMirror 口径将替换串里的 \\n 解成换行", () => {
     const view = makeSourceView("alpha-12", { ...NAMED, replace: "$<num>\\nX" });
     cmReplaceAll(view);
     expect(view.state.doc.toString()).toBe("12\nX");
     view.destroy();
+  });
+});
+
+/** CodeMirror 先解码替换串转义；WYSIWYG 保留用户输入的字面量。 */
+describe("替换串转义保持两种模式的既有行为（#428）", () => {
+  it("源码模式解码 \\n 为换行，WYSIWYG 保留反斜杠与 n", () => {
+    const query: SourceQuery = { ...NAMED, replace: "$<num>\\nX" };
+
+    const source = makeSourceView("alpha-12", query);
+    cmReplaceAll(source);
+    const sourceText = source.state.doc.toString();
+    source.destroy();
+
+    const wysiwyg = makeWysiwygView("alpha-12", query);
+    wysiwygReplaceAll(wysiwyg, query.replace);
+    const wysiwygText = wysiwyg.state.doc.textContent;
+    wysiwyg.destroy();
+
+    expect(sourceText).toBe("12\nX");
+    expect(wysiwygText).toBe("12\\nX");
   });
 });
 
