@@ -7,9 +7,11 @@
 //   3. `applyRecovery()`：把草稿恢复成 tab，并从 checkpoint 取回光标/滚动（#378）；
 //   4. `cleanupExpiredDrafts()`：只清「已归档会话里被用户处理过」且超 7 天的；
 //      本次会话的、未处理过的崩溃副本、pinned 一律保留；同时回收 `fullyHandled=true`、
-//      超 7 天、**且归档内 `draftPaths` 在 `drafts/` 中已无对应文件**的旧
-//      `crashed-*.json`。若 `draftsEnumerated === false`（枚举不完整）或空 `draftPaths`
-//      未声明 `draftsEnumerated === true` 均禁止回收；`drafts/` 列不出来时整体跳过回收（#409 第一片）。
+//      超 7 天、归档自证 `draftsEnumerated === true`、**且归档内 `draftPaths` 在 `drafts/`
+//      中已无对应文件**的旧 `crashed-*.json`。缺 `draftsEnumerated` 的旧归档与
+//      `draftsEnumerated === false` 一律不回收（旧版枚举会静默漏掉读失败的草稿，
+//      `draftPaths` 快照不能证明「没有漏掉的草稿」，删账本即产孤儿）；
+//      `drafts/` 列不出来时整体跳过回收（#409 第一片）。
 //
 // 恢复入口**不自动恢复**：用户必须明确选择「恢复 / 丢弃」，否则一份过期草稿会
 // 悄悄覆盖他已经改过的文件。
@@ -72,7 +74,8 @@ export interface CrashedSession {
    * 不可信时 `draftPaths` 可能漏掉真实存在的草稿；此时 `fullyHandled` 不能当作
    * 「已全部处理」（无论 `draftPaths` 是否为空），否则账本被回收后漏掉的草稿永远失去
    * 会话归属（永不清理）。
-   * 旧归档没有该字段 → 视为不可信（只在 `draftPaths` 非空时靠残留检查判断）。
+   * 旧归档没有该字段 → 视为不可信，**一律不回收**（不进入 `draftPaths` 残留检查：
+   * 那份快照本身就可能漏掉草稿，残留检查放行反而是漏洞）。
    */
   draftsEnumerated?: boolean;
 }
@@ -606,11 +609,12 @@ export function mergeDraftIntoExistingTab(
  * ——否则「很久没打开」就等于自动丢用户内容。`pinned` 一律豁免。
  * `exclude` 是本次刚恢复的 path（内容此刻只在编辑器里）。
  *
- * 另外按设计 §8.3 回收旧归档：`fullyHandled=true`、超 TTL，**且该会话的草稿已全部不在
- * 磁盘上**才删。未 fullyHandled 的归档是「哪些草稿已处理」的唯一账本；删除失败、本次刚
- * 恢复（`exclude`）或合并进已打开 tab 的草稿仍占着副本，账本一删它们就成了永久孤儿。
- * `draftsEnumerated === false`（归档时枚举不完整）或空 `draftPaths` 缺 `draftsEnumerated === true`
- * 均禁止回收：无法证明磁盘上没有漏掉或残留的该会话草稿。返回删除的**草稿**条数，归档回收不计入。
+ * 另外按设计 §8.3 回收旧归档：`fullyHandled=true`、超 TTL、归档自证 `draftsEnumerated === true`、
+ * **且该会话的草稿已全部不在磁盘上**才删。未 fullyHandled 的归档是「哪些草稿已处理」的唯一
+ * 账本；删除失败、本次刚恢复（`exclude`）或合并进已打开 tab 的草稿仍占着副本，账本一删它们
+ * 就成了永久孤儿。缺 `draftsEnumerated` 的旧归档（旧版枚举会在草稿读失败时静默漏掉它）与
+ * `=== false` 一律不回收：它们的 `draftPaths` 不能证明「没有漏掉的草稿」，回收就可能造孤儿。
+ * 返回删除的**草稿**条数，归档回收不计入。
  */
 export async function cleanupExpiredDrafts(
   now = Date.now(),
@@ -641,12 +645,11 @@ export async function cleanupExpiredDrafts(
   // 只看 fullyHandled 就删账本，这些残留草稿之后会落进 `!crash` 分支永久保留。
   const reclaimable = crashes.filter(({ data, mtimeUs }) => {
     if (!data.fullyHandled) return false;
-    // 归档时枚举不完整（部分草稿失败、或 draftPaths 非数组）：可能漏掉了同会话其它草稿，
-    // 无论 draftPaths 是否为空都一律保留账本
-    if (data.draftsEnumerated === false) return false;
-    // 空 draftPaths 且没有「枚举可信」的证据（旧归档无 draftsEnumerated 字段）→ 不回收：
-    // 无法证明该会话真的没有草稿残留，宁可多留账本
-    if (data.draftPaths.length === 0 && data.draftsEnumerated !== true) return false;
+    // 归档必须「自证」枚举完整才可能回收：`draftsEnumerated` 只有本版本归档时才会写 true。
+    // 旧归档缺该字段，其 `draftPaths` 是旧版 `listDrafts()` 静默漏掉读失败草稿后的快照，
+    // 即使非空也不能证明「该会话的草稿已全部不在磁盘」；漏掉的那条一旦失去账本就落进
+    // `!crash` 分支永久不再清理。同理 `draftsEnumerated === false` 也一律保留账本。
+    if (data.draftsEnumerated !== true) return false;
     const stampedAt = data.archivedAt > 0
       ? data.archivedAt
       : mtimeUs > 0

@@ -777,7 +777,8 @@ describe("#409 旧 crashed 归档回收", () => {
         draftPaths: [],
         handledDraftIds: [],
         fullyHandled: true,
-        // 手工播种默认「枚举可信」：空 draftPaths 才允许回收
+        // 手工播种默认「枚举可信」：回收要求归档自证枚举完整 + 残留检查通过，
+        // 与 draftPaths 是否为空无关
         draftsEnumerated: true,
         ...data,
       }),
@@ -952,6 +953,44 @@ describe("#409 旧 crashed 归档回收", () => {
     }
   });
 
+  it("恢复区目录列不出来时不抛错、不回收任何归档，并留下「读取恢复区目录失败」告警", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const archive = crashed("crashed-recovery-unreadable.json");
+    __setRecoveryIo({
+      appDataDir: async () => "/appdata",
+      readTextFile: async (path) => {
+        const v = files.get(path);
+        if (v === undefined) throw new Error("not found");
+        return v;
+      },
+      writeTextFile: async (path, content) => {
+        files.set(path, content);
+      },
+      listDir: async (path) => {
+        // 只让恢复区目录本身不可读：草稿目录照常可列，才能确证是 crashedFiles() 的失败分支
+        if (path === "/appdata/recovery/main") throw new Error("EIO: 恢复区不可读");
+        const prefix = path.endsWith("/") ? path : `${path}/`;
+        const names = new Set<string>();
+        for (const key of files.keys()) {
+          if (key.startsWith(prefix)) names.add(key.slice(prefix.length));
+        }
+        return [...names].map((name) => ({ name, isDir: false }));
+      },
+      deletePath: async (path) => {
+        files.delete(path);
+      },
+    });
+
+    try {
+      await expect(cleanupExpiredDrafts(NOW)).resolves.toBe(0);
+      // 本次看不到任何账本 → 一条归档都不许删，否则对应草稿会永久失去归属
+      expect(files.has(archive)).toBe(true);
+      expectWarnMessage(warn, "读取恢复区目录失败");
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it("归档时草稿目录列不出来 → 不宣称已处理完，超期也不回收账本", async () => {
     files.set(
       SESSION,
@@ -1013,6 +1052,25 @@ describe("#409 旧 crashed 归档回收", () => {
 
     await cleanupExpiredDrafts(NOW);
 
+    expect(files.has(archive)).toBe(true);
+  });
+
+  it("旧归档缺 draftsEnumerated 时，即使 draftPaths 非空且已处理、列出的草稿已删也不回收", async () => {
+    const archive = crashed("crashed-legacy-handled.json", {
+      sessionId: "s-old",
+      draftPaths: ["/w/a.md"],
+      handledDraftIds: ["/w/a.md"],
+      draftsEnumerated: undefined,
+    });
+    const handled = seedDraft("/w/a.md", { updatedAt: OLD, sessionId: "s-old" });
+    // 旧版 listDrafts() 读不出来就静默跳过：这条不在 draftPaths 里，但确实属于同一会话
+    const missed = seedDraft("/w/b.md", { updatedAt: OLD, sessionId: "s-old" });
+
+    // 列出的那条照常清掉（它确实被用户处理过）
+    expect(await cleanupExpiredDrafts(NOW)).toBe(1);
+    expect(files.has(handled)).toBe(false);
+    // 但账本必须留着：删了它就没人知道 /w/b.md 属于哪个会话，会永久留在 !crash 分支
+    expect(files.has(missed)).toBe(true);
     expect(files.has(archive)).toBe(true);
   });
 
