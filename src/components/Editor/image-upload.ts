@@ -59,9 +59,13 @@ async function insertImages(
   view: EditorView,
   pos: number | null,
   documentPath: string,
+  getDocumentPath: () => string,
 ): Promise<void> {
   const imageFiles = files.filter(isImageFile);
   if (imageFiles.length === 0) return;
+  // 编辑器实例现在跨 tab 复用（#426）：每个 await 之后必须复核「当前仍是同一个文档」，
+  // 否则上传/落盘期间切走 tab 会把图片节点插进新 tab，并把旧文档的相对路径带过去。
+  const stillSameDoc = () => !view.isDestroyed && getDocumentPath() === documentPath;
 
   let insertPos = pos;
   const failedFiles: { name: string; reason: string }[] = [];
@@ -72,8 +76,10 @@ async function insertImages(
       let relSrc: string;
       if (!isUntitledPath(documentPath)) {
         const buf = await file.arrayBuffer();
+        if (!stillSameDoc()) return;
         // markdown 中用正斜杠相对路径（跨平台兼容）；相同内容复用已有文件
         relSrc = await saveImageAsset(documentPath, new Uint8Array(buf), genImageName(file));
+        if (!stillSameDoc()) return;
       } else {
         // 未命名草稿（untitled-N 虚拟路径）没有可解析的本地目录，转 Data URL 内联插入；
         // 草稿另存到任意目录后图片依然随文档自带，不会产生失效的相对路径
@@ -81,6 +87,7 @@ async function insertImages(
           hasLargeDraftImage = true;
         }
         relSrc = await fileToDataUrl(file);
+        if (!stillSameDoc()) return;
       }
 
       const alt = file.name.replace(/\.[^.]+$/, "") || "image";
@@ -101,6 +108,7 @@ async function insertImages(
     }
   }
 
+  if (!stillSameDoc()) return;
   if (failedFiles.length > 0) {
     if (failedFiles.length === 1) {
       void showMessage(`图片插入失败：${failedFiles[0].name}（${failedFiles[0].reason}）`, {
@@ -128,8 +136,9 @@ async function insertImages(
  * - handleDrop：从系统文件管理器拖入图片，插入到鼠标释放位置
  * - handlePaste：粘贴剪贴板图片（截图等），插入到当前光标位置
  */
-export const imageUploadPlugin = (documentPath: string) =>
-  new Plugin({
+export const imageUploadPlugin = (documentPath: string | (() => string)) => {
+  const resolveDocPath = typeof documentPath === "function" ? documentPath : () => documentPath;
+  return new Plugin({
     key,
     props: {
       handleDrop: (view, event: DragEvent) => {
@@ -140,7 +149,7 @@ export const imageUploadPlugin = (documentPath: string) =>
         event.preventDefault();
         const coords = { left: event.clientX, top: event.clientY };
         const pos = view.posAtCoords(coords)?.pos ?? null;
-        void insertImages(Array.from(files), view, pos, documentPath);
+        void insertImages(Array.from(files), view, pos, resolveDocPath(), resolveDocPath);
         return true;
       },
       handlePaste: (view, event: ClipboardEvent) => {
@@ -149,8 +158,9 @@ export const imageUploadPlugin = (documentPath: string) =>
         if (!Array.from(files).some(isImageFile)) return false;
 
         event.preventDefault();
-        void insertImages(Array.from(files), view, null, documentPath);
+        void insertImages(Array.from(files), view, null, resolveDocPath(), resolveDocPath);
         return true;
       },
     },
   });
+};

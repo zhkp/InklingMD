@@ -18,6 +18,7 @@ import { Plugin, PluginKey } from "@milkdown/kit/prose/state";
 import { Decoration, DecorationSet } from "@milkdown/kit/prose/view";
 import type { EditorView } from "@milkdown/kit/prose/view";
 import type { Node } from "@milkdown/kit/prose/model";
+import { hydrationMetaKey } from "./tab-editor-cache";
 
 export const blockDragKey = new PluginKey("inkling-block-drag");
 
@@ -108,6 +109,29 @@ export const blockDragPlugin = () =>
         doc: state.doc,
       }),
       apply: (tr, value, _oldState, newState): BlockDragState => {
+        const hydration = tr.getMeta(hydrationMetaKey);
+        if (hydration?.hydrating) {
+          if (
+            typeof hydration.appendFromIndex === "number" &&
+            typeof hydration.appendFromPos === "number"
+          ) {
+            let decos = value.decos.map(tr.mapping, newState.doc);
+            const adds: Decoration[] = [];
+            let pos = hydration.appendFromPos;
+            for (let i = hydration.appendFromIndex; i < newState.doc.childCount; i += 1) {
+              adds.push(handleDecoration(pos));
+              pos += newState.doc.child(i).nodeSize;
+            }
+            if (adds.length) decos = decos.add(newState.doc, adds);
+            return { dropIndex: null, decos, doc: newState.doc };
+          }
+          return {
+            dropIndex: null,
+            decos: buildDecos(newState.doc, null),
+            doc: newState.doc,
+          };
+        }
+
         const meta = tr.getMeta(blockDragKey);
         let nextDropIndex = value.dropIndex;
         if (meta && typeof meta.dropIndex === "number") {

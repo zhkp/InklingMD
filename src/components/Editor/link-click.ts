@@ -87,8 +87,8 @@ function linkHrefFromMark(view: EditorView, event: MouseEvent): string {
 }
 
 export interface LinkClickPluginOptions {
-  /** 本编辑器实例的文档路径（主 / 分屏各一份；草稿为 untitled-N） */
-  documentPath: string;
+  /** 本编辑器实例的文档路径（主 / 分屏各一份；草稿为 untitled-N；支持动态 getter） */
+  documentPath: string | (() => string);
   /** 工作区根在点击时实时读取：工作区可能在编辑器挂载之后才打开 */
   workspaceRoot: () => string | null;
   /** 失败提示（Editor.tsx 的 LinkNotice） */
@@ -132,8 +132,10 @@ export function handleLinkClick(
   const follow = event.type === "click" && (event.ctrlKey || event.metaKey);
   if (!follow) return;
 
+  const docPath =
+    typeof opts.documentPath === "function" ? opts.documentPath() : opts.documentPath;
   const cls = classifyLink(href, {
-    documentPath: opts.documentPath,
+    documentPath: docPath,
     workspaceRoot: opts.workspaceRoot(),
   });
   performLinkAction(cls, {
@@ -143,7 +145,7 @@ export function handleLinkClick(
     openWorkspaceFile: opts.openWorkspaceFile,
     requestPendingAnchor: opts.requestPendingAnchor,
     cancelPendingAnchor: opts.cancelPendingAnchor,
-    selfPath: opts.documentPath,
+    selfPath: docPath,
     isSamePath: opts.isSamePath,
     getOpenError: opts.getOpenError,
   });

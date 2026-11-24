@@ -11,6 +11,7 @@ import type { EditorView } from "@milkdown/kit/prose/view";
 import {
   flushAllMarkdownPublishers,
 } from "./markdown-publisher";
+import { flushActiveHydration } from "./tab-editor-cache";
 import { markOutlineImmediateRefresh } from "./outline-tracker";
 import { useSettings } from "../../store/settings";
 import { useWorkspace } from "../../store/workspace";
@@ -177,6 +178,7 @@ export function useSourceModeTransition({
   getWysiwygTopPos,
 }: SourceModeTransitionOptions) {
   const prevSourceModeRef = useRef(sourceMode);
+  const prevFilePathRef = useRef(filePath);
   // Parsing failure updates local snapshot state and asynchronously flips the
   // store back to source mode. Ignore the intermediate local re-render so the
   // failing parser is not called in an update loop before the prop catches up.
@@ -215,12 +217,30 @@ export function useSourceModeTransition({
 
   useLayoutEffect(() => {
     const prev = prevSourceModeRef.current;
+    const fileChanged = prevFilePathRef.current !== filePath;
+    prevFilePathRef.current = filePath;
+    if (fileChanged) {
+      // 切 tab 引起的 filePath 变化不属于同文件 WYSIWYG↔源码模式切换：
+      // 取消前一个文件的退出过渡帧，并按新 tab 的 sourceMode 同步重置 enterSnapshot。
+      cancelPendingRestoreRef.current();
+      exitSnapshotRef.current = null;
+      parseFailurePendingRef.current = false;
+      if (sourceMode) {
+        const { pos, scrollTop } = useWorkspace.getState().getCursorStateFor(filePath);
+        setEnterSnapshot({ cursor: pos ?? 0, scrollTop: scrollTop ?? 0 });
+      } else {
+        setEnterSnapshot(null);
+      }
+      prevSourceModeRef.current = sourceMode;
+      return;
+    }
     if (parseFailurePendingRef.current) {
       if (sourceMode) parseFailurePendingRef.current = false;
       prevSourceModeRef.current = sourceMode;
       return;
     }
     if (sourceMode && !prev) {
+      flushActiveHydration();
       const settings = useSettings.getState();
       if (settings.focusMode) settings.setFocusMode(false);
       if (settings.typewriterMode) settings.setTypewriterMode(false);

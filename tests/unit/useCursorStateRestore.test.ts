@@ -68,6 +68,7 @@ describe("useCursorStateRestore", () => {
         useCursorStateRestore({
           sourceMode,
           filePath: "/tmp/a.md",
+          revision: 0,
           loading: false,
           getEditor: () => editor as never,
         }),
@@ -99,6 +100,7 @@ describe("useCursorStateRestore", () => {
         useCursorStateRestore({
           sourceMode,
           filePath: "/tmp/a.md",
+          revision: 0,
           loading: false,
           getEditor: () => editor as never,
         }),
@@ -130,6 +132,7 @@ describe("useCursorStateRestore", () => {
         useCursorStateRestore({
           sourceMode: false,
           filePath,
+          revision: 0,
           loading: false,
           getEditor: () => editor as never,
         }),
@@ -156,6 +159,7 @@ describe("useCursorStateRestore", () => {
       useCursorStateRestore({
         sourceMode: false,
         filePath: "/tmp/c.md",
+        revision: 0,
         loading: false,
         getEditor: () => editor as never,
       }),

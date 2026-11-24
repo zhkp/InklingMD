@@ -13,6 +13,7 @@ import {
   scrollToCurrent,
   type SearchOpts,
 } from "./search";
+import { flushActiveHydration } from "./tab-editor-cache";
 import { IconChevronDown, IconChevronRight, IconX } from "../icons";
 import "./SearchPanel.css";
 
@@ -71,6 +72,7 @@ export function SearchPanel({ getEditor, onClose, showReplace, onShowReplaceChan
   useEffect(() => {
     const editor = getEditor();
     if (!editor) return;
+    if (debouncedFind) flushActiveHydration();
     const opts: SearchOpts = { find: debouncedFind, caseSensitive, useRegex };
     editor.action((ctx) => {
       const view = ctx.get(editorViewCtx);

@@ -19,6 +19,7 @@ import { editorViewCtx } from "@milkdown/kit/core";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { save } from "@tauri-apps/plugin-dialog";
 import { flushAllMarkdownPublishers } from "../components/Editor/markdown-publisher";
+import { flushActiveHydration } from "../components/Editor/tab-editor-cache";
 import { useWorkspace } from "../store/workspace";
 import { createDir, resolvePathFromDocument, writeBinaryFile } from "./fs";
 import { showMessage } from "./dialogs";
@@ -61,6 +62,7 @@ async function prepareExportBody(
   mode: ResourceMode,
   sidecarDir?: string,
 ): Promise<PreparedExport | null> {
+  flushActiveHydration();
   const editor = getEditor();
   if (!editor) return null;
   const view = editor.action((ctx) => ctx.get(editorViewCtx));

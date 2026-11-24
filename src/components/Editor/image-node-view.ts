@@ -318,7 +318,9 @@ export class ImageNodeView implements NodeView {
 }
 
 /** 图片 NodeView 插件：相对路径转可加载 URL + 缩放 + 对齐 */
-export const imageView = (documentPath: string) =>
-  $view(imageSchema.node, () => (node, view, getPos) =>
-    new ImageNodeView(node, view, getPos, documentPath),
+export const imageView = (documentPath: string | (() => string)) => {
+  const resolveDocPath = typeof documentPath === "function" ? documentPath : () => documentPath;
+  return $view(imageSchema.node, () => (node, view, getPos) =>
+    new ImageNodeView(node, view, getPos, resolveDocPath()),
   );
+};

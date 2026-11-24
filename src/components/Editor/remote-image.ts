@@ -17,6 +17,7 @@ import { Plugin, PluginKey } from "@milkdown/kit/prose/state";
 import { isHistoryTransaction } from "@milkdown/kit/prose/history";
 import type { EditorView } from "@milkdown/kit/prose/view";
 import type { Node as PMNode } from "@milkdown/kit/prose/model";
+import { hydrationMetaKey } from "./tab-editor-cache";
 import { downloadRemoteImage, mapRemoteImageError, type RemoteImage } from "../../lib/fs";
 import { extensionForMime, genAssetName, saveImageAsset } from "../../lib/assetStore";
 import { showMessage } from "../../lib/dialogs";
@@ -28,7 +29,7 @@ export const MAX_REMOTE_IMAGES_PER_PASTE = 30;
 const DOWNLOAD_CONCURRENCY = 3;
 
 export interface RemoteImageDeps {
-  documentPath: string;
+  documentPath: string | (() => string);
   /** 以下可注入，便于单测 */
   download?: (url: string) => Promise<RemoteImage>;
   save?: (documentPath: string, data: Uint8Array, fileName: string) => Promise<string>;
@@ -117,17 +118,25 @@ function describeFailure(error: unknown): string {
   }
 }
 
+type ResolvedRemoteImageDeps = {
+  resolveDocumentPath: () => string;
+  download: (url: string) => Promise<RemoteImage>;
+  save: (documentPath: string, data: Uint8Array, fileName: string) => Promise<string>;
+  notify: (message: string) => void;
+};
+
 class Runner {
   cancelled = false;
   private nextId = 1;
 
   constructor(
     private readonly view: EditorView,
-    private readonly deps: Required<RemoteImageDeps>,
+    private readonly deps: ResolvedRemoteImageDeps,
   ) {}
 
   enqueue(items: { pos: number; src: string }[]): Promise<void> {
-    if (this.cancelled || isUntitledPath(this.deps.documentPath)) return Promise.resolve();
+    const docPath = this.deps.resolveDocumentPath();
+    if (this.cancelled || isUntitledPath(docPath)) return Promise.resolve();
     // 粘贴路径与历史回放入口可能先后投递同一批图片：按 (位置, 地址) 去重——
     // 已登记的 pending 不再重复入队（重复下载纯属浪费，内容哈希去重不能替代）
     const registered = new Set(
@@ -143,7 +152,7 @@ class Runner {
       .map((i) => ({ id: this.nextId++, pos: i.pos, src: i.src }));
     if (add.length === 0) return Promise.resolve();
     this.dispatchMeta({ add });
-    return this.run(srcs);
+    return this.run(srcs, docPath);
   }
 
   private dispatchMeta(meta: RemoteImageMeta) {
@@ -151,7 +160,7 @@ class Runner {
     this.view.dispatch(tr);
   }
 
-  private async run(srcs: string[]): Promise<void> {
+  private async run(srcs: string[], docPath: string): Promise<void> {
     const failures: { src: string; reason: string }[] = [];
     const queue = [...srcs];
     const worker = async () => {
@@ -160,30 +169,30 @@ class Runner {
         try {
           image = await this.deps.download(src);
         } catch (error) {
-          this.replace(src, null);
+          this.replace(src, null, docPath);
           // SVG 是设计上的「不下载」，不算失败
           if (mapRemoteImageError(error).kind !== "svg") {
             failures.push({ src, reason: describeFailure(error) });
           }
           continue;
         }
-        if (this.cancelled) return;
+        if (this.cancelled || this.deps.resolveDocumentPath() !== docPath) return;
         try {
           const rel = await this.deps.save(
-            this.deps.documentPath,
+            docPath,
             image.data,
             genAssetName(extensionForMime(image.mime)),
           );
-          this.replace(src, rel);
+          this.replace(src, rel, docPath);
         } catch (error) {
-          this.replace(src, null);
+          this.replace(src, null, docPath);
           const reason = error instanceof Error ? error.message : String(error);
           failures.push({ src, reason: `保存到 assets/ 失败（${reason}）` });
         }
       }
     };
     await Promise.all(Array.from({ length: Math.min(DOWNLOAD_CONCURRENCY, srcs.length) }, worker));
-    if (failures.length > 0 && !this.cancelled) {
+    if (failures.length > 0 && !this.cancelled && this.deps.resolveDocumentPath() === docPath) {
       const lines = failures.map((f) => `• ${shortUrl(f.src)}：${f.reason}`).join("\n");
       this.deps.notify(
         `${failures.length} 张远程图片未能保存到本地 assets/，已保留远程链接：\n${lines}`,
@@ -192,8 +201,8 @@ class Runner {
   }
 
   /** 把仍指向 src 的待替换节点改为本地相对路径；rel 为 null 表示放弃（保留远程 URL） */
-  private replace(src: string, rel: string | null) {
-    if (this.cancelled || this.view.isDestroyed) return;
+  private replace(src: string, rel: string | null, docPath: string) {
+    if (this.cancelled || this.view.isDestroyed || this.deps.resolveDocumentPath() !== docPath) return;
     const state = remoteImageKey.getState(this.view.state);
     const targets = state?.pending.filter((p) => p.src === src) ?? [];
     if (targets.length === 0) return;
@@ -226,8 +235,10 @@ export function queueRemoteImages(
 }
 
 export const remoteImagePlugin = (deps: RemoteImageDeps) => {
-  const resolved: Required<RemoteImageDeps> = {
-    documentPath: deps.documentPath,
+  const resolveDocumentPath =
+    typeof deps.documentPath === "function" ? deps.documentPath : () => deps.documentPath as string;
+  const resolved: ResolvedRemoteImageDeps = {
+    resolveDocumentPath,
     download: deps.download ?? downloadRemoteImage,
     save: deps.save ?? saveImageAsset,
     notify: deps.notify ?? ((message) => void showMessage(message, { kind: "warning" })),
@@ -237,6 +248,9 @@ export const remoteImagePlugin = (deps: RemoteImageDeps) => {
     state: {
       init: () => ({ pending: [], replaySeq: 0 }),
       apply: (tr, prev) => {
+        if (tr.getMeta(hydrationMetaKey)?.hydrating) {
+          return prev.pending.length === 0 && prev.replaySeq === 0 ? prev : { pending: [], replaySeq: 0 };
+        }
         let pending = prev.pending;
         if (tr.docChanged && pending.length > 0) {
           pending = pending.flatMap((p) => {

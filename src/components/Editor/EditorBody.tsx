@@ -84,8 +84,8 @@ export const EditorBody = memo(function EditorBody({
           )}
           <EditorErrorBoundary fileName={currentFile}>
             <MarkdownEditor
-              key={`${currentFile}-${mainRevision}`}
               filePath={currentFile}
+              revision={mainRevision}
               value={currentContent}
               onChange={(md) =>
                 useWorkspace.getState().setContentFor(currentFile, md)

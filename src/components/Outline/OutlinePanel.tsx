@@ -13,6 +13,7 @@ import {
 } from "../../lib/outline";
 import { runSourceModeScrollToHeading } from "../../lib/source-mode-scroll";
 import { selectOutlineForFile, useOutline } from "../../store/outline";
+import { flushActiveHydration } from "../Editor/tab-editor-cache";
 import {
   reuseOutlineItems,
   type CachedOutlineItem,
@@ -130,6 +131,7 @@ function scrollToHeading(
 
   const editor = getEditor();
   if (!editor) return;
+  flushActiveHydration();
   editor.action((ctx) => {
     const view = ctx.get(editorViewCtx);
     const doc = view.state.doc;

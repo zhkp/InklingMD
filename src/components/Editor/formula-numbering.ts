@@ -9,6 +9,7 @@
 
 import { Plugin, PluginKey } from "@milkdown/kit/prose/state";
 import { useSettings } from "../../store/settings";
+import { hydrationMetaKey } from "./tab-editor-cache";
 
 export const formulaNumberingKey = new PluginKey("inkling-formula-numbering");
 
@@ -59,6 +60,15 @@ export const formulaNumberingPlugin = () =>
   new Plugin({
     key: formulaNumberingKey,
     appendTransaction: (trs, _oldState, newState) => {
+      // 渐进式水合的中间分片跳过全树重算，等末片到齐再统一校验/编号；
+      // 缓存命中的末片也跳过——那份 doc 是从同一个编辑器缓存下来的，
+      // 编号属性本来就已经写好（#426）。
+      if (trs.some((t) => {
+        const m = t.getMeta(hydrationMetaKey);
+        return m?.hydrating && (m.fromCache || !m.done);
+      })) {
+        return null;
+      }
       // 仅在文档变更或显式 recalc 时重算，避免纯选区移动也全树遍历
       const docChanged = trs.some((t) => t.docChanged);
       const recalc = trs.some((t) => (t.getMeta(formulaNumberingKey) as FormulaNumberingMeta | undefined)?.recalc);

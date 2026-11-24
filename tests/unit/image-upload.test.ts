@@ -185,4 +185,34 @@ describe("imageUploadPlugin 粘贴图片", () => {
       { kind: "info" },
     );
   });
+
+  it("落盘期间切走 tab（文档路径变化）不再把图片插进新 tab（#426 评审 B2）", async () => {
+    // 编辑器实例跨 tab 复用后，异步上传必须复核「还是同一份文档」：
+    // 这里让写盘 promise 挂起，期间把 getter 指向新 tab，再放行。
+    let releaseWrite: (() => void) | null = null;
+    writeBinaryFileMock.mockImplementationOnce(
+      () => new Promise<void>((resolve) => {
+        releaseWrite = resolve;
+      }),
+    );
+    let currentPath = "/docs/note.md";
+    const plugin = imageUploadPlugin(() => currentPath);
+    const file = new File([new Uint8Array([1, 2, 3])], "late.png", {
+      type: "image/png",
+    });
+    (plugin.props.handlePaste as any)(view, makePasteEvent(file));
+    await flushAsync();
+
+    // 写盘尚未返回：此时切到另一个 tab
+    expect(releaseWrite).not.toBeNull();
+    const docBefore = view.state.doc;
+    currentPath = "/docs/other.md";
+    releaseWrite!();
+    await flushAsync();
+
+    // 文档未被改写（没有图片节点、doc 引用不变），也不会有「插入失败」误报
+    expect(view.state.doc).toBe(docBefore);
+    expect(view.state.doc.firstChild?.content.firstChild?.type.name).toBe("text");
+    expect(showMessageMock).not.toHaveBeenCalled();
+  });
 });

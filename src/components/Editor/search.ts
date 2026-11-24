@@ -8,6 +8,7 @@ import type { Transaction } from "@milkdown/kit/prose/state";
 import { Decoration, DecorationSet } from "@milkdown/kit/prose/view";
 import type { EditorView } from "@milkdown/kit/prose/view";
 import type { Node } from "@milkdown/kit/prose/model";
+import { hydrationMetaKey } from "./tab-editor-cache";
 
 export interface SearchOpts {
   find: string;
@@ -232,6 +233,11 @@ export const searchPlugin = () => {
     state: {
       init: () => ({ opts: null, matches: [], current: -1, deco: DecorationSet.empty }),
       apply: (tr, value, _oldState, newState) => {
+        if (tr.getMeta(hydrationMetaKey)?.hydrating) {
+          return value.opts === null && value.matches.length === 0 && value.current === -1
+            ? value
+            : { opts: null, matches: [], current: -1, deco: DecorationSet.empty };
+        }
         const meta = tr.getMeta(searchKey) as SearchMeta | undefined;
         if (meta?.type === "clear") {
           return { opts: null, matches: [], current: -1, deco: DecorationSet.empty };

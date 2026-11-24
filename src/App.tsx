@@ -161,6 +161,16 @@ function App() {
     onNewTab: () => {
       pendingFocusRef.current = true;
       useWorkspace.getState().newTab();
+      // 编辑器实例现在跨 tab 复用（#426），不会再因重挂触发 onReady → 这里显式聚焦：
+      // 新建草稿后焦点若停在侧边栏/标签栏，用户直接输入会丢字。
+      requestAnimationFrame(() => {
+        pendingFocusRef.current = false;
+        const editor = getEditor();
+        if (!editor) return;
+        editor.action((ctx) => {
+          ctx.get(editorViewCtx).focus();
+        });
+      });
     },
     // 模态类快捷键一律走 requestModal：互斥规则只在这一处生效
     openGlobalSearch: () => requestModal("globalSearch"),
