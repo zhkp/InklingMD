@@ -44,7 +44,7 @@ describe("exporter lib unit tests", () => {
   });
 
   it("exportOutline should parse outline structure and trigger download in browser", async () => {
-    const md = ISSUE_382_OUTLINE_MARKDOWN;
+    const md = `${ISSUE_382_OUTLINE_MARKDOWN}\n# foo_bar_baz`;
     useWorkspace.setState({
       currentContent: md,
       currentFile: "/notes/sample.md",
@@ -82,6 +82,8 @@ describe("exporter lib unit tests", () => {
     expect(createdBlobs).toHaveLength(1);
 
     const exportedMarkdown = await createdBlobs[0].text();
+    expect(exportedMarkdown).toContain("\n- foo_bar_baz\n");
+    expect(exportedMarkdown).toContain("\n# foo_bar_baz");
     const sidebarHeadings = extractMarkdownOutline(md);
     const expectedMarkdown = [
       "# sample 目录",

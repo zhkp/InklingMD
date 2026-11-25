@@ -101,6 +101,28 @@ describe("parseOutline", () => {
     expect(hs[1].text).toBe("1.1 背景");
   });
 
+  it("preserves underscores inside words in sidebar and exported headings", () => {
+    const md =
+      "# foo_bar_baz\n## foo__bar__baz\n### _foo_bar_baz_\n#### __foo_bar_baz__";
+    const sidebar = extractMarkdownOutline(md);
+    const exported = parseOutline(md);
+    const expected = [
+      { level: 1, text: "foo_bar_baz" },
+      { level: 2, text: "foo__bar__baz" },
+      { level: 3, text: "foo_bar_baz" },
+      { level: 4, text: "foo_bar_baz" },
+    ];
+
+    expect(sidebar[0].text).toBe("foo_bar_baz");
+    expect(exported[0].text).toBe("foo_bar_baz");
+    expect(sidebar.map(({ level, text }) => ({ level, text }))).toEqual(expected);
+    expect(exported.map(({ level, text }) => ({ level, text }))).toEqual(expected);
+    expect(exported.map(({ id }) => id)).toEqual(sidebar.map(({ id }) => id));
+    expect(exported.map(({ offset }) => offset)).toEqual(
+      sidebar.map(({ pos }) => pos),
+    );
+  });
+
   it("缩进的 # 不算标题", () => {
     const md = "  # 缩进标题\n# 真标题";
     const hs = parseOutline(md);
