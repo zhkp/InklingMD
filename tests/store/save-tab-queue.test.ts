@@ -81,6 +81,88 @@ describe("saveTab（#364）", () => {
     expect(state.dirty).toBe(true);
   });
 
+  it("切换 tab 后，迟到的保存完成不覆盖另一个在途保存的活跃镜像", async () => {
+    const gateA = deferred<{ kind: "written"; stat: { mtimeUs: number; size: number }; foreignWrite: boolean }>();
+    const gateB = deferred<{ kind: "written"; stat: { mtimeUs: number; size: number }; foreignWrite: boolean }>();
+    saveDocumentMock.mockReturnValueOnce(gateA.promise).mockReturnValueOnce(gateB.promise);
+    useWorkspace.setState({
+      openTabs: [
+        tab(A, { diskStat: { mtimeUs: 1_000, size: 1 } }),
+        tab(B, {
+          content: "tab B",
+          dirty: true,
+          conflictPending: false,
+          diskStat: { mtimeUs: 1_000, size: 1 },
+        }),
+      ],
+      activeTabPath: A,
+      currentFile: A,
+      currentContent: "改动",
+      dirty: true,
+      saving: false,
+      saveError: null,
+      conflictPending: false,
+      lastSavedAt: null,
+    } as never);
+
+    const savingA = useWorkspace.getState().saveTab(A, { interactive: true });
+    await vi.waitFor(() => expect(saveDocumentMock).toHaveBeenCalledTimes(1));
+
+    useWorkspace.getState().switchTab(B);
+    expect(useWorkspace.getState().activeTabPath).toBe(B);
+    expect(useWorkspace.getState().saving).toBe(false);
+
+    const savingB = useWorkspace.getState().saveTab(B, { interactive: true });
+    await vi.waitFor(() => expect(saveDocumentMock).toHaveBeenCalledTimes(2));
+    expect(useWorkspace.getState().saving).toBe(true);
+
+    gateA.resolve(written(A, "改动"));
+    await savingA;
+
+    const whileBStillSaving = useWorkspace.getState();
+    expect(whileBStillSaving.openTabs.find((t) => t.path === A)).toMatchObject({
+      dirty: false,
+      saving: false,
+      conflictPending: false,
+    });
+    expect(whileBStillSaving.openTabs.find((t) => t.path === B)).toMatchObject({
+      dirty: true,
+      saving: true,
+      conflictPending: false,
+    });
+    expect(whileBStillSaving.activeTabPath).toBe(B);
+    expect(whileBStillSaving.currentFile).toBe(B);
+    expect(whileBStillSaving.currentContent).toBe("tab B");
+    expect(whileBStillSaving.dirty).toBe(true);
+    expect(whileBStillSaving.saving).toBe(true);
+    expect(whileBStillSaving.conflictPending).toBe(false);
+
+    gateB.resolve(written(B, "tab B"));
+    await savingB;
+
+    const state = useWorkspace.getState();
+    expect(state.openTabs.find((t) => t.path === A)).toMatchObject({
+      dirty: false,
+      saving: false,
+      conflictPending: false,
+    });
+    expect(state.openTabs.find((t) => t.path === B)).toMatchObject({
+      dirty: false,
+      saving: false,
+      conflictPending: false,
+    });
+    const activeTab = state.openTabs.find((t) => t.path === B);
+    expect(state.activeTabPath).toBe(B);
+    expect(state.currentFile).toBe(B);
+    expect(state.currentContent).toBe("tab B");
+    expect(state.dirty).toBe(activeTab?.dirty ?? false);
+    expect(state.saving).toBe(!!activeTab?.saving);
+    expect(state.conflictPending).toBe(!!activeTab?.conflictPending);
+    expect(state.dirty).toBe(false);
+    expect(state.saving).toBe(false);
+    expect(state.conflictPending).toBe(false);
+  });
+
   it("非交互保存遇到 conflictPending 直接返回（调度器不空转）", async () => {
     useWorkspace.setState({
       openTabs: [tab(A), tab(B, { conflictPending: true })],

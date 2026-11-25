@@ -180,12 +180,19 @@ describe("useFileWatcher & deletedOnDisk", () => {
     });
 
     useWorkspace.getState().switchTab("/workspace/doc2.md");
+    // 验证期间注入一次陈旧顶层镜像，确保真冲突异步出口会重新从活跃 tab 同步。
+    expect(useWorkspace.getState().activeTabPath).toBe("/workspace/doc2.md");
+    useWorkspace.setState({ dirty: false, saving: true });
 
     await vi.waitFor(() => {
       // 本地有改动 → 不静默重载，置 conflictPending 让状态栏可见
       const tab2 = useWorkspace.getState().openTabs.find((t) => t.path === "/workspace/doc2.md");
+      const state = useWorkspace.getState();
       expect(useWorkspace.getState().conflictPending).toBe(true);
       expect(tab2?.conflictPending).toBe(true);
+      expect(state.dirty).toBe(tab2?.dirty ?? false);
+      expect(state.saving).toBe(!!tab2?.saving);
+      expect(state.conflictPending).toBe(!!tab2?.conflictPending);
       // 并调起冲突对话框，携带本地内容与磁盘内容
       expect(openConflictSpy).toHaveBeenCalledWith(
         expect.objectContaining({
