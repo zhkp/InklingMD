@@ -1,6 +1,6 @@
 // 大纲标题解析
-// 从 markdown 文本中解析标题，生成带层级的树结构。
-// Markdown 源文本解析用于导出；编辑器面板使用 ProseMirror 渲染节点。
+// 从 Markdown / ProseMirror 文档中提取带层级的标题。
+// 源码模式和导出共用 Markdown 解析器；普通编辑器面板读取 ProseMirror 节点。
 
 import type { Node as ProseMirrorNode } from "@milkdown/kit/prose/model";
 import { perfProbeEnd, perfProbeStart } from "./perf-probe";
@@ -38,7 +38,7 @@ export const EMPTY_EDITOR_OUTLINE: EditorOutlineSnapshot = {
 export interface OutlineHeading {
   /** 标题层级 1-6 */
   level: number;
-  /** 标题文本（去除 # 前缀和尾部标记） */
+  /** 标题的可见文本（去除 Markdown 行内语法、# 前缀和尾部标记） */
   text: string;
   /** 在原文中的字符偏移（用于定位） */
   offset: number;
@@ -281,15 +281,19 @@ function cleanMarkdownText(raw: string): string {
  */
 export const MAX_FRONTMATTER_SCAN_LINES = 100;
 
+interface ParsedMarkdownHeading {
+  level: number;
+  text: string;
+  offset: number;
+  line: number;
+}
+
 /**
- * 从 Markdown 文本中提取大纲条目（包含 offset、行号 line 等元数据）
- * 供源码模式（Source Mode）下的 OutlinePanel 渲染及同步。
+ * Markdown 源码大纲的唯一解析入口，统一 frontmatter、围栏和标题文本口径。
+ * 返回干净的可见文本，供源码侧栏与导出大纲共同使用。
  */
-export function extractMarkdownOutline(
-  markdown: string,
-): EditorOutlineHeading[] {
-  const probeStart = perfProbeStart();
-  const headings: EditorOutlineHeading[] = [];
+function parseMarkdownHeadings(markdown: string): ParsedMarkdownHeading[] {
+  const headings: ParsedMarkdownHeading[] = [];
   const lines = markdown.split("\n");
   let offset = 0;
   let inFence: string | null = null;
@@ -310,12 +314,16 @@ export function extractMarkdownOutline(
     if (inFrontmatter) {
       if (trimmed === "---" || trimmed === "...") {
         inFrontmatter = false;
-      } else if (i - frontmatterStartLine > MAX_FRONTMATTER_SCAN_LINES) {
-        // 超出合理行数上限视作未闭合 frontmatter，退出 frontmatter 状态回退为普通文本
-        inFrontmatter = false;
+        offset += line.length + 1;
+        continue;
       }
-      offset += line.length + 1;
-      continue;
+      if (i - frontmatterStartLine <= MAX_FRONTMATTER_SCAN_LINES) {
+        offset += line.length + 1;
+        continue;
+      }
+
+      // 未闭合 frontmatter 超限时，当前行按普通 Markdown 继续解析。
+      inFrontmatter = false;
     }
 
     // 围栏代码块检测
@@ -332,20 +340,14 @@ export function extractMarkdownOutline(
     }
 
     if (inFence === null) {
-      const m = trimmed.match(/^(#{1,6})\s+(.+?)\s*#*\s*$/);
-      if (m) {
-        const level = m[1].length;
-        const rawContent = m[2].trim();
-        const text = cleanMarkdownText(rawContent);
+      const match = trimmed.match(/^(#{1,6})\s+(.+?)\s*#*\s*$/);
+      if (match) {
+        const text = cleanMarkdownText(match[2].trim());
         if (text) {
-          const index = headings.length;
           headings.push({
-            index,
-            level,
+            level: match[1].length,
             text,
-            pos: offset,
-            nodeId: null,
-            id: `h-${index}-${slugify(text)}`,
+            offset,
             line: i + 1,
           });
         }
@@ -355,78 +357,38 @@ export function extractMarkdownOutline(
     offset += line.length + 1;
   }
 
+  return headings;
+}
+
+/**
+ * 从 Markdown 文本中提取大纲条目（包含 offset、行号 line 等元数据）
+ * 供源码模式（Source Mode）下的 OutlinePanel 渲染及同步。
+ */
+export function extractMarkdownOutline(
+  markdown: string,
+): EditorOutlineHeading[] {
+  const probeStart = perfProbeStart();
+  const headings = parseMarkdownHeadings(markdown).map((heading, index) => ({
+    index,
+    level: heading.level,
+    text: heading.text,
+    pos: heading.offset,
+    nodeId: null,
+    id: `h-${index}-${slugify(heading.text)}`,
+    line: heading.line,
+  }));
   perfProbeEnd("outlineExtract", probeStart);
   return headings;
 }
 
 /**
- * 解析 markdown 文本中的标题。
- * - 支持 ATX 风格 # ~ ######
- * - 跳过代码块内的 # 行（用 ``` 和 ~~~ 围栏判断）
- * - 跳过空标题（# 后无内容）
- * - setext 风格（下划 === / ---）暂不支持，保持简单
+ * 适配为导出使用的偏移字段，解析规则和可见文本与源码侧栏保持一致。
  */
 export function parseOutline(markdown: string): OutlineHeading[] {
-  const headings: OutlineHeading[] = [];
-  const lines = markdown.split("\n");
-  let offset = 0;
-  let inFence: string | null = null; // 当前围栏标记（``` 或 ~~~）
-  let inFrontmatter = false;
-  let frontmatterStartLine = -1;
-
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    const trimmed = line.trim();
-
-    // 文档首部 frontmatter 区域检测
-    if (i === 0 && trimmed === "---") {
-      inFrontmatter = true;
-      frontmatterStartLine = 0;
-      offset += line.length + 1;
-      continue;
-    }
-    if (inFrontmatter) {
-      if (trimmed === "---" || trimmed === "...") {
-        inFrontmatter = false;
-      } else if (i - frontmatterStartLine > MAX_FRONTMATTER_SCAN_LINES) {
-        // 超出合理行数上限视作未闭合 frontmatter，退出 frontmatter 状态回退为普通文本
-        inFrontmatter = false;
-      }
-      offset += line.length + 1;
-      continue;
-    }
-
-    // 围栏代码块开闭检测
-    const fenceMatch = trimmed.match(/^(`{3,}|~{3,})/);
-    if (fenceMatch) {
-      const fence = fenceMatch[1];
-      if (inFence === null) {
-        inFence = fence[0].repeat(fence.length);
-      } else if (fence[0] === inFence[0] && fence.length >= inFence.length) {
-        inFence = null;
-      }
-      offset += line.length + 1;
-      continue;
-    }
-
-    if (inFence === null) {
-      const m = trimmed.match(/^(#{1,6})\s+(.+?)\s*#*\s*$/);
-      if (m) {
-        const level = m[1].length;
-        const text = m[2].trim();
-        if (text) {
-          headings.push({
-            level,
-            text,
-            offset,
-            id: `h-${headings.length}-${slugify(text)}`,
-          });
-        }
-      }
-    }
-
-    offset += line.length + 1; // +1 for \n
-  }
-
-  return headings;
+  return parseMarkdownHeadings(markdown).map((heading, index) => ({
+    level: heading.level,
+    text: heading.text,
+    offset: heading.offset,
+    id: `h-${index}-${slugify(heading.text)}`,
+  }));
 }

@@ -1,6 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { exportOutline, copyMarkdown, waitForImages } from "../../src/lib/exporter";
+import { extractMarkdownOutline } from "../../src/lib/outline";
 import { useWorkspace } from "../../src/store/workspace";
+import { ISSUE_382_OUTLINE_MARKDOWN } from "../fixtures/issue382Outline";
 
 describe("exporter lib unit tests", () => {
   beforeEach(() => {
@@ -42,14 +44,18 @@ describe("exporter lib unit tests", () => {
   });
 
   it("exportOutline should parse outline structure and trigger download in browser", async () => {
-    const md = "# Title 1\n\nText\n\n## Subtitle 1.1\n\n### Sub 1.1.1\n\n# Title 2";
+    const md = ISSUE_382_OUTLINE_MARKDOWN;
     useWorkspace.setState({
       currentContent: md,
       currentFile: "/notes/sample.md",
     });
 
     // Mock URL.createObjectURL and click
-    const createObjectURLMock = vi.fn().mockReturnValue("blob:mock-url");
+    const createdBlobs: Blob[] = [];
+    const createObjectURLMock = vi.fn((blob: Blob) => {
+      createdBlobs.push(blob);
+      return "blob:mock-url";
+    });
     const revokeObjectURLMock = vi.fn();
     (globalThis as unknown as { URL: { createObjectURL: unknown; revokeObjectURL: unknown } }).URL.createObjectURL = createObjectURLMock;
     (globalThis as unknown as { URL: { createObjectURL: unknown; revokeObjectURL: unknown } }).URL.revokeObjectURL = revokeObjectURLMock;
@@ -73,5 +79,25 @@ describe("exporter lib unit tests", () => {
     expect(clicked).toBe(true);
     expect(downloadedFileName).toBe("sample-outline.md");
     expect(createObjectURLMock).toHaveBeenCalled();
+    expect(createdBlobs).toHaveLength(1);
+
+    const exportedMarkdown = await createdBlobs[0].text();
+    const sidebarHeadings = extractMarkdownOutline(md);
+    const expectedMarkdown = [
+      "# sample 目录",
+      "",
+      ...sidebarHeadings.map(
+        (heading) => `${"  ".repeat(heading.level - 1)}- ${heading.text}`,
+      ),
+      "",
+      "---",
+      "",
+      "## 原始标题结构",
+      "",
+      ...sidebarHeadings.map(
+        (heading) => `${"#".repeat(heading.level)} ${heading.text}`,
+      ),
+    ].join("\n");
+    expect(exportedMarkdown).toBe(expectedMarkdown);
   });
 });

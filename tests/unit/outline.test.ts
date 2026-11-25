@@ -8,8 +8,10 @@ import {
   extractMarkdownOutline,
   findActiveHeadingIndex,
   isSameMarkdownOutline,
+  MAX_FRONTMATTER_SCAN_LINES,
   type EditorOutlineHeading,
 } from "../../src/lib/outline";
+import { ISSUE_382_OUTLINE_MARKDOWN } from "../fixtures/issue382Outline";
 
 describe("parseOutline", () => {
   it("解析 ATX 风格标题 # ~ ######", () => {
@@ -126,6 +128,28 @@ describe("parseOutline", () => {
     expect(hs[1].pos).toBeGreaterThan(0);
   });
 
+  it("frontmatter 超限触发的当前行继续解析，并保持两种 API 的原文位置", () => {
+    const md = `---\n${"metadata: value\n".repeat(MAX_FRONTMATTER_SCAN_LINES)}# **Cutoff title**`;
+    const expectedOffset = md.indexOf("# **Cutoff title**");
+    const sidebar = extractMarkdownOutline(md);
+    const exported = parseOutline(md);
+
+    expect(sidebar).toHaveLength(1);
+    expect(sidebar[0]).toMatchObject({
+      level: 1,
+      text: "Cutoff title",
+      pos: expectedOffset,
+      line: MAX_FRONTMATTER_SCAN_LINES + 2,
+    });
+    expect(exported).toHaveLength(1);
+    expect(exported[0]).toMatchObject({
+      level: sidebar[0].level,
+      text: sidebar[0].text,
+      offset: expectedOffset,
+      id: sidebar[0].id,
+    });
+  });
+
   it("未闭合 frontmatter 超过行数上限自动退出，不影响后续标题解析", () => {
     const md =
       "---\ntitle: 未闭合\n" +
@@ -134,6 +158,33 @@ describe("parseOutline", () => {
     const hs = extractMarkdownOutline(md);
     expect(hs.length).toBeGreaterThan(0);
     expect(hs[0].text).toBe("正常标题");
+    const exported = parseOutline(md);
+    expect(exported.map(({ level, text, offset }) => [level, text, offset])).toEqual(
+      hs.map(({ level, text, pos }) => [level, text, pos]),
+    );
+  });
+});
+
+describe("Issue #382 outline parser consistency", () => {
+  it("keeps sidebar and export headings aligned while preserving source locations", () => {
+    const sidebar = extractMarkdownOutline(ISSUE_382_OUTLINE_MARKDOWN);
+    const exported = parseOutline(ISSUE_382_OUTLINE_MARKDOWN);
+    const expected = [
+      { level: 1, text: "Title 1 guide code" },
+      { level: 2, text: "Title 2 diagram" },
+    ];
+
+    expect(sidebar.map(({ level, text }) => ({ level, text }))).toEqual(expected);
+    expect(exported.map(({ level, text }) => ({ level, text }))).toEqual(expected);
+    expect(exported.map(({ id }) => id)).toEqual(sidebar.map(({ id }) => id));
+    expect(exported.map(({ offset }) => offset)).toEqual(
+      sidebar.map(({ pos }) => pos),
+    );
+    expect(sidebar.map(({ line }) => line)).toEqual([4, 10]);
+    expect(sidebar.map(({ pos }) => pos)).toEqual([
+      ISSUE_382_OUTLINE_MARKDOWN.indexOf("# **Title 1**"),
+      ISSUE_382_OUTLINE_MARKDOWN.indexOf("## ~~Title 2~~"),
+    ]);
   });
 });
 
