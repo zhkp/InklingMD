@@ -1,7 +1,9 @@
 // #365 / #378 崩溃恢复：检测 → 恢复 / 丢弃 → TTL 清理
 //
-// 这一层的失败模式都是「拿错东西覆盖用户已改好的文件」，所以断言都落在
-// 文件系统状态与恢复出来的 tab 属性上（dirty / 无磁盘基线），不看调用次数。
+// 这一层的失败模式都是「拿错东西覆盖用户已改好的文件」，所以恢复语义类断言都落在
+// 文件系统状态与恢复出来的 tab 属性上（dirty / 无磁盘基线），不看调用次数；
+// 唯一例外是 #409 的默认 IO 接线用例：它必须断言「真实命令被谁以什么参数调用」，
+// 因为那条链路要证的正是 listDirFiles → 判龄 → deletePath 的接线本身。
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -24,9 +26,22 @@ vi.mock("../../src/components/Editor/markdown-publisher", () => ({
 }));
 
 // `applyRecovery` 对「有路径的草稿」会读一次当前磁盘基线，避免保存时静默覆盖
-const { readDocumentMock, saveDocumentMock, readTextFileMock } = vi.hoisted(() => ({
+const {
+  readDocumentMock,
+  saveDocumentMock,
+  readTextFileMock,
+  listDirFilesMock,
+  deletePathMock,
+} = vi.hoisted(() => ({
   readDocumentMock: vi.fn(),
-  readTextFileMock: vi.fn(async () => "基线"),
+  readTextFileMock: vi.fn(async (_path: string) => "基线"),
+  listDirFilesMock: vi.fn(async (_dirPath: string) => [] as Array<{
+    name: string;
+    isDir: boolean;
+    size: number;
+    mtimeUs: number;
+  }>),
+  deletePathMock: vi.fn(async (_path: string) => undefined),
   saveDocumentMock: vi.fn(async (_p: string, content: string) => ({
     kind: "written" as const,
     stat: { mtimeUs: 9_000, size: content.length },
@@ -37,6 +52,8 @@ vi.mock("../../src/lib/fs", () => ({
   readDocument: readDocumentMock,
   saveDocument: saveDocumentMock,
   readTextFile: readTextFileMock,
+  listDirFiles: listDirFilesMock,
+  deletePath: deletePathMock,
   fileMtime: vi.fn(async () => 5),
   fileStat: vi.fn(async () => ({ mtimeUs: 5_000, size: 4 })),
   writeTextFile: vi.fn(async () => undefined),
@@ -70,6 +87,11 @@ const SESSION = "/appdata/recovery/main/session.json";
 const DRAFTS = "/appdata/recovery/main/drafts";
 
 const files = new Map<string, string>();
+/** 文件 mtime（微秒）：模拟旧归档缺 archivedAt 时用磁盘时间判龄 */
+const fileMtimeUs = new Map<string, number>();
+let failDelete = false;
+/** 只让指定前缀的删除失败：用于「草稿删不掉、归档仍可删」的场景 */
+let failDeleteOnlyPrefix: string | null = null;
 
 function draftFile(path: string): string {
   const key = Buffer.from(path, "utf8")
@@ -110,11 +132,16 @@ function seedDraft(
 
 beforeEach(() => {
   files.clear();
+  fileMtimeUs.clear();
+  failDelete = false;
+  failDeleteOnlyPrefix = null;
   portable.migration = null;
   readDocumentMock
     .mockReset()
     .mockResolvedValue({ content: "磁盘内容", stat: { mtimeUs: 5_000, size: 4 } });
   readTextFileMock.mockReset().mockResolvedValue("磁盘内容");
+  listDirFilesMock.mockReset().mockResolvedValue([]);
+  deletePathMock.mockReset().mockResolvedValue(undefined);
   saveDocumentMock.mockClear();
   __setRecoveryIo({
     appDataDir: async () => "/appdata",
@@ -132,9 +159,15 @@ beforeEach(() => {
       for (const key of files.keys()) {
         if (key.startsWith(prefix)) names.add(key.slice(prefix.length));
       }
-      return [...names].map((name) => ({ name, isDir: false }));
+      return [...names].map((name) => ({
+        name,
+        isDir: false,
+        mtimeUs: fileMtimeUs.get(`${prefix}${name}`),
+      }));
     },
     deletePath: async (path) => {
+      const targeted = failDeleteOnlyPrefix !== null && path.startsWith(failDeleteOnlyPrefix);
+      if (failDelete || targeted) throw new Error("EIO: 删除失败");
       files.delete(path);
     },
   });
@@ -723,5 +756,818 @@ describe("#365 TTL 清理", () => {
     expect(files.has(recentFile)).toBe(true);
     // 同样标了 handled 且超期，能留下只因 pinned
     expect(files.has(pinnedFile)).toBe(true);
+  });
+});
+
+describe("#409 旧 crashed 归档回收", () => {
+  const NOW = 10 * DRAFT_TTL_MS;
+  const OLD = NOW - DRAFT_TTL_MS - 1;
+
+  function crashed(name: string, data: Record<string, unknown> = {}): string {
+    const file = `/appdata/recovery/main/${name}`;
+    files.set(
+      file,
+      JSON.stringify({
+        version: 1,
+        sessionId: "s-archived",
+        windowLabel: "main",
+        startedAt: OLD,
+        archivedAt: OLD,
+        cleanExit: false,
+        draftPaths: [],
+        handledDraftIds: [],
+        fullyHandled: true,
+        // 手工播种默认「枚举可信」：回收要求归档自证枚举完整 + 残留检查通过，
+        // 与 draftPaths 是否为空无关
+        draftsEnumerated: true,
+        ...data,
+      }),
+    );
+    return file;
+  }
+
+  it("fullyHandled 且超 7 天的归档被回收，返回值只统计草稿删除数", async () => {
+    const archive = crashed("crashed-old.json", {
+      sessionId: "s-handled",
+      draftPaths: ["/w/a.md"],
+      handledDraftIds: ["/w/a.md"],
+    });
+    const draft = seedDraft("/w/a.md", { updatedAt: OLD, sessionId: "s-handled" });
+
+    expect(await cleanupExpiredDrafts(NOW)).toBe(1);
+    expect(files.has(draft)).toBe(false);
+    expect(files.has(archive)).toBe(false);
+  });
+
+  it("写入侧：beginSession 归档空草稿会话时写出 draftsEnumerated=true + fullyHandled=true，超期后归档真被回收", async () => {
+    files.set(
+      SESSION,
+      JSON.stringify({ version: 1, sessionId: "s-empty", startedAt: 1_111, cleanExit: false }),
+    );
+    const archivedAt = 5_000;
+
+    await beginSession(archivedAt);
+
+    const archive = "/appdata/recovery/main/crashed-1111.json";
+    const archived = JSON.parse(files.get(archive)!);
+    // 回收的必要条件：它必须由归档链路自己写出来（该位为 false 则回收彻底失效），
+    // 而不是用例手工播种的字段
+    expect(archived.draftsEnumerated).toBe(true);
+    expect(archived.fullyHandled).toBe(true);
+
+    expect(await cleanupExpiredDrafts(archivedAt + DRAFT_TTL_MS + 1)).toBe(0);
+    expect(files.has(archive)).toBe(false);
+  });
+
+  it("写入侧到回收全链路：beginSession 归档 1 份草稿 → 丢弃并记账 → 超期清理删草稿与归档", async () => {
+    files.set(
+      SESSION,
+      JSON.stringify({ version: 1, sessionId: "s-one", startedAt: 1_111, cleanExit: false }),
+    );
+    const draftPath = "/w/a.md";
+    const draftPathFile = seedDraft(draftPath, { updatedAt: 4_000, sessionId: "s-one" });
+    const archivedAt = 5_000;
+
+    await beginSession(archivedAt);
+
+    const archive = "/appdata/recovery/main/crashed-1111.json";
+    let archived = JSON.parse(files.get(archive)!);
+    expect(archived.draftsEnumerated).toBe(true);
+    expect(archived.draftPaths).toEqual([draftPath]);
+    expect(archived.fullyHandled).toBe(false);
+
+    // 与设置面板「丢弃」一致：先 discardDrafts 删文件，再 markDraftsHandled 按会话记账
+    const drafts = await listDrafts();
+    expect(drafts.map((d) => d.tabPath)).toEqual([draftPath]);
+    expect(await discardDrafts(drafts)).toBe(1);
+    // 归因明确：文件是「丢弃」删的，后面的清理只负责回收账本
+    expect(files.has(draftPathFile)).toBe(false);
+    await markDraftsHandled([{ sessionId: "s-one", tabPath: draftPath }]);
+
+    archived = JSON.parse(files.get(archive)!);
+    expect(archived.fullyHandled).toBe(true);
+
+    expect(await cleanupExpiredDrafts(archivedAt + DRAFT_TTL_MS + 1)).toBe(0);
+    expect(files.has(draftPathFile)).toBe(false);
+    expect(files.has(archive)).toBe(false);
+  });
+
+  it("fullyHandled=false 的归档即使超期也保留（已处理账本不能丢）", async () => {
+    const archive = crashed("crashed-pending.json", { fullyHandled: false });
+
+    await cleanupExpiredDrafts(NOW);
+
+    expect(files.has(archive)).toBe(true);
+  });
+
+  it("归档未满 7 天不回收", async () => {
+    const archive = crashed("crashed-recent.json", {
+      archivedAt: NOW - DRAFT_TTL_MS + 1_000,
+    });
+
+    await cleanupExpiredDrafts(NOW);
+
+    expect(files.has(archive)).toBe(true);
+  });
+
+  it("archivedAt 缺失时用文件 mtime 判龄（元数据透传的真实消费者）", async () => {
+    const archive = crashed("crashed-legacy.json", { archivedAt: 0 });
+    fileMtimeUs.set(archive, OLD * 1000); // 微秒 → 毫秒
+
+    await cleanupExpiredDrafts(NOW);
+
+    expect(files.has(archive)).toBe(false);
+  });
+
+  it("archivedAt 与 mtime 都缺失时保留，不把时间戳 0 误判成 7 天前", async () => {
+    const archive = crashed("crashed-unknown.json", { archivedAt: 0 });
+
+    await cleanupExpiredDrafts(NOW);
+
+    expect(files.has(archive)).toBe(true);
+  });
+
+  function expectWarnMessage(warn: ReturnType<typeof vi.spyOn>, substring: string): void {
+    expect(
+      warn.mock.calls.some((args) => String(args[0]).includes(substring)),
+      `预期 console.warn 首参数包含 "${substring}"，实际记录：${JSON.stringify(warn.mock.calls)}`,
+    ).toBe(true);
+  }
+
+  it("删除失败不抛错、归档保留到下次，且不静默吞错", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const archive = crashed("crashed-io.json");
+    failDelete = true;
+
+    try {
+      await expect(cleanupExpiredDrafts(NOW)).resolves.toBe(0);
+      expect(files.has(archive)).toBe(true);
+      expectWarnMessage(warn, "旧归档删除失败");
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("草稿清理与归档回收互不干扰：未处理的草稿与对应归档都保留", async () => {
+    const archive = crashed("crashed-unhandled.json", {
+      sessionId: "s-pending",
+      draftPaths: ["/w/b.md"],
+      handledDraftIds: [],
+      fullyHandled: false,
+    });
+    const draft = seedDraft("/w/b.md", { updatedAt: OLD, sessionId: "s-pending" });
+
+    expect(await cleanupExpiredDrafts(NOW)).toBe(0);
+    expect(files.has(draft)).toBe(true);
+    expect(files.has(archive)).toBe(true);
+  });
+
+  it("该会话的草稿删除失败时，归档保留到下次清理", async () => {
+    const archive = crashed("crashed-keep.json", {
+      sessionId: "s-failed",
+      draftPaths: ["/w/a.md"],
+      handledDraftIds: ["/w/a.md"],
+    });
+    const draft = seedDraft("/w/a.md", { updatedAt: OLD, sessionId: "s-failed" });
+    failDeleteOnlyPrefix = `${DRAFTS}/`;
+
+    expect(await cleanupExpiredDrafts(NOW)).toBe(0); // 删失败：removed 不计
+    expect(files.has(draft)).toBe(true);
+    // 账本必须留着：删了这份草稿就再没有会话归属，永远不会被清理
+    expect(files.has(archive)).toBe(true);
+  });
+
+  it("本次刚恢复（exclude）的草稿仍在磁盘时，归档不被回收", async () => {
+    const archive = crashed("crashed-excluded.json", {
+      sessionId: "s-restored",
+      draftPaths: ["/w/a.md"],
+      handledDraftIds: ["/w/a.md"],
+    });
+    const draft = seedDraft("/w/a.md", { updatedAt: OLD, sessionId: "s-restored" });
+
+    expect(
+      await cleanupExpiredDrafts(NOW, undefined, { exclude: new Set(["/w/a.md"]) }),
+    ).toBe(0);
+    expect(files.has(draft)).toBe(true);
+    expect(files.has(archive)).toBe(true);
+  });
+
+  it("pinned 草稿仍在磁盘时，归档不被回收", async () => {
+    const archive = crashed("crashed-pinned.json", {
+      sessionId: "s-pinned",
+      draftPaths: ["/w/a.md"],
+      handledDraftIds: ["/w/a.md"],
+    });
+    const draft = seedDraft("/w/a.md", {
+      updatedAt: OLD,
+      sessionId: "s-pinned",
+      pinned: true,
+    });
+
+    expect(await cleanupExpiredDrafts(NOW)).toBe(0);
+    expect(files.has(draft)).toBe(true);
+    expect(files.has(archive)).toBe(true);
+  });
+
+  it("草稿目录列不出来时跳过归档回收，不抛错", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const archive = crashed("crashed-unlistable.json");
+    __setRecoveryIo({
+      appDataDir: async () => "/appdata",
+      readTextFile: async (path) => {
+        const v = files.get(path);
+        if (v === undefined) throw new Error("not found");
+        return v;
+      },
+      writeTextFile: async (path, content) => {
+        files.set(path, content);
+      },
+      listDir: async (path) => {
+        if (path.endsWith("/drafts")) throw new Error("EIO: 目录不可读");
+        const prefix = path.endsWith("/") ? path : `${path}/`;
+        const names = new Set<string>();
+        for (const key of files.keys()) {
+          if (key.startsWith(prefix)) names.add(key.slice(prefix.length));
+        }
+        return [...names].map((name) => ({ name, isDir: false }));
+      },
+      deletePath: async (path) => {
+        files.delete(path);
+      },
+    });
+
+    try {
+      await expect(cleanupExpiredDrafts(NOW)).resolves.toBe(0);
+      expect(files.has(archive)).toBe(true);
+      // 必须命中归档回收自身的跳过告警，而非 cleanupExpiredDrafts 开头 listDrafts() 的前置告警
+      expectWarnMessage(warn, "跳过旧归档回收");
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("恢复区目录列不出来时不抛错、不回收任何归档，并留下「读取恢复区目录失败」告警", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const archive = crashed("crashed-recovery-unreadable.json");
+    __setRecoveryIo({
+      appDataDir: async () => "/appdata",
+      readTextFile: async (path) => {
+        const v = files.get(path);
+        if (v === undefined) throw new Error("not found");
+        return v;
+      },
+      writeTextFile: async (path, content) => {
+        files.set(path, content);
+      },
+      listDir: async (path) => {
+        // 只让恢复区目录本身不可读：草稿目录照常可列，才能确证是 crashedFiles() 的失败分支
+        if (path === "/appdata/recovery/main") throw new Error("EIO: 恢复区不可读");
+        const prefix = path.endsWith("/") ? path : `${path}/`;
+        const names = new Set<string>();
+        for (const key of files.keys()) {
+          if (key.startsWith(prefix)) names.add(key.slice(prefix.length));
+        }
+        return [...names].map((name) => ({ name, isDir: false }));
+      },
+      deletePath: async (path) => {
+        files.delete(path);
+      },
+    });
+
+    try {
+      await expect(cleanupExpiredDrafts(NOW)).resolves.toBe(0);
+      // 本次看不到任何账本 → 一条归档都不许删，否则对应草稿会永久失去归属
+      expect(files.has(archive)).toBe(true);
+      expectWarnMessage(warn, "读取恢复区目录失败");
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("归档时草稿目录列不出来 → 不宣称已处理完，超期也不回收账本", async () => {
+    files.set(
+      SESSION,
+      JSON.stringify({ version: 1, sessionId: "s-old", startedAt: 1_111, cleanExit: false }),
+    );
+    const draft = seedDraft("/w/a.md", { updatedAt: OLD, sessionId: "s-old" });
+    __setRecoveryIo({
+      appDataDir: async () => "/appdata",
+      readTextFile: async (path) => {
+        const v = files.get(path);
+        if (v === undefined) throw new Error("not found");
+        return v;
+      },
+      writeTextFile: async (path, content) => {
+        files.set(path, content);
+      },
+      listDir: async (path) => {
+        if (path.endsWith("/drafts")) throw new Error("EIO: 目录不可读");
+        const prefix = path.endsWith("/") ? path : `${path}/`;
+        const names = new Set<string>();
+        for (const key of files.keys()) {
+          if (key.startsWith(prefix)) names.add(key.slice(prefix.length));
+        }
+        return [...names].map((name) => ({ name, isDir: false }));
+      },
+      deletePath: async (path) => {
+        files.delete(path);
+      },
+    });
+
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await beginSession(2_222);
+
+      const archive = "/appdata/recovery/main/crashed-1111.json";
+      const archived = JSON.parse(files.get(archive)!);
+      expect(archived.draftsEnumerated).toBe(false);
+      expect(archived.fullyHandled).toBe(false);
+      // 归档侧不能静默：这份账本会永久不可回收，需要诊断线索
+      expectWarnMessage(warn, "读取草稿目录失败");
+
+      warn.mockClear();
+      await cleanupExpiredDrafts(NOW);
+      // 那次枚举失败，谁也不知道还有没有草稿：账本与草稿都必须留着；
+      // 此处 archived.fullyHandled 为 false 未进归档回收分支，告警来自 cleanupExpiredDrafts 开头的 listDrafts()
+      expect(files.has(archive)).toBe(true);
+      expect(files.has(draft)).toBe(true);
+      expectWarnMessage(warn, "读取草稿目录失败");
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("旧归档缺 draftsEnumerated 且 draftPaths 为空时保守保留", async () => {
+    const archive = crashed("crashed-legacy-empty.json", {
+      draftPaths: [],
+      draftsEnumerated: undefined,
+    });
+
+    await cleanupExpiredDrafts(NOW);
+
+    expect(files.has(archive)).toBe(true);
+  });
+
+  it("旧归档缺 draftsEnumerated 时，即使 draftPaths 非空且已处理、列出的草稿已删也不回收", async () => {
+    const archive = crashed("crashed-legacy-handled.json", {
+      sessionId: "s-old",
+      draftPaths: ["/w/a.md"],
+      handledDraftIds: ["/w/a.md"],
+      draftsEnumerated: undefined,
+    });
+    const handled = seedDraft("/w/a.md", { updatedAt: OLD, sessionId: "s-old" });
+    // 旧版 listDrafts() 读不出来就静默跳过：这条不在 draftPaths 里，但确实属于同一会话
+    const missed = seedDraft("/w/b.md", { updatedAt: OLD, sessionId: "s-old" });
+
+    // 列出的那条照常清掉（它确实被用户处理过）
+    expect(await cleanupExpiredDrafts(NOW)).toBe(1);
+    expect(files.has(handled)).toBe(false);
+    // 但账本必须留着：删了它就没人知道 /w/b.md 属于哪个会话，会永久留在 !crash 分支
+    expect(files.has(missed)).toBe(true);
+    expect(files.has(archive)).toBe(true);
+  });
+
+  it("归档里的 draftPaths 无法映射为文件名时不抛错、也不回收", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const archive = crashed("crashed-bad-path.json", {
+      draftPaths: ["\ud800"],
+      handledDraftIds: ["\ud800"],
+    });
+
+    try {
+      await expect(cleanupExpiredDrafts(NOW)).resolves.toBe(0);
+      expect(files.has(archive)).toBe(true);
+      expectWarnMessage(warn, "无法映射为文件名");
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("归档声明枚举失败且 draftPaths 为空时，即使 fullyHandled 也不回收", async () => {
+    const archive = crashed("crashed-enum-failed.json", {
+      sessionId: "s-enum",
+      draftPaths: [],
+      draftsEnumerated: false,
+      fullyHandled: true,
+    });
+    const draft = seedDraft("/w/x.md", { updatedAt: OLD, sessionId: "s-enum" });
+
+    await cleanupExpiredDrafts(NOW);
+
+    // 空 draftPaths 无法证明「该会话没有草稿」：账本留着，草稿也留着
+    expect(files.has(archive)).toBe(true);
+    expect(files.has(draft)).toBe(true);
+  });
+
+  it("归档时有草稿读不出来 → 不宣称已处理完，账本不回收", async () => {
+    files.set(
+      SESSION,
+      JSON.stringify({ version: 1, sessionId: "s-old", startedAt: 1_111, cleanExit: false }),
+    );
+    const draft = seedDraft("/w/a.md", { updatedAt: OLD, sessionId: "s-old" });
+    files.set(draft, "{ 坏 JSON");
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await beginSession(2_222);
+      const archive = "/appdata/recovery/main/crashed-1111.json";
+      const archived = JSON.parse(files.get(archive)!);
+      expect(archived.draftsEnumerated).toBe(false);
+      expect(archived.fullyHandled).toBe(false);
+      expectWarnMessage(warn, "草稿读取/解析失败");
+
+      warn.mockClear();
+      await cleanupExpiredDrafts(NOW);
+      expect(files.has(archive)).toBe(true);
+      expect(files.has(draft)).toBe(true);
+      // 归档 fullyHandled 为 false 未进回收分支；告警来自 cleanupExpiredDrafts 开头重读损坏草稿
+      expectWarnMessage(warn, "草稿读取/解析失败");
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("部分枚举失败（1 份可读 / 1 份读失败）→ 处理完可读份后 fullyHandled 仍为 false 且超期不回收账本", async () => {
+    files.set(
+      SESSION,
+      JSON.stringify({
+        version: 1,
+        sessionId: "s-partial",
+        startedAt: OLD - 10,
+        cleanExit: false,
+      }),
+    );
+    const aDraftFile = seedDraft("/w/a.md", {
+      content: "可读草稿",
+      updatedAt: OLD,
+      sessionId: "s-partial",
+    });
+    const bDraftFile = seedDraft("/w/b.md", {
+      content: "暂时锁住的草稿",
+      updatedAt: OLD,
+      sessionId: "s-partial",
+    });
+
+    // 仅在首次读取 b.md 草稿时模拟瞬时文件锁失败，之后恢复可读
+    let lockBOnce = true;
+    __setRecoveryIo({
+      appDataDir: async () => "/appdata",
+      readTextFile: async (path) => {
+        if (lockBOnce && path === bDraftFile) {
+          lockBOnce = false;
+          throw new Error("EBUSY: 瞬时文件锁");
+        }
+        const v = files.get(path);
+        if (v === undefined) throw new Error("not found");
+        return v;
+      },
+      writeTextFile: async (path, content) => {
+        files.set(path, content);
+      },
+      listDir: async (path) => {
+        const prefix = path.endsWith("/") ? path : `${path}/`;
+        const names = new Set<string>();
+        for (const key of files.keys()) {
+          if (key.startsWith(prefix)) names.add(key.slice(prefix.length));
+        }
+        return [...names].map((name) => ({
+          name,
+          isDir: false,
+          mtimeUs: fileMtimeUs.get(`${prefix}${name}`),
+        }));
+      },
+      deletePath: async (path) => {
+        files.delete(path);
+      },
+    });
+
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      await beginSession(OLD);
+      const archive = `/appdata/recovery/main/crashed-${OLD - 10}.json`;
+      const archivedAfterBegin = JSON.parse(files.get(archive)!);
+      expect(archivedAfterBegin.draftPaths).toEqual(["/w/a.md"]);
+      expect(archivedAfterBegin.draftsEnumerated).toBe(false);
+      expect(archivedAfterBegin.fullyHandled).toBe(false);
+      expectWarnMessage(warn, "草稿读取/解析失败");
+
+      // 用户随后只丢弃并标记处理完归档已知的那份 /w/a.md
+      const aDraft = (await listDrafts()).find((d) => d.tabPath === "/w/a.md")!;
+      expect(aDraft).toBeTruthy();
+      await discardDrafts([aDraft]);
+      await markDraftsHandled([aDraft]);
+
+      const archivedAfterHandled = JSON.parse(files.get(archive)!);
+      expect(archivedAfterHandled.handledDraftIds).toEqual(["/w/a.md"]);
+      // 归档时漏掉过 b.md：绝不能把 fullyHandled 改成 true
+      expect(archivedAfterHandled.fullyHandled).toBe(false);
+
+      // 超 7 天后清理：a.md 已删，b.md 仍在磁盘，归档账本必须保留
+      await cleanupExpiredDrafts(NOW);
+      expect(files.has(aDraftFile)).toBe(false);
+      expect(files.has(bDraftFile)).toBe(true);
+      expect(files.has(archive)).toBe(true);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("draftPaths 非空但 draftsEnumerated=false 的归档，即使 fullyHandled=true 且草稿已不在磁盘也不回收", async () => {
+    const archive = crashed("crashed-partial-enum.json", {
+      sessionId: "s-partial-flag",
+      draftPaths: ["/w/a.md"],
+      handledDraftIds: ["/w/a.md"],
+      draftsEnumerated: false,
+      fullyHandled: true,
+    });
+
+    await cleanupExpiredDrafts(NOW);
+
+    expect(files.has(archive)).toBe(true);
+  });
+
+  it("缺 sessionId 的旧草稿仍可恢复与丢弃，但归档写出 draftsEnumerated=false 且超期不误删草稿与账本", async () => {
+    const prevMarker = { version: 1, sessionId: "s-old", startedAt: OLD - 10, cleanExit: false };
+    files.set(SESSION, JSON.stringify(prevMarker));
+    const draftMissing = draftFile("/w/legacy-no-session.md");
+    files.set(
+      draftMissing,
+      JSON.stringify({
+        version: 1,
+        draftId: "legacy-x",
+        tabPath: "/w/legacy-no-session.md",
+        content: "旧版未保存正文",
+        updatedAt: OLD,
+      }),
+    );
+    const draftEmpty = draftFile("/w/legacy-empty-session.md");
+    files.set(
+      draftEmpty,
+      JSON.stringify({
+        version: 1,
+        draftId: "legacy-y",
+        sessionId: "",
+        tabPath: "/w/legacy-empty-session.md",
+        content: "空会话旧正文",
+        updatedAt: OLD - 1,
+      }),
+    );
+
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      // (a) listDrafts 与 findRecoverableDrafts 仍可返回正文供恢复或手动丢弃
+      const listed = await listDrafts();
+      expect(listed).toHaveLength(2);
+      expect(listed[0]).toMatchObject({
+        tabPath: "/w/legacy-no-session.md",
+        content: "旧版未保存正文",
+        sessionId: "",
+      });
+      expect(listed[1]).toMatchObject({
+        tabPath: "/w/legacy-empty-session.md",
+        content: "空会话旧正文",
+        sessionId: "",
+      });
+      const recoverable = await findRecoverableDrafts(prevMarker);
+      expect(recoverable).toHaveLength(2);
+      expect(recoverable.map((d) => d.content)).toEqual(["旧版未保存正文", "空会话旧正文"]);
+      expectWarnMessage(warn, "缺少 sessionId");
+
+      // 「仍可恢复」要落到真实恢复链路，而不只是能列出来
+      const restored = await applyRecovery(recoverable);
+      expect(restored.restored).toBe(2);
+      expect(useWorkspace.getState().openTabs.map((t) => t.content)).toEqual([
+        "旧版未保存正文",
+        "空会话旧正文",
+      ]);
+      // 恢复不消费副本
+      expect(files.has(draftMissing)).toBe(true);
+      expect(files.has(draftEmpty)).toBe(true);
+      useWorkspace.setState({ openTabs: [], activeTabPath: null, dirty: false } as never);
+
+      // (b) beginSession 写出的归档 draftsEnumerated=false, fullyHandled=false 且带告警
+      warn.mockClear();
+      await beginSession(OLD);
+      const archive = `/appdata/recovery/main/crashed-${OLD - 10}.json`;
+      const archived = JSON.parse(files.get(archive)!);
+      expect(archived.draftsEnumerated).toBe(false);
+      expect(archived.fullyHandled).toBe(false);
+      expectWarnMessage(warn, "缺少 sessionId");
+
+      // (c) 超 7 天后 cleanupExpiredDrafts 既不误删旧草稿也不回收归档
+      warn.mockClear();
+      await cleanupExpiredDrafts(NOW);
+      expect(files.has(draftMissing)).toBe(true);
+      expect(files.has(draftEmpty)).toBe(true);
+      expect(files.has(archive)).toBe(true);
+      expectWarnMessage(warn, "缺少 sessionId");
+
+      // 用户通过面板/恢复弹窗手动丢弃时仍可真实删掉该旧草稿
+      await expect(discardDrafts(listed)).resolves.toBe(2);
+      expect(files.has(draftMissing)).toBe(false);
+      expect(files.has(draftEmpty)).toBe(false);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("仅缺 content 或 tabPath 的损坏草稿才会被跳过、告警并标 draftsEnumerated=false", async () => {
+    files.set(
+      SESSION,
+      JSON.stringify({ version: 1, sessionId: "s-old", startedAt: OLD - 10, cleanExit: false }),
+    );
+    files.set(
+      draftFile("/w/missing-content.md"),
+      JSON.stringify({
+        version: 1,
+        draftId: "broken-1",
+        sessionId: "s-old",
+        tabPath: "/w/missing-content.md",
+        updatedAt: OLD,
+      }),
+    );
+    files.set(
+      draftFile("/w/missing-tabpath.md"),
+      JSON.stringify({
+        version: 1,
+        draftId: "broken-2",
+        sessionId: "s-old",
+        content: "有正文但没有路径",
+        updatedAt: OLD,
+      }),
+    );
+
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      expect(await listDrafts()).toEqual([]);
+      // 两条都要各自告警：缺 content 与缺 tabPath 是同一分支的两种输入
+      expect(
+        warn.mock.calls.filter((args) => String(args[0]).includes("缺少正文或路径")),
+      ).toHaveLength(2);
+
+      warn.mockClear();
+      await beginSession(OLD);
+      const archive = `/appdata/recovery/main/crashed-${OLD - 10}.json`;
+      const archived = JSON.parse(files.get(archive)!);
+      expect(archived.draftsEnumerated).toBe(false);
+      expect(archived.fullyHandled).toBe(false);
+      expectWarnMessage(warn, "缺少正文或路径");
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("面板丢弃缺 sessionId 的草稿：discardDrafts + markDraftsHandled 组合真的删文件且不写坏账本", async () => {
+    // 与 SettingsPanel 的 onDiscard 一致：先 discardDrafts 再 markDraftsHandled
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const archive = crashed("crashed-other-session.json", {
+      sessionId: "s-other",
+      draftPaths: ["/w/keep.md"],
+      handledDraftIds: [],
+      fullyHandled: false,
+      draftsEnumerated: true,
+    });
+    const archiveBefore = files.get(archive)!;
+    const legacy = draftFile("/w/legacy-panel.md");
+    files.set(
+      legacy,
+      JSON.stringify({
+        version: 1,
+        draftId: "legacy-panel",
+        tabPath: "/w/legacy-panel.md",
+        content: "面板里丢弃的旧草稿",
+        updatedAt: OLD,
+      }),
+    );
+
+    const selected = await listDrafts();
+    expect(selected).toHaveLength(1);
+    expect(selected[0].sessionId).toBe("");
+
+    try {
+      await expect(discardDrafts(selected)).resolves.toBe(1);
+      await expect(markDraftsHandled(selected)).resolves.toBeUndefined();
+
+      // 文件真的删掉了；空 sessionId 无从归属，不能把别人的归档写坏
+      expect(files.has(legacy)).toBe(false);
+      expect(files.get(archive)).toBe(archiveBefore);
+      expect(await listDrafts()).toEqual([]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("坏归档不会静默：损坏 JSON 与缺 sessionId 的归档各留一条告警且不抛错", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const corrupt = "/appdata/recovery/main/crashed-corrupt.json";
+    const noSession = "/appdata/recovery/main/crashed-no-session.json";
+    files.set(corrupt, "{ 半截 JSON");
+    files.set(noSession, JSON.stringify({ version: 1, draftPaths: [], fullyHandled: true }));
+
+    try {
+      await expect(cleanupExpiredDrafts(NOW)).resolves.toBe(0);
+      expectWarnMessage(warn, "归档读取/解析失败");
+      expectWarnMessage(warn, "归档缺少 sessionId");
+      // 读不懂的归档一律保留，不能因为解析失败就当成「没有账本」删掉
+      expect(files.has(corrupt)).toBe(true);
+      expect(files.has(noSession)).toBe(true);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("归档 draftPaths 非数组（配合 fullyHandled=true, draftsEnumerated=true）时不抛错、告警且不回收", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const archiveNull = crashed("crashed-non-array-null.json", {
+      draftPaths: null as unknown as string[],
+      fullyHandled: true,
+      draftsEnumerated: true,
+    });
+    const archiveObj = crashed("crashed-non-array-obj.json", {
+      draftPaths: { bad: 1 } as unknown as string[],
+      fullyHandled: true,
+      draftsEnumerated: true,
+    });
+
+    try {
+      await expect(cleanupExpiredDrafts(NOW)).resolves.toBe(0);
+      expect(files.has(archiveNull)).toBe(true);
+      expect(files.has(archiveObj)).toBe(true);
+      expectWarnMessage(warn, "draftPaths 非数组");
+      expect(
+        warn.mock.calls.filter((args) => String(args[0]).includes("draftPaths 非数组")),
+      ).toHaveLength(2);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("归档 draftPaths 含非字符串元素（[null] / [123]）时不抛错、告警且不回收", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const archiveNull = crashed("crashed-elem-null.json", {
+      draftPaths: [null] as unknown as string[],
+      handledDraftIds: [],
+      fullyHandled: true,
+      draftsEnumerated: true,
+    });
+    const archiveNum = crashed("crashed-elem-num.json", {
+      draftPaths: [123] as unknown as string[],
+      handledDraftIds: [],
+      fullyHandled: true,
+      draftsEnumerated: true,
+    });
+
+    try {
+      await expect(cleanupExpiredDrafts(NOW)).resolves.toBe(0);
+      expect(files.has(archiveNull)).toBe(true);
+      expect(files.has(archiveNum)).toBe(true);
+      expectWarnMessage(warn, "无法映射为文件名");
+      expect(
+        warn.mock.calls.filter((args) => String(args[0]).includes("无法映射为文件名")),
+      ).toHaveLength(2);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("默认 IO（defaultIo.listDir）必须把 listDirFiles 的 mtimeUs 透传给旧归档判龄删除", async () => {
+    const archive = "/appdata/recovery/main/crashed-default-io.json";
+    const archiveBody = JSON.stringify({
+      version: 1,
+      sessionId: "s-default-io",
+      windowLabel: "main",
+      startedAt: OLD,
+      archivedAt: 0,
+      cleanExit: false,
+      draftPaths: [],
+      handledDraftIds: [],
+      fullyHandled: true,
+      draftsEnumerated: true,
+    });
+    listDirFilesMock.mockImplementation(async (dir: string) => {
+      if (dir === "/appdata/recovery/main") {
+        return [
+          {
+            name: "crashed-default-io.json",
+            isDir: false,
+            size: archiveBody.length,
+            mtimeUs: OLD * 1000,
+          },
+        ];
+      }
+      return [];
+    });
+    readTextFileMock.mockImplementation(async (path: string) => {
+      if (path === archive) return archiveBody;
+      throw new Error("not found");
+    });
+
+    __setRecoveryIo(null);
+    try {
+      await expect(cleanupExpiredDrafts(NOW)).resolves.toBe(0);
+      expect(deletePathMock).toHaveBeenCalledTimes(1);
+      expect(deletePathMock).toHaveBeenCalledWith(archive);
+    } finally {
+      __setRecoveryIo(null);
+    }
   });
 });
