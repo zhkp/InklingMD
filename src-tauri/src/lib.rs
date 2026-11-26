@@ -20,16 +20,19 @@ use tauri::{Emitter, Manager};
 /// Tauri 在 Windows 上把 `bundle.icon` 里第一个 `.ico` 的**目录首档**解成默认窗口图标
 /// （tauri-codegen `CachedIcon::new_ico` 只取 `entries()[0]`），运行时再以
 /// `WM_SETICON(ICON_SMALL)` 落到窗口上。Logo v3 的 `icon.ico` 首档是 16×16，
-/// 而任务栏按钮图标在 100% / 125% / 150% / 200% 缩放下要画 24 / 30 / 36 / 48 px，
+/// 而任务栏按钮在 100% / 125% / 150% / 200% 缩放下要画 24 / 30 / 36 / 48 px，
 /// 16×16 被逐级放大后必然发糊——这就是「任务栏图标模糊」的直接成因。
 ///
-/// 这里改用同一份 Logo v3 母版直接缩放出的 256×256 预渲染档
+/// Tauri 只暴露 `Window::set_icon`（落到 ICON_SMALL），没有暴露 tao 的
+/// `set_taskbar_icon`（ICON_BIG），所以这里能改善的就是任务栏实际取到的那一张位图：
+/// 改用同一份 Logo v3 母版直接缩放出的 256×256 预渲染档
 /// （`icons/128x128@2x.png`，8bit RGBA；`@2x` 故实为 256×256），由系统按实际 DPI
-/// 做降采样。`icon.ico` 本身不动：它是设计包逐字节锁定的资源（#398，
-/// tests/unit/brand-assets.test.ts 会校验其目录结构）。
+/// 降采样。`icon.ico` 本身不动：它是设计包逐字节锁定的资源（#398，
+/// tests/unit/brand-assets.test.ts 会校验其目录结构与整体摘要）。
 const WINDOW_ICON_PNG: &[u8] = include_bytes!("../icons/128x128@2x.png");
 
-/// 解码内置的高清窗口图标；失败时调用方回退到 Tauri 从 ICO 首档解出的默认图标。
+/// 解码内置的高清窗口图标；失败时调用方回退到 codegen 的默认窗口图标
+/// （Windows 上是 ICO 首档，其他平台是首个 PNG）。
 fn high_resolution_window_icon() -> tauri::Result<tauri::image::Image<'static>> {
     tauri::image::Image::from_bytes(WINDOW_ICON_PNG)
 }
@@ -121,13 +124,16 @@ pub fn run() {
     }
 
     // #432：窗口图标必须在 `run` 之前换掉——窗口管理器在构建期就把 context 里的
-    // 默认图标取走了（`AppManager::with_context` → `WindowManager::default_icon`），
+    // 默认图标取走了（`AppManager::with_handlers` → `WindowManager::default_icon`），
     // 之后创建的所有窗口（含前端 `WebviewWindow` 新建的派生窗口）才会拿到它。
     let mut context = tauri::generate_context!();
     match high_resolution_window_icon() {
         Ok(icon) => context.set_default_window_icon(Some(icon)),
-        // 解码失败不阻止启动：退回 ICO 首档图标（发糊，但应用可用）
-        Err(e) => eprintln!("[icon] 高清窗口图标解码失败，回退 ICO 内嵌图标: {e}"),
+        // 解码失败不阻止启动：退回 codegen 默认窗口图标（发糊但可用）。
+        // release 是 GUI 子系统，stderr 不可见，故与既有启动错误一致落盘到临时目录日志。
+        Err(e) => app_paths::record_startup_error(&format!(
+            "[icon] 高清窗口图标解码失败，回退 codegen 默认窗口图标: {e}"
+        )),
     }
 
     builder
@@ -265,7 +271,7 @@ mod tests {
     }
 
     #[test]
-    fn window_icon_source_is_a_256px_rgba_bitmap() {
+    fn window_icon_source_is_a_256px_bitmap() {
         let icon = high_resolution_window_icon().expect("内置窗口图标必须可解码");
         // 16×16（ICO 首档）在任务栏任何缩放比例下都要放大，必须换 256×256 档；
         // 256 也是设计包 ICO 的最大档，保证 200% 缩放（需 48px）走降采样。
@@ -274,16 +280,15 @@ mod tests {
             (256, 256),
             "窗口图标源必须是 256×256 档，否则任务栏会放大显示"
         );
-        // Image::from_bytes 直接按 4 通道摊平 RGBA；RGB 源会让 HICON 颜色与 alpha 全部错位
         assert_eq!(
             icon.rgba().len() as u32,
             icon.width() * icon.height() * 4,
-            "窗口图标源必须是 8bit RGBA，否则 HICON 数据会错位"
+            "解码后的位图必须是 w*h*4 的 RGBA8 缓冲（HICON 按 4 通道读取）"
         );
     }
 
     #[test]
-    fn window_icon_source_is_the_white_rounded_brand_mark() {
+    fn window_icon_source_is_the_confirmed_rounded_brand_mark() {
         let icon = high_resolution_window_icon().expect("内置窗口图标必须可解码");
         let width = icon.width();
         let height = icon.height();
