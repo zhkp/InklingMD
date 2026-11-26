@@ -29,7 +29,7 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -817,12 +817,70 @@ mod tests {
         fs::write(&oversized, vec![b'a'; MAX_READ_SIZE as usize + 1]).unwrap();
         let error = read_text_file_sync(oversized.to_string_lossy().into_owned()).unwrap_err();
         assert!(error.contains(READ_ERROR_FILE_TOO_LARGE));
+        // 文案是前端契约的一部分（用户看到「打开上限」而不是「读取上限」）
+        assert!(error.contains("超过 10 MB 打开上限"), "实际文案：{error}");
+        assert!(!error.contains("读取上限"));
 
         // 恰好等于上限仍可打开（护栏只拦超限）
         let at_limit = temp.path.join("at-limit.md");
         fs::write(&at_limit, vec![b'a'; MAX_READ_SIZE as usize]).unwrap();
         let content = read_text_file_sync(at_limit.to_string_lossy().into_owned()).unwrap();
         assert_eq!(content.len(), MAX_READ_SIZE as usize);
+    }
+
+    #[test]
+    fn read_recovery_accepts_draft_above_document_limit_but_keeps_own_cap() {
+        let temp = TestDir::new("read-recovery-size");
+
+        // 「10MB 正文 + JSON 信封」：文档通道必须继续拒绝，恢复区通道必须还能读回，
+        // 否则超过 10MB 的草稿会被 listDrafts 的 catch 静默跳过（配额落地后就是数据丢失）
+        let draft = temp.path.join("draft.json");
+        let payload_len = MAX_READ_SIZE as usize + 2_048;
+        fs::write(&draft, vec![b'a'; payload_len]).unwrap();
+        let draft_path = draft.to_string_lossy().into_owned();
+        assert!(
+            read_text_file_sync(draft_path.clone()).is_err(),
+            "文档打开护栏不应被放宽"
+        );
+        let content = read_recovery_file_sync(draft_path).unwrap();
+        assert_eq!(content.len(), payload_len);
+
+        // 恢复区自身仍有上限：不能变成「任意大小的恢复区文件都能读进内存」
+        let oversized = temp.path.join("oversized.json");
+        fs::write(&oversized, vec![b'a'; RECOVERY_READ_MAX as usize + 1]).unwrap();
+        let error = read_recovery_file_sync(oversized.to_string_lossy().into_owned()).unwrap_err();
+        assert!(error.contains(READ_ERROR_FILE_TOO_LARGE));
+        assert!(error.contains("超过 12 MB 读取上限"), "实际文案：{error}");
+        assert!(!error.contains("无法打开"));
+    }
+
+    #[test]
+    fn read_recovery_rejects_paths_outside_the_recovery_root() {
+        let dir = TestDir::new("read-recovery-guard");
+        let root = dir.path.join("recovery");
+        fs::create_dir_all(root.join("main")).unwrap();
+        let inside = root.join("main").join("a.json");
+        fs::write(&inside, "{\"ok\":true}").unwrap();
+
+        // 正面：恢复区内可读
+        assert_eq!(
+            read_recovery_file_with_root(inside.to_string_lossy().into_owned(), &root).unwrap(),
+            "{\"ok\":true}"
+        );
+
+        // 相对路径 / `..` / 恢复区外绝对路径都必须拒绝，且不能报成「不可写」
+        for bad in [
+            "recovery/main/a.json".to_string(),
+            root.join("..").join("escape.json").to_string_lossy().into_owned(),
+            dir.path.join("elsewhere").join("x.json").to_string_lossy().into_owned(),
+        ] {
+            let error = read_recovery_file_with_root(bad, &root).unwrap_err();
+            assert!(
+                error.contains("恢复区路径") || error.contains("恢复区路径越界"),
+                "越界错误文案不对：{error}"
+            );
+            assert!(!error.contains("不可写"), "读通道不应报「不可写」：{error}");
+        }
     }
 
     // ===== issue #161：跨盘移动与原子占用 =====
@@ -2178,30 +2236,74 @@ pub const READ_ERROR_ENCODING_UNSUPPORTED: &str = "ENCODING_UNSUPPORTED";
 pub const READ_ERROR_FILE_TOO_LARGE: &str = "FILE_TOO_LARGE";
 
 fn read_text_file_sync(file_path: String) -> Result<String, String> {
+    read_text_with_limit(file_path, MAX_READ_SIZE, "打开", "打开")
+}
+
+/// 大小护栏 + UTF-8 校验的统一实现：文档打开与恢复区读取只是上限与文案不同。
+///
+/// 上限必须是**硬上限**：不能「先 `metadata` 判大小再 `fs::read`」——stat 失败会静默跳过
+/// 判定，文件也可能在 stat 与 read 之间变大，两者都会把任意大小的文件整体读进内存。
+/// 这里用 `take(max + 1)` 截断读取，读完再判一次。
+fn read_text_with_limit(
+    file_path: String,
+    max: u64,
+    limit_label: &str,
+    deny_verb: &str,
+) -> Result<String, String> {
     let path = Path::new(&file_path);
     if !path.exists() {
         return Err(format!("文件不存在: {}", file_path));
     }
-    // issue #159：大小护栏，先用元数据判断，避免超大文件整体进内存
-    if let Ok(meta) = fs::metadata(path) {
-        if meta.len() > MAX_READ_SIZE {
-            return Err(format!(
-                "{}: 文件过大（{:.1} MB，超过 {} MB 打开上限），无法打开",
-                READ_ERROR_FILE_TOO_LARGE,
-                meta.len() as f64 / (1024.0 * 1024.0),
-                MAX_READ_SIZE / (1024 * 1024),
-            ));
-        }
+    let mut bytes = Vec::new();
+    fs::File::open(path)
+        .map_err(|e| format!("读取失败 {}: {}", file_path, e))?
+        .take(max + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("读取失败 {}: {}", file_path, e))?;
+    if bytes.len() as u64 > max {
+        return Err(format!(
+            "{}: 文件过大（超过 {} MB {}上限），无法{}",
+            READ_ERROR_FILE_TOO_LARGE,
+            max / (1024 * 1024),
+            limit_label,
+            deny_verb,
+        ));
     }
     // issue #159：非 UTF-8（GBK/Big5 等）返回结构化标记，
     // 不再把 "stream did not contain valid UTF-8" 英文错误直接透传给用户
-    let bytes = fs::read(path).map_err(|e| format!("读取失败 {}: {}", file_path, e))?;
     String::from_utf8(bytes).map_err(|_| {
         format!(
             "{}: 文件不是 UTF-8 编码（可能是 GBK/Big5 等旧编码），无法打开",
             READ_ERROR_ENCODING_UNSUPPORTED
         )
     })
+}
+
+/// 恢复区读取上限：草稿正文按**序列化后的 JSON** 计 10MB（设计 §8.3），
+/// 信封字段（路径 / 标题 / 时间戳）与被转义的字符会再占一点，留 2MB 余量。
+///
+/// 文档自身的 10MB 护栏（`read_text_file`）**不放宽**：那是防「误开几百 MB 文件」的
+/// 用户可见护栏，与恢复区内部读取是两回事。
+const RECOVERY_READ_MAX: u64 = 12 * 1024 * 1024;
+
+#[tauri::command]
+pub async fn read_recovery_file(app: tauri::AppHandle, path: String) -> Result<String, String> {
+    // 与 `write_recovery_file` 同一套守卫：只允许 `recovery/` 子树。
+    // 否则这就成了「任意路径可读 12MB」的新通道，绕过 read_text_file 的 10MB 护栏。
+    let root = crate::app_paths::resolve_app_data_dir(&app)?.join("recovery");
+    tauri::async_runtime::spawn_blocking(move || read_recovery_file_with_root(path, &root))
+        .await
+        .map_err(|e| format!("恢复区读取任务失败: {e}"))?
+}
+
+/// 守卫 + 读取的同步组合：命令只差一个 app handle，单测直接打这条接线。
+fn read_recovery_file_with_root(path: String, root: &Path) -> Result<String, String> {
+    validate_recovery_path(&path, root)?;
+    read_recovery_file_sync(path)
+}
+
+fn read_recovery_file_sync(file_path: String) -> Result<String, String> {
+    read_text_with_limit(file_path, RECOVERY_READ_MAX, "读取", "读取")
 }
 
 /// #372：读取本地二进制文件为 Base64（与 `write_binary_file` 的传输格式对称）。
@@ -2589,7 +2691,8 @@ pub(crate) fn validate_recovery_path(path: &str, recovery_root: &Path) -> Result
         }
     }
     if !target.starts_with(&root) {
-        return Err(format!("恢复区之外不可写: {}", p.display()));
+        // 读 / 写共用同一条守卫，文案不能偏向某一侧（否则读失败会报「不可写」）
+        return Err(format!("恢复区路径越界（只允许 recovery/ 子树）: {}", p.display()));
     }
     Ok(())
 }

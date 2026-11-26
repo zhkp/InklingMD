@@ -103,8 +103,10 @@ const defaultIo: RecoveryIo = {
   // #404：恢复区根与应用数据根同源（便携 → exe 同级 data/），否则 write_recovery_file 判越界
   appDataDir: appDataRoot,
   async readTextFile(path) {
-    const { readTextFile } = await import("./fs");
-    return readTextFile(path);
+    // 草稿正文按 10MB 计，序列化后必然超过 `read_text_file` 的 10MB 护栏；
+    // 走恢复区专用读取通道（12MB + 恢复区路径守卫），否则大草稿会被静默跳过
+    const { readRecoveryFile } = await import("./fs");
+    return readRecoveryFile(path);
   },
   async writeTextFile(path, content, options) {
     const { writeRecoveryFile } = await import("./fs");

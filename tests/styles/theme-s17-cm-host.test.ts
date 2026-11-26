@@ -68,7 +68,7 @@ const NON_CM_SELECTORS: string[] = [
 describe("S17 CM 宿主外观只能由 EditorView.theme 交付", () => {
   const fixture = readFixture();
 
-  it("应用样式入口（App.css + 14 组件 CSS）中不存在 .cm-* 选择器", () => {
+  it("应用样式入口（App.css + 15 组件 CSS）中不存在 .cm-* 选择器", () => {
     const offenders: string[] = [];
     for (const rel of expandEntries(fixture.tokenDefinitionFiles)) {
       maskComments(readSrc(rel))

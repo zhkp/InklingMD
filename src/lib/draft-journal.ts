@@ -1,10 +1,12 @@
-// 草稿日志（#365 / #378，设计 §8.1-§8.3 的第一片）
+// 草稿日志（#365 / #378 / #409，设计 §8.1-§8.3）
 //
 // 目标：崩溃 / 断电 / 被 kill 之后，用户最后一次编辑的内容仍有**文件级**副本可找回。
-// 这里只做「写 + 清 + 会话标记」三件事：
+// 职责：
 //   - 每次输入后 1.2s 把 tab 内容落到 `recovery/<windowLabel>/drafts/<key>.json`；
 //   - 保存成功 / 关闭 tab 立即删掉对应草稿；
-//   - 正常退出写 `cleanExit: true`，放弃退出写 `false`（恢复面板据此判断，PR-5b）。
+//   - 正常退出写 `cleanExit: true`，放弃退出写 `false`（恢复面板据此判断，PR-5b）；
+//   - #409 配额：单条草稿 10MB（按序列化后的 JSON 的 UTF-8 字节），超限跳过 + 非阻塞提示；
+//   - 记录每次写盘结果（`ok` / `oversize` / `error`），供退出链路区分「主动跳过」与「写盘故障」。
 //
 // 为什么落在文件而不是 localStorage：桌面端 localStorage 与 2MB 量级绑定，
 // 一份 10MB 文档根本存不进去；文件后端还能给出「写入失败」这种可判断的结果。
@@ -13,6 +15,51 @@ import { invoke, isTauri } from "@tauri-apps/api/core";
 
 /** 设计 §8.2：输入停止 1.2s 后落盘 */
 export const DRAFT_DEBOUNCE_MS = 1_200;
+
+/** 设计 §8.3：桌面单条草稿上限，按**序列化后的 JSON** 的 UTF-8 字节计（信封也计入） */
+export const DRAFT_MAX_BYTES = 10 * 1024 * 1024;
+/** 提示文案用的是设计口径（10MB），故意不跟随 `__setDraftMaxBytes` 的测试注入 */
+const DRAFT_MAX_MB = DRAFT_MAX_BYTES / (1024 * 1024);
+
+/**
+ * 一次写盘的结果。
+ *
+ * `oversize` 是「主动跳过」，与 IO 失败必须分开：把它算成写盘故障会让
+ * `journalHealth` 误降，其它明明有副本的文档在退出确认里也会被说成「永久丢失」。
+ */
+type DraftWriteOutcome = "ok" | "oversize" | "error";
+export const lastDraftWriteOutcome = new Map<string, DraftWriteOutcome>();
+
+/**
+ * draftId(tabPath) → 盘上是否存在可信副本（退出确认据此判断「有没有副本」）。
+ *
+ * 写入点：`writeDraftNow` 写成功即 true；`flushAllDrafts` 再按本次结果覆盖
+ * （超限但旧副本仍在时保持 true，见 `keepsOldCopy`）。
+ * 清理点：`clearDraft` 真的删掉副本后 delete —— 否则一条历史 `true` 会让
+ * `hasRecoverableDraft()` 在副本已不存在时仍然放行退出。
+ */
+export const lastDraftWriteOk = new Map<string, boolean>();
+
+let maxDraftBytes = DRAFT_MAX_BYTES;
+/** 超限提示按 path 只出一次；重新写成功后清掉，文档再次变大时才会再提示 */
+const oversizeNotified = new Set<string>();
+
+const defaultNotify = (text: string): void => {
+  void import("../store/ui").then(({ useUI }) => useUI.getState().showNotice(text));
+};
+let notify = defaultNotify;
+
+/** 单测用：替换非阻塞提示通道（默认转发到全局提示条） */
+export function __setNoticeSink(next: ((text: string) => void) | null): void {
+  notify = next ?? defaultNotify;
+}
+
+/** 单测用：缩小上限，便于用小字符串覆盖多字节 / 信封 / 边界 */
+export function __setDraftMaxBytes(next: number | null): void {
+  maxDraftBytes = next ?? DRAFT_MAX_BYTES;
+  // 改了上限就等于换了一套判定：提示去重必须重新武装，避免用例之间互相污染
+  oversizeNotified.clear();
+}
 
 export interface DraftFile {
   version: 1;
@@ -71,14 +118,18 @@ export async function ensureWindowLabel(): Promise<void> {
 const journaled = new Set<string>();
 const timers = new Map<string, number>();
 
-/** 单测注入点：默认走 Tauri IPC，测试里可以替换成内存实现 */
+/**
+ * 单测注入点：默认走 Tauri IPC，测试里可以替换成内存实现。
+ *
+ * 这里**不放读取**：草稿读取由 `session-recovery` 的 `defaultIo.readTextFile` 走
+ * `read_recovery_file`（12MB + 恢复区守卫）；本模块只负责写 / 清。
+ */
 export interface JournalIo {
   writeTextFile(
     path: string,
     content: string,
     options?: { createParents?: boolean; durability?: "sync" | "none" },
   ): Promise<void>;
-  readTextFile(path: string): Promise<string>;
   appDataDir(): Promise<string>;
   removeFile(path: string): Promise<void>;
 }
@@ -89,9 +140,6 @@ const defaultIo: JournalIo = {
     // 与文档保存的 `write_text_file` 契约分开，避免误用到「可能被外部程序改写」的路径上
     const { writeRecoveryFile } = await import("./fs");
     await writeRecoveryFile(path, content, options?.durability === "sync" ? "sync" : "none");
-  },
-  async readTextFile(path) {
-    return invoke<string>("read_text_file", { filePath: path });
   },
   async appDataDir() {
     // #404：与应用数据根同源（便携模式下去掉 `@tauri-apps/api/path` 的系统目录假设）
@@ -111,6 +159,9 @@ let io: JournalIo = defaultIo;
 export function __setJournalIo(next: JournalIo | null): void {
   io = next ?? defaultIo;
   journaled.clear();
+  lastDraftWriteOutcome.clear();
+  lastDraftWriteOk.clear();
+  oversizeNotified.clear();
   for (const timer of timers.values()) window.clearTimeout(timer);
   timers.clear();
 }
@@ -175,6 +226,9 @@ export async function writeDraftNow(
   options: { durability?: "sync" | "none" } = {},
 ): Promise<boolean> {
   if (!isTauri()) return false;
+  // 快路径：UTF-8 字节数恒 ≥ UTF-16 字符数，字符数已经超上限就不必真的序列化
+  // （否则一份几十 MB 的文档会先被 JSON.stringify 再拒绝，白吃一份内存）
+  if (tab.content.length > maxDraftBytes) return rejectOversize(tab.path);
   try {
     // `draftFileKey` 用 `encodeURIComponent`：孤立代理项等非法路径会抛 URIError。
     // 放进 try 内，让这种路径只表现为「这条草稿没写成」，而不是让 flushAllDrafts 整体 reject。
@@ -189,17 +243,47 @@ export async function writeDraftNow(
       pinned: false,
       updatedAt: Date.now(),
     };
+    const payload = JSON.stringify(draft);
+    // 设计 §8.3 的 10MB 按**序列化后的 JSON** 计：信封（tabPath / title / 时间戳）
+    // 与被转义的字符都算在内。只量 content 会放过「正文刚好 10MB + 信封」的文件，
+    // 而那种文件正好会被 12MB 的恢复区读取上限兜住、但已经超出配额承诺
+    if (utf8Bytes(payload) > maxDraftBytes) return rejectOversize(tab.path);
     const dir = await recoveryDir();
-    await io.writeTextFile(draftPath(dir, tab.path), JSON.stringify(draft), {
+    await io.writeTextFile(draftPath(dir, tab.path), payload, {
       createParents: true,
       // 草稿要能扛住「进程被杀」；掉电由退出时的 Sync flush 兜底（§7.3）
       durability: options.durability ?? "none",
     });
     journaled.add(tab.path);
+    lastDraftWriteOutcome.set(tab.path, "ok");
+    lastDraftWriteOk.set(tab.path, true);
+    // 重新写成功 = 副本恢复更新：下次再超限要重新提示，否则用户会以为副本还在写
+    oversizeNotified.delete(tab.path);
     return true;
   } catch {
+    lastDraftWriteOutcome.set(tab.path, "error");
     return false;
   }
+}
+
+/** 序列化后 JSON 的 UTF-8 字节数（多字节字符按真实字节算，不按字符数） */
+function utf8Bytes(text: string): number {
+  return new TextEncoder().encode(text).length;
+}
+
+/**
+ * 单条超限：不写盘、只提示一次。
+ *
+ * 不删已有草稿：文档变大前写下的那份副本仍是用户唯一可找回的内容，
+ * 删掉就把「副本偏旧」变成「完全没有副本」。
+ */
+function rejectOversize(tabPath: string): false {
+  lastDraftWriteOutcome.set(tabPath, "oversize");
+  if (!oversizeNotified.has(tabPath)) {
+    oversizeNotified.add(tabPath);
+    notify(`该文档超过 ${DRAFT_MAX_MB} MB，未建立崩溃恢复副本`);
+  }
+  return false;
 }
 
 /** 保存成功 / 关闭 tab / 重载磁盘：删掉对应草稿 */
@@ -216,6 +300,8 @@ export async function clearDraft(tabPath: string): Promise<void> {
     await io.removeFile(draftPath(dir, tabPath));
     // 只有真的删成功才清记账：否则后续 clearDraft 会直接 return，永远不再重试
     journaled.delete(tabPath);
+    // 副本已不存在：写盘成功表必须同步清掉，否则退出确认会凭一条历史 true 放行
+    lastDraftWriteOk.delete(tabPath);
   } catch {
     // 删不掉就留着：启动时的清理器（PR-5b）会按 TTL 处理
   }

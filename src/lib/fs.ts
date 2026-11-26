@@ -122,6 +122,25 @@ export async function readTextFile(filePath: string): Promise<string> {
   return MOCK_FILE_CONTENT[filePath];
 }
 
+/**
+ * 读取恢复区文件（`recovery/` 子树）。
+ *
+ * 为什么不复用 `readTextFile`：文档通道的 10MB 护栏是给「用户误开几百 MB 文件」用的，
+ * 不能放宽；而草稿正文按设计 §8.3 就是 10MB，序列化后的 JSON 还要带信封，必然超过它。
+ * Rust 侧 `read_recovery_file` 用 12MB 上限，并复用 `write_recovery_file` 的路径守卫，
+ * 只允许恢复区——不会变成「任意路径可读 12MB」的旁路。
+ */
+export async function readRecoveryFile(path: string): Promise<string> {
+  if (isTauri()) {
+    try {
+      return await invoke<string>("read_recovery_file", { path });
+    } catch (e) {
+      throw mapReadError(e);
+    }
+  }
+  return readTextFile(path);
+}
+
 export interface WriteTextOptions {
   /** 覆盖已有文档：目标不存在（被删除/改名）时拒绝写入，抛 TARGET_MISSING（issue #363） */
   mustExist?: boolean;

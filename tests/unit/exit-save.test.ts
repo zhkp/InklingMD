@@ -26,7 +26,6 @@ vi.mock("../../src/lib/exit-session", () => ({
   markCleanExit: vi.fn(async () => true),
   markUncleanExit: vi.fn(async () => true),
   journalHealth: "healthy",
-  lastDraftWriteOk: new Map(),
 }));
 
 import { useExitHandler } from "../../src/lib/useExitHandler";

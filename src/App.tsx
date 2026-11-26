@@ -4,6 +4,7 @@ import { editorViewCtx } from "@milkdown/kit/core";
 import { EditorBody } from "./components/Editor/EditorBody";
 import { Sidebar } from "./components/Sidebar/Sidebar";
 import { StatusBar } from "./components/StatusBar/StatusBar";
+import { RecoveryNotice } from "./components/Notice/RecoveryNotice";
 import { OutlinePanel } from "./components/Outline/OutlinePanel";
 import { TabsBar } from "./components/Tabs/TabsBar";
 import { SettingsPanel } from "./components/Settings/SettingsPanel";
@@ -308,6 +309,7 @@ function App() {
       {currentFile && outlineVisible && <OutlinePanel getEditor={getEditor} />}
       </div>
       {currentFile && <StatusBar />}
+      <RecoveryNotice />
       {modalLayer}
     </main>
   );

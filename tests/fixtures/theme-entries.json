@@ -80,7 +80,7 @@
   },
   "//s9AllowMarkers": "#312 点级豁免（对齐 S15 innerHTMLAllowlist 的强度）：每条形如 {marker,file,count,reason} —— marker 名 + 所在文件 + 出现次数三者都锁死，任一不符即失败（禁止「抄一行标记就静默通过」）。当前为空：任何 s9-allow 标记都会让 S9 失败，硬编码色必须改成 token。",
   "s9AllowMarkers": [],
-  "//runtimeStyleSources": "S13 运行时口径（#310 评审阻塞项 1）：未分层规则只允许来自这些「无法入层」的第三方运行时注入源；应用自身 18 入口必须 100% 在层内。detect 由 theme-layers.spec.ts 实现。",
+  "//runtimeStyleSources": "S13 运行时口径（#310 评审阻塞项 1）：未分层规则只允许来自这些「无法入层」的第三方运行时注入源；应用自身 19 入口必须 100% 在层内。detect 由 theme-layers.spec.ts 实现。",
   "runtimeStyleSources": [
     {
       "id": "codemirror-style-mod",

@@ -1,7 +1,7 @@
-// #365 草稿日志：写 / 清 / 退出 flush 三件事
+// #365 草稿日志：写 / 清 / 退出 flush / 单条配额门禁 + 提示
 //
-// 这一层的失败模式都是「静默丢内容」，所以断言必须落在**写出去的文件内容**与
-// **失败时的健康度**上，而不是只看调用次数。
+// 这一层的失败模式都是「静默丢内容」，所以断言必须落在**写出去的文件内容**、
+// **失败/超限时的健康度与写盘结果**上，而不是只看调用次数。
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { OpenTab } from "../../src/store/workspace";
@@ -34,12 +34,16 @@ vi.mock("../../src/lib/fs", () => ({
 import { writeTextFile } from "../../src/lib/fs";
 import {
   __resetSession,
+  __setDraftMaxBytes,
   __setJournalIo,
+  __setNoticeSink,
   clearDraft,
   scheduleDraft,
   writeDraftNow,
   DRAFT_DEBOUNCE_MS,
+  DRAFT_MAX_BYTES,
   draftFileKey,
+  lastDraftWriteOutcome,
 } from "../../src/lib/draft-journal";
 import {
   __resetJournalHealth,
@@ -86,7 +90,6 @@ beforeEach(() => {
       files.set(path, content);
       writes.push({ path, options });
     },
-    readTextFile: async (path) => files.get(path) ?? "",
     appDataDir: async () => "/appdata",
     removeFile: async (path) => {
       files.delete(path);
@@ -253,5 +256,154 @@ describe("#365 草稿日志", () => {
     expect(session.cleanExit).toBe(false);
     expect(session.windowLabel).toBe("main");
     expect(files.has(`${DRAFT_DIR}/${draftFileKey("/w/a.md")}.json`)).toBe(true);
+  });
+});
+
+describe("#409 配额：单条草稿 10MB 上限", () => {
+  let notices: string[] = [];
+
+  beforeEach(() => {
+    notices = [];
+    __setNoticeSink((text) => notices.push(text));
+  });
+
+  afterEach(() => {
+    __setNoticeSink(null);
+    __setDraftMaxBytes(null);
+  });
+
+  it("上限按 UTF-8 字节计：字符数没超但字节数超了也要拒绝", async () => {
+    __setDraftMaxBytes(1_024);
+    // 400 个汉字 = 400 字符（< 1024），但 UTF-8 是 1200 字节
+    const ok = await writeDraftNow({
+      path: "/w/a.md",
+      isUntitled: false,
+      content: "汉".repeat(400),
+    });
+
+    expect(ok).toBe(false);
+    expect(lastDraftWriteOutcome.get("/w/a.md")).toBe("oversize");
+    expect(files.size).toBe(0);
+    expect(notices).toHaveLength(1);
+  });
+
+  it("上限把 JSON 信封算进去：正文没超、加上路径与时间戳后超了也要拒绝", async () => {
+    __setDraftMaxBytes(1_024);
+    // 正文 950 字节 < 1024，但 DraftFile 的信封字段会把它推过上限
+    const ok = await writeDraftNow({
+      path: "/w/envelope.md",
+      isUntitled: false,
+      content: "a".repeat(950),
+    });
+
+    expect(ok).toBe(false);
+    expect(lastDraftWriteOutcome.get("/w/envelope.md")).toBe("oversize");
+    expect(files.size).toBe(0);
+  });
+
+  it("未超限时照常写盘，结果为 ok", async () => {
+    __setDraftMaxBytes(1_024);
+    expect(
+      await writeDraftNow({ path: "/w/a.md", isUntitled: false, content: "短正文" }),
+    ).toBe(true);
+    expect(lastDraftWriteOutcome.get("/w/a.md")).toBe("ok");
+    expect(files.has(`${DRAFT_DIR}/${draftFileKey("/w/a.md")}.json`)).toBe(true);
+  });
+
+  it("超过真实 10MB 上限的文档被跳过，且同一条只提示一次", async () => {
+    const content = "a".repeat(DRAFT_MAX_BYTES + 1);
+
+    expect(await writeDraftNow({ path: "/w/big.md", isUntitled: false, content })).toBe(false);
+    expect(lastDraftWriteOutcome.get("/w/big.md")).toBe("oversize");
+    expect(files.size).toBe(0);
+    expect(notices).toHaveLength(1);
+    expect(notices[0]).toContain("10 MB");
+
+    // 1.2s 防抖下每次输入都会重试：不能每次都弹提示
+    expect(await writeDraftNow({ path: "/w/big.md", isUntitled: false, content })).toBe(false);
+    expect(lastDraftWriteOutcome.get("/w/big.md")).toBe("oversize");
+    expect(notices).toHaveLength(1);
+  });
+
+  it("缩小回上限内写成功后，再次超限要重新提示（否则用户以为副本还在更新）", async () => {
+    __setDraftMaxBytes(1_024);
+    const big = "汉".repeat(400);
+
+    expect(await writeDraftNow({ path: "/w/a.md", isUntitled: false, content: big })).toBe(false);
+    expect(notices).toHaveLength(1);
+
+    expect(await writeDraftNow({ path: "/w/a.md", isUntitled: false, content: "短" })).toBe(true);
+    expect(lastDraftWriteOutcome.get("/w/a.md")).toBe("ok");
+
+    expect(await writeDraftNow({ path: "/w/a.md", isUntitled: false, content: big })).toBe(false);
+    expect(notices).toHaveLength(2);
+  });
+
+  it("超限但盘上仍有旧副本：退出确认不能声称「没有恢复副本」", async () => {
+    __setDraftMaxBytes(1_024);
+    useWorkspace.setState({ openTabs: [tab("/w/a.md")] } as never);
+    await flushAllDrafts({ durability: "sync" });
+    expect(hasRecoverableDraft()).toBe(true);
+
+    // 同一 tab 内容涨到超限：本次不写盘，但上一份副本是刻意保留的
+    useWorkspace.setState({
+      openTabs: [tab("/w/a.md", { content: "汉".repeat(400) })],
+    } as never);
+    await flushAllDrafts({ durability: "sync" });
+
+    expect(lastDraftWriteOutcome.get("/w/a.md")).toBe("oversize");
+    expect(files.has(`${DRAFT_DIR}/${draftFileKey("/w/a.md")}.json`)).toBe(true);
+    expect(hasRecoverableDraft()).toBe(true);
+  });
+
+  it("清掉副本后不再声称「有恢复副本」（历史成功记录不能放行退出）", async () => {
+    useWorkspace.setState({ openTabs: [tab("/w/a.md")] } as never);
+    await flushAllDrafts({ durability: "sync" });
+    expect(journalHealth).toBe("healthy");
+    expect(hasRecoverableDraft()).toBe(true);
+
+    // 保存 / 关闭 tab 会走 clearDraft：文件删了，成功记录也必须一起清
+    await clearDraft("/w/a.md");
+    expect(files.has(`${DRAFT_DIR}/${draftFileKey("/w/a.md")}.json`)).toBe(false);
+    expect(hasRecoverableDraft()).toBe(false);
+  });
+
+  it("文档变大超限时不删掉之前写下的副本（偏旧也好过完全没有）", async () => {
+    __setDraftMaxBytes(1_024);
+    const file = `${DRAFT_DIR}/${draftFileKey("/w/a.md")}.json`;
+    expect(await writeDraftNow({ path: "/w/a.md", isUntitled: false, content: "短" })).toBe(true);
+
+    expect(
+      await writeDraftNow({ path: "/w/a.md", isUntitled: false, content: "汉".repeat(400) }),
+    ).toBe(false);
+
+    expect(files.has(file)).toBe(true);
+    expect(JSON.parse(files.get(file)!).content).toBe("短");
+  });
+
+  it("单条超限不算写盘故障：其它文档有副本时 health 不降级", async () => {
+    __setDraftMaxBytes(1_024);
+    useWorkspace.setState({
+      openTabs: [tab("/w/big.md", { content: "汉".repeat(400) }), tab("/w/a.md")],
+    } as never);
+
+    await flushAllDrafts({ durability: "sync" });
+
+    expect(journalHealth).toBe("healthy");
+    expect(hasRecoverableDraft()).toBe(true);
+    expect(files.has(`${DRAFT_DIR}/${draftFileKey("/w/a.md")}.json`)).toBe(true);
+    expect(files.has(`${DRAFT_DIR}/${draftFileKey("/w/big.md")}.json`)).toBe(false);
+  });
+
+  it("全部草稿都超限：health 仍 healthy，但确实没有可恢复副本（退出提示仍准确）", async () => {
+    __setDraftMaxBytes(1_024);
+    useWorkspace.setState({
+      openTabs: [tab("/w/big.md", { content: "汉".repeat(400) })],
+    } as never);
+
+    await flushAllDrafts({ durability: "sync" });
+
+    expect(journalHealth).toBe("healthy");
+    expect(hasRecoverableDraft()).toBe(false);
   });
 });

@@ -30,11 +30,13 @@ const {
   readDocumentMock,
   saveDocumentMock,
   readTextFileMock,
+  readRecoveryFileMock,
   listDirFilesMock,
   deletePathMock,
 } = vi.hoisted(() => ({
   readDocumentMock: vi.fn(),
   readTextFileMock: vi.fn(async (_path: string) => "基线"),
+  readRecoveryFileMock: vi.fn(async (_path: string) => "基线"),
   listDirFilesMock: vi.fn(async (_dirPath: string) => [] as Array<{
     name: string;
     isDir: boolean;
@@ -52,6 +54,7 @@ vi.mock("../../src/lib/fs", () => ({
   readDocument: readDocumentMock,
   saveDocument: saveDocumentMock,
   readTextFile: readTextFileMock,
+  readRecoveryFile: readRecoveryFileMock,
   listDirFiles: listDirFilesMock,
   deletePath: deletePathMock,
   fileMtime: vi.fn(async () => 5),
@@ -140,6 +143,7 @@ beforeEach(() => {
     .mockReset()
     .mockResolvedValue({ content: "磁盘内容", stat: { mtimeUs: 5_000, size: 4 } });
   readTextFileMock.mockReset().mockResolvedValue("磁盘内容");
+  readRecoveryFileMock.mockReset().mockResolvedValue("磁盘内容");
   listDirFilesMock.mockReset().mockResolvedValue([]);
   deletePathMock.mockReset().mockResolvedValue(undefined);
   saveDocumentMock.mockClear();
@@ -1556,7 +1560,7 @@ describe("#409 旧 crashed 归档回收", () => {
       }
       return [];
     });
-    readTextFileMock.mockImplementation(async (path: string) => {
+    readRecoveryFileMock.mockImplementation(async (path: string) => {
       if (path === archive) return archiveBody;
       throw new Error("not found");
     });
@@ -1566,6 +1570,9 @@ describe("#409 旧 crashed 归档回收", () => {
       await expect(cleanupExpiredDrafts(NOW)).resolves.toBe(0);
       expect(deletePathMock).toHaveBeenCalledTimes(1);
       expect(deletePathMock).toHaveBeenCalledWith(archive);
+      // 恢复区读取必须走专用通道：草稿正文 10MB + 信封会超过文档通道的 10MB 护栏
+      expect(readRecoveryFileMock).toHaveBeenCalled();
+      expect(readTextFileMock).not.toHaveBeenCalled();
     } finally {
       __setRecoveryIo(null);
     }

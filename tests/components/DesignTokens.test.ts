@@ -36,9 +36,9 @@ describe("UI/UX Design Tokens & Layout 验证（#224 S3/S4）", () => {
     }
   });
 
-  it("清单的 glob 展开包含全部 14 个组件 CSS 且 App.css 在列", () => {
+  it("清单的 glob 展开包含全部 15 个组件 CSS 且 App.css 在列", () => {
     const files = expandEntries(fixture.tokenDefinitionFiles);
     expect(files).toContain("src/App.css");
-    expect(files.filter((f) => f.startsWith("src/components/") && f.endsWith(".css"))).toHaveLength(14);
+    expect(files.filter((f) => f.startsWith("src/components/") && f.endsWith(".css"))).toHaveLength(15);
   });
 });

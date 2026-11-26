@@ -11,6 +11,12 @@ export type SidebarSectionId = "recents" | "bookmarks" | "snapshots";
 /** 各区块是否展开 */
 export type SidebarSectionExpanded = Record<SidebarSectionId, boolean>;
 
+/** 非阻塞提示（草稿超限等）：不打断输入，自动消失 */
+export interface UINotice {
+  id: number;
+  text: string;
+}
+
 export interface UIState {
   /** 侧边栏是否可见 */
   sidebarVisible: boolean;
@@ -34,7 +40,15 @@ export interface UIState {
   setZenMode: (v: boolean) => void;
   /** 切换指定侧边栏区块的展开/折叠（issue #167） */
   toggleSectionExpanded: (section: SidebarSectionId) => void;
+  /** 当前非阻塞提示（不持久化） */
+  notice: UINotice | null;
+  /** 弹一条非阻塞提示；不能用于必须用户确认的事（那走 dialogs.showMessage） */
+  showNotice: (text: string) => void;
+  /** 关掉提示；传 id 时只关那一条，避免把后来的新提示误关 */
+  dismissNotice: (id?: number) => void;
 }
+
+let noticeSeq = 0;
 
 const STORAGE_KEY = "inkling-ui";
 
@@ -119,6 +133,18 @@ export const useUI = create<UIState>((set, get) => {
       const next = { ...get().sectionExpanded, [section]: !get().sectionExpanded[section] };
       set({ sectionExpanded: next });
       persistCurrent({ sectionExpanded: next });
+    },
+
+    notice: null,
+    showNotice: (text) => {
+      noticeSeq += 1;
+      set({ notice: { id: noticeSeq, text } });
+    },
+    dismissNotice: (id) => {
+      const current = get().notice;
+      if (!current) return;
+      if (id !== undefined && current.id !== id) return;
+      set({ notice: null });
     },
   };
 });
