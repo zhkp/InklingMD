@@ -799,6 +799,59 @@ describe("#409 旧 crashed 归档回收", () => {
     expect(files.has(archive)).toBe(false);
   });
 
+  it("写入侧：beginSession 归档空草稿会话时写出 draftsEnumerated=true + fullyHandled=true，超期后归档真被回收", async () => {
+    files.set(
+      SESSION,
+      JSON.stringify({ version: 1, sessionId: "s-empty", startedAt: 1_111, cleanExit: false }),
+    );
+    const archivedAt = 5_000;
+
+    await beginSession(archivedAt);
+
+    const archive = "/appdata/recovery/main/crashed-1111.json";
+    const archived = JSON.parse(files.get(archive)!);
+    // 回收的必要条件：它必须由归档链路自己写出来（该位为 false 则回收彻底失效），
+    // 而不是用例手工播种的字段
+    expect(archived.draftsEnumerated).toBe(true);
+    expect(archived.fullyHandled).toBe(true);
+
+    expect(await cleanupExpiredDrafts(archivedAt + DRAFT_TTL_MS + 1)).toBe(0);
+    expect(files.has(archive)).toBe(false);
+  });
+
+  it("写入侧到回收全链路：beginSession 归档 1 份草稿 → 丢弃并记账 → 超期清理删草稿与归档", async () => {
+    files.set(
+      SESSION,
+      JSON.stringify({ version: 1, sessionId: "s-one", startedAt: 1_111, cleanExit: false }),
+    );
+    const draftPath = "/w/a.md";
+    const draftPathFile = seedDraft(draftPath, { updatedAt: 4_000, sessionId: "s-one" });
+    const archivedAt = 5_000;
+
+    await beginSession(archivedAt);
+
+    const archive = "/appdata/recovery/main/crashed-1111.json";
+    let archived = JSON.parse(files.get(archive)!);
+    expect(archived.draftsEnumerated).toBe(true);
+    expect(archived.draftPaths).toEqual([draftPath]);
+    expect(archived.fullyHandled).toBe(false);
+
+    // 与设置面板「丢弃」一致：先 discardDrafts 删文件，再 markDraftsHandled 按会话记账
+    const drafts = await listDrafts();
+    expect(drafts.map((d) => d.tabPath)).toEqual([draftPath]);
+    expect(await discardDrafts(drafts)).toBe(1);
+    // 归因明确：文件是「丢弃」删的，后面的清理只负责回收账本
+    expect(files.has(draftPathFile)).toBe(false);
+    await markDraftsHandled([{ sessionId: "s-one", tabPath: draftPath }]);
+
+    archived = JSON.parse(files.get(archive)!);
+    expect(archived.fullyHandled).toBe(true);
+
+    expect(await cleanupExpiredDrafts(archivedAt + DRAFT_TTL_MS + 1)).toBe(0);
+    expect(files.has(draftPathFile)).toBe(false);
+    expect(files.has(archive)).toBe(false);
+  });
+
   it("fullyHandled=false 的归档即使超期也保留（已处理账本不能丢）", async () => {
     const archive = crashed("crashed-pending.json", { fullyHandled: false });
 
