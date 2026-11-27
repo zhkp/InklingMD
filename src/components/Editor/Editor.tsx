@@ -31,7 +31,7 @@ import { linkClickPlugin, scrollToAnchorInView } from "./link-click";
 import { outlineTrackerPlugin } from "./outline-tracker";
 import {
   cancelPendingMarkdownPublish,
-  flushAllMarkdownPublishers,
+  flushMarkdownPublisherFor,
   markdownPublisherPlugin,
 } from "./markdown-publisher";
 import { normalizeListPlaceholders } from "./markdown-serialize";
@@ -44,7 +44,7 @@ import { tableTrackerPlugin } from "./table-tracker";
 import { selectAllPlugin } from "./select-all";
 import { useSourceModeTransition } from "./useSourceModeTransition";
 import { useCursorStateRestore } from "./useCursorStateRestore";
-import { placeCursorForRootClick } from "./editor-root-click";
+import { placeCursorForRootClick, pointerNeedsHydration } from "./editor-root-click";
 import {
   createTabEditorCache,
   flushActiveHydration,
@@ -439,8 +439,10 @@ function EditorInner({
             const inflightTask = hydrationTaskRef.current;
             hydrationTaskRef.current = null;
             if (!prev.sourceMode) {
-              // 若通过 Sidebar/QuickOpen 切 tab，store 入口未调 flush，在此补齐（仍在旧 onChangeRef 下）
-              flushAllMarkdownPublishers();
+              // 若通过 Sidebar/QuickOpen 切 tab，store 入口未调 flush，在此补齐（仍在旧 onChangeRef 下）。
+              // 只 flush 切离的那个 view：分屏编辑器仍停在自己的文件上，不该为本次切 tab
+              // 同步序列化它的大文档（#431 评审）。
+              flushMarkdownPublisherFor(view);
               cancelPendingMarkdownPublish(view);
               flushCursorSaverForTabSwitch(view, prev.filePath);
 
@@ -751,9 +753,8 @@ function EditorInner({
             const flushOnInteraction = (event: Event) => {
               if (event.type === "mousedown") {
                 const me = event as MouseEvent;
-                const hit = view.posAtCoords({ left: me.clientX, top: me.clientY });
-                const docSize = view.state.doc.content.size;
-                if (hit && hit.pos < docSize - 2) return;
+                // 与根容器点击共用同一判据：命中已挂载前缀时不补齐尾部
+                if (!pointerNeedsHydration(view, me.clientX, me.clientY)) return;
               }
               // 只补齐**触发事件的这个编辑器**（#431 评审）：无参调用会遍历所有
               // 活跃水合任务，分屏时在一个 pane 点一下就可能把另一个 pane 剩余的

@@ -54,4 +54,23 @@ test.describe("切 tab 的编辑器状态承接（#426）", () => {
       timeout: 5_000,
     });
   });
+
+  test("空状态下 Ctrl+N：编辑器就绪后自动聚焦，不点击也能直接输入", async ({ page }) => {
+    // 先关闭全部 tab 回到空状态：此时没有任何编辑器实例，Ctrl+N 会从零创建
+    await openFile(page, "readme.md");
+    await page.locator(".tab-active").click({ button: "right" });
+    await page.locator(".tab-context-item", { hasText: "全部关闭" }).click();
+    await expect(page.locator(".md-editor-root")).toHaveCount(0, { timeout: 5_000 });
+
+    await page.keyboard.press(`${MOD}+KeyN`);
+    await expect(page.locator(".tab-active")).toContainText("未命名", { timeout: 5_000 });
+
+    // 旧实现：newTab 后的 rAF 在编辑器尚未创建时就清掉 pendingFocusRef，
+    // 随后的 onReady 不再重试聚焦 → 这里的首个字符会落到 body 上丢失
+    const editor = page.locator(".ProseMirror");
+    await expect(editor).toBeVisible({ timeout: 10_000 });
+    await expect(editor).toBeFocused({ timeout: 5_000 });
+    await page.keyboard.type("空状态焦点标记");
+    await expect(editor).toContainText("空状态焦点标记", { timeout: 5_000 });
+  });
 });

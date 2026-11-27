@@ -5,6 +5,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   flushAllMarkdownPublishers,
+  flushMarkdownPublisherFor,
   markdownPublisherPlugin,
 } from "../../src/components/Editor/markdown-publisher";
 
@@ -48,7 +49,7 @@ function setup(options?: { initialSynced?: string }) {
       prevState as never,
     );
   };
-  return { onChange, serialize, pluginView, dom, bump };
+  return { onChange, serialize, pluginView, dom, bump, view };
 }
 
 afterEach(() => {
@@ -128,6 +129,29 @@ describe("markdownPublisherPlugin", () => {
     // 发布后回到 idle：再次 flush 不重复序列化
     flushAllMarkdownPublishers();
     expect(serialize).toHaveBeenCalledTimes(1);
+  });
+
+  it("按 view flush 只发布该编辑器的待发编辑（#431 评审）", () => {
+    // 切 tab / 进源码模式是单编辑器交互：分屏侧仍停在自己的文件上，
+    // 不能被顺带做一次全文序列化（大文档就是一次长任务）。
+    vi.useFakeTimers();
+    const a = setup();
+    const b = setup();
+    a.bump(1);
+    b.bump(2);
+
+    flushMarkdownPublisherFor(a.view as never);
+    expect(a.onChange).toHaveBeenCalledTimes(1);
+    expect(a.onChange).toHaveBeenCalledWith("md-1");
+    expect(b.onChange).not.toHaveBeenCalled();
+    expect(b.serialize).not.toHaveBeenCalled();
+
+    flushAllMarkdownPublishers();
+    expect(b.onChange).toHaveBeenCalledTimes(1);
+    expect(b.onChange).toHaveBeenCalledWith("md-2");
+
+    a.pluginView.destroy();
+    b.pluginView.destroy();
   });
 
   it("销毁时 flush 待定序列化", () => {

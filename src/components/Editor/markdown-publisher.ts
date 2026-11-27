@@ -18,12 +18,18 @@ export interface MarkdownPublisherDeps {
 const publisherKey = new PluginKey<{ skipSeq: number }>("inkling-markdown-publisher");
 
 // 存活编辑器的 flush 注册表：保存路径在读取 store 前统一 flush，
-// 避免防抖窗口内 Ctrl/Cmd+S 读到旧内容（PR #34 review）
-const pendingFlushes = new Set<() => void>();
+// 避免防抖窗口内 Ctrl/Cmd+S 读到旧内容（PR #34 review）。
+// 按 EditorView 索引，交互路径只 flush 自己那份，避免顺手序列化分屏的全文（#431 评审）。
+const pendingFlushes = new Map<EditorView, () => void>();
 const tabCancelTimers = new WeakMap<EditorView, () => void>();
 
 export function flushAllMarkdownPublishers(): void {
-  for (const flush of [...pendingFlushes]) flush();
+  for (const flush of [...pendingFlushes.values()]) flush();
+}
+
+/** 只 flush 指定编辑器的待发编辑（切 tab / 进源码模式等单编辑器交互路径） */
+export function flushMarkdownPublisherFor(view: EditorView): void {
+  pendingFlushes.get(view)?.();
 }
 
 /** 切 tab 替换 doc 前取消未触发的防抖定时器，避免串写到新 tab */
@@ -97,7 +103,7 @@ export const markdownPublisherPlugin = (deps: MarkdownPublisherDeps) =>
         lastSkipSeq = publisherKey.getState(view.state)?.skipSeq ?? lastSkipSeq;
       });
       view.dom.addEventListener("blur", flush);
-      pendingFlushes.add(flush);
+      pendingFlushes.set(view as EditorView, flush);
       return {
         update: (nextView, prevState) => {
           const skipSeq = publisherKey.getState(nextView.state)?.skipSeq ?? lastSkipSeq;
@@ -111,7 +117,7 @@ export const markdownPublisherPlugin = (deps: MarkdownPublisherDeps) =>
         },
         destroy: () => {
           tabCancelTimers.delete(view as EditorView);
-          pendingFlushes.delete(flush);
+          pendingFlushes.delete(view as EditorView);
           view.dom.removeEventListener("blur", flush);
           flush();
         },

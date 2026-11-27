@@ -27,6 +27,7 @@ vi.mock("../../src/lib/dialogs", () => ({
 }));
 
 import { imageUploadPlugin } from "../../src/components/Editor/image-upload";
+import { useWorkspace } from "../../src/store/workspace";
 
 function makeSchema() {
   return new Schema({
@@ -87,6 +88,14 @@ describe("imageUploadPlugin 粘贴图片", () => {
     writeBinaryFileMock.mockReset();
     resolvePathFromDocumentMock.mockResolvedValue("/docs/assets/x.png");
     writeBinaryFileMock.mockResolvedValue(undefined);
+    // 真实前提：编辑器挂载时对应 tab 已在 openTabs 里（上传护栏按 docId 判身份）
+    useWorkspace.setState({
+      openTabs: [
+        { path: "/docs/note.md", docId: "doc-note", content: "", dirty: false, revision: 0 },
+        { path: "/docs/other.md", docId: "doc-other", content: "", dirty: false, revision: 0 },
+        { path: "untitled-1", docId: "doc-untitled-1", content: "", dirty: false, revision: 0 },
+      ] as never,
+    });
   });
 
   afterEach(() => {

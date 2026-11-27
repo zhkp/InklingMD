@@ -62,10 +62,15 @@ async function prepareExportBody(
   mode: ResourceMode,
   sidecarDir?: string,
 ): Promise<PreparedExport | null> {
-  flushActiveHydration();
   const editor = getEditor();
   if (!editor) return null;
-  const view = editor.action((ctx) => ctx.get(editorViewCtx));
+  const view = editor.action((ctx) => {
+    const v = ctx.get(editorViewCtx);
+    // 只补齐被导出编辑器的水合（#431 评审）：产物只克隆它的 DOM/doc，
+    // 分屏另一侧的大文档不该为一次导出被同步插完。
+    flushActiveHydration(v);
+    return v;
+  });
   if (!view) return null;
 
   const snapshot = await buildExportSnapshot({

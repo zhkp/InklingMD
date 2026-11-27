@@ -18,6 +18,7 @@ import { applyEol, detectEol } from "../../lib/eol";
 import { formatCmdError } from "../../lib/cmd-error";
 import { isSamePath } from "../../lib/path-utils";
 import { clearDraft, scheduleDraft } from "../../lib/draft-journal";
+import { createDocId } from "../../lib/doc-identity";
 import { scheduleCursorCheckpoint } from "../../lib/cursor-checkpoint";
 import { evaluateBaseline, reconcileDiskContent } from "../../lib/save-guard";
 import { writeErrorCode, type WriteErrorCode } from "../../lib/writeErrors";
@@ -377,6 +378,7 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
 
       resolvedTab = {
         path: tabPath,
+        docId: createDocId(),
         content: snapshot.content,
         dirty: false,
         lastSavedAt: null,
@@ -804,6 +806,7 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
       const path = `untitled-${n}`;
       const tab: OpenTab = {
         path,
+        docId: createDocId(),
         content: initialContent,
         dirty: initialContent.length > 0,
         lastSavedAt: null,

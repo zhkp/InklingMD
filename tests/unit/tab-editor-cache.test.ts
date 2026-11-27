@@ -479,14 +479,24 @@ describe("水合补齐的作用域（#431 评审）", () => {
     expect(src).toContain("flushActiveHydration(ctx.get(editorViewCtx))");
     // 不允许残留无参调用（那会顺带把分屏另一侧的水合同步做完）
     expect(src).not.toMatch(/flushActiveHydration\(\s*\)/);
+    // 待发编辑的发布同样只作用于本编辑器（分屏的大文档不该被顺带序列化）
+    expect(src).toContain("flushMarkdownPublisherFor(");
+    expect(src).not.toContain("flushAllMarkdownPublishers(");
+  });
+
+  it("导出只补齐被导出编辑器的水合（#431 评审）", () => {
+    const src = readFileSync("src/lib/exporter.ts", "utf8");
+    expect(src).toContain("flushActiveHydration(v)");
+    expect(src).not.toMatch(/flushActiveHydration\(\s*\)/);
   });
 
   it("切走时缓存内容取 flush 之后的值，不用 flush 前的 prop（#431 评审）", () => {
     const editor = readFileSync("src/components/Editor/Editor.tsx", "utf8");
     expect(editor).toContain("cachedContent: flushedContent");
     expect(editor).not.toContain("cachedContent: prev.value");
-    // 取值必须发生在 flush 之后：换 tab 时 flush 才把最新内容写进 store
-    const flushIdx = editor.indexOf("flushAllMarkdownPublishers();");
+    // 取值必须发生在 flush 之后：换 tab 时 flush 才把最新内容写进 store。
+    // 且只 flush 切离的那个 view（分屏的待发编辑属于另一份文件，#431 评审）
+    const flushIdx = editor.indexOf("flushMarkdownPublisherFor(view);");
     const resolveIdx = editor.indexOf("const flushedContent =");
     expect(flushIdx).toBeGreaterThan(-1);
     expect(resolveIdx).toBeGreaterThan(flushIdx);

@@ -6,7 +6,27 @@
 import type { Editor } from "@milkdown/kit/core";
 import { editorViewCtx } from "@milkdown/kit/core";
 import { TextSelection } from "@milkdown/kit/prose/state";
+import type { EditorView } from "@milkdown/kit/prose/view";
 import { flushActiveHydration } from "./tab-editor-cache";
+
+/**
+ * 该坐标是否落在尚未水合的尾部区域（需要先同步补齐全文）。
+ *
+ * 分片水合期间，命中已挂载前缀的点击坐标映射是准确的，不需要为一次常规点击
+ * 付 O(剩余全文) 的同步插入；只有 `posAtCoords` 落空（内容区内边距/文档下方空白）
+ * 或映射到已挂载文档末尾（点击已越过最后一个已挂载块）时才补齐。
+ *
+ * 交互捕获监听与根容器点击共用同一判据，避免两处口径漂移重造长任务（#431 评审）。
+ */
+export function pointerNeedsHydration(
+  view: EditorView,
+  left: number,
+  top: number,
+): boolean {
+  const hit = view.posAtCoords({ left, top });
+  if (!hit) return true;
+  return hit.pos >= view.state.doc.content.size - 2;
+}
 
 export function placeCursorForRootClick(
   editor: Editor,
@@ -14,7 +34,9 @@ export function placeCursorForRootClick(
 ) {
   editor.action((ctx) => {
     const view = ctx.get(editorViewCtx);
-    // 点击前先补齐**这个**编辑器的分片水合（#431 评审）：坐标映射需要完整 doc。
+    // 命中已挂载内容：ProseMirror 自己会把光标放准，不补齐尾部（#431 评审）。
+    if (!pointerNeedsHydration(view, e.clientX, e.clientY)) return;
+    // 点击落在尚未挂载的尾部区域：先补齐这个编辑器的分片水合，坐标映射才完整。
     // 只作用于当前 view——无参 flush 会顺带把分屏另一侧的大文档同步插完，
     // 一次点击就能重建 0.6–0.8s 的长任务。
     flushActiveHydration(view);

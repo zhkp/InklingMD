@@ -63,16 +63,16 @@ function App() {
     (getEditor: (() => Editor | undefined) | null) => {
       getEditorRef.current = getEditor;
       if (getEditor && pendingFocusRef.current) {
-        pendingFocusRef.current = false;
         const editor = getEditor();
-        if (editor) {
-          // 延迟一帧等编辑器挂载稳定
-          requestAnimationFrame(() => {
-            editor.action((ctx) => {
-              ctx.get(editorViewCtx).focus();
-            });
+        if (!editor) return;
+        // 只有真正聚焦时才清标记：取不到实例时保留，等下一次 ready 接手
+        pendingFocusRef.current = false;
+        // 延迟一帧等编辑器挂载稳定
+        requestAnimationFrame(() => {
+          editor.action((ctx) => {
+            ctx.get(editorViewCtx).focus();
           });
-        }
+        });
       }
     },
     [],
@@ -164,9 +164,11 @@ function App() {
       // 编辑器实例现在跨 tab 复用（#426），不会再因重挂触发 onReady → 这里显式聚焦：
       // 新建草稿后焦点若停在侧边栏/标签栏，用户直接输入会丢字。
       requestAnimationFrame(() => {
-        pendingFocusRef.current = false;
         const editor = getEditor();
+        // 空状态下编辑器可能还在创建：此时必须保留 pendingFocusRef，
+        // 由随后触发的 onReady 接手聚焦；提前清掉会让首字丢失（#431 评审）。
         if (!editor) return;
+        pendingFocusRef.current = false;
         editor.action((ctx) => {
           ctx.get(editorViewCtx).focus();
         });

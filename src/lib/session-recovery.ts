@@ -25,6 +25,7 @@ import {
   ensureWindowLabel,
 } from "./draft-journal";
 import { detectEol } from "./eol";
+import { createDocId } from "./doc-identity";
 import { readCursorCheckpoint } from "./cursor-checkpoint";
 import { useWorkspace } from "../store/workspace";
 
@@ -518,6 +519,7 @@ export async function applyRecovery(
     const cursor = await readCursorCheckpoint(draft.tabPath);
     restored.push({
       path: draft.tabPath,
+      docId: createDocId(),
       content: draft.content,
       dirty: true,
       isUntitled: draft.isUntitled,

@@ -46,6 +46,61 @@ function fileToDataUrl(file: File): Promise<string> {
  */
 export { isUntitledPath };
 
+/** 文档身份 + revision：同一标签页另存为只换路径（docId 不变），外部重载 revision +1 */
+export interface DocumentIdentity {
+  docId: string;
+  revision: number;
+}
+
+/** 读取指定路径 tab 的文档身份（tab 不存在或未登记 docId 返回 null） */
+export function documentIdentityOf(path: string): DocumentIdentity | null {
+  const tab = useWorkspace.getState().openTabs.find((t) => t.path === path);
+  if (!tab?.docId) return null;
+  return { docId: tab.docId, revision: tab.revision ?? 0 };
+}
+
+/**
+ * 上传期间「目标文档是否仍是当初那一份」（#431 评审）。
+ *
+ * 不能按路径判等：
+ * - 草稿另存为会把路径从 untitled-N 换成真实路径，但仍是同一份文档；
+ * - 外部重载（`reloadFile`）路径不变，内容却已被替换（revision +1）；
+ * - 切到另一个 tab 时，当前路径对应的 docId 必然不同。
+ * 因此按 docId + revision 判定，并复核 view 仍存活。
+ */
+export function stillSameDocument(args: {
+  view: Pick<EditorView, "isDestroyed">;
+  /** 上传开始时的文档身份；null 表示该路径未登记为 tab（如空路径兜底） */
+  identity: DocumentIdentity | null;
+  documentPath: string;
+  getDocumentPath: () => string;
+}): boolean {
+  const { view, identity, documentPath, getDocumentPath } = args;
+  if (view.isDestroyed) return false;
+  const currentPath = getDocumentPath();
+  const current = documentIdentityOf(currentPath);
+  if (identity) {
+    // 身份已登记：只认 docId + revision。另存为换路径但保留 docId → 放行；
+    // 切 tab / 重载 / tab 被关闭 → 拒绝。
+    if (current) {
+      return (
+        current.docId === identity.docId &&
+        current.revision === identity.revision
+      );
+    }
+    // 当前视图路径已不在 openTabs：另存为/外部改名刚换了路径，而 React 还没把
+    // 新 filePath 写进 view 的 getter。此时按 docId 找回同一份文档，并确认
+    // revision 未变（重载会 +1）。docId 全局唯一，不会误认成别的 tab。
+    return useWorkspace
+      .getState()
+      .openTabs.some(
+        (t) => t.docId === identity.docId && (t.revision ?? 0) === identity.revision,
+      );
+  }
+  // 未登记路径（空路径等降级场景）没有身份可比，退回路径判等
+  return currentPath === documentPath;
+}
+
 /**
  * 将图片文件写入当前 Markdown 同目录的 assets/ 并在编辑器中插入图片节点。
  * 未保存草稿（documentPath 为空或 untitled-N 虚拟路径）直接以 Data URL 形式内联插入，
@@ -55,35 +110,6 @@ export { isUntitledPath };
  * @param pos 插入位置（drop 时由坐标计算，paste 时为 null 用当前选区）
  * @param documentPath 当前 Markdown 文件完整路径
  */
-/** 该路径 tab 的 revision（外部重载会 +1；普通编辑不动它） */
-export function revisionOf(documentPath: string): number {
-  return (
-    useWorkspace.getState().openTabs.find((t) => t.path === documentPath)
-      ?.revision ?? 0
-  );
-}
-
-/**
- * 上传期间「目标文档是否仍是当初那一份」（#431 评审）。
- *
- * 只比较路径不够：外部重载（`reloadFile`）会把同一路径的内容换成磁盘版本并把
- * `revision` +1，此时 pending 的上传仍会通过路径判等，把图片节点插进新内容里
- * 的旧位置。所以路径、revision、view 存活三者都要一致。
- */
-export function stillSameDocument(args: {
-  view: Pick<EditorView, "isDestroyed">;
-  documentPath: string;
-  revision: number;
-  getDocumentPath: () => string;
-}): boolean {
-  const { view, documentPath, revision, getDocumentPath } = args;
-  return (
-    !view.isDestroyed &&
-    getDocumentPath() === documentPath &&
-    revisionOf(documentPath) === revision
-  );
-}
-
 async function insertImages(
   files: File[],
   view: EditorView,
@@ -95,13 +121,14 @@ async function insertImages(
   if (imageFiles.length === 0) return;
   // 编辑器实例现在跨 tab 复用（#426）：每个 await 之后必须复核「当前仍是同一个文档」，
   // 否则上传/落盘期间切走 tab 会把图片节点插进新 tab，并把旧文档的相对路径带过去。
-  // #431 评审：路径相同但被外部重载（revision 变化）时同样必须放弃。
-  const documentRevision = revisionOf(documentPath);
+  // #431 评审：路径会因草稿另存为变化（仍是同一份文档），也会因外部重载而同一路径
+  // 换内容（revision 变化），所以身份取 docId + revision，不能按 path 判等。
+  const documentIdentity = documentIdentityOf(documentPath);
   const stillSameDoc = () =>
     stillSameDocument({
       view,
+      identity: documentIdentity,
       documentPath,
-      revision: documentRevision,
       getDocumentPath,
     });
 
