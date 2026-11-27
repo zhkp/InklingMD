@@ -12,7 +12,14 @@
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
+import { Schema } from "@milkdown/kit/prose/model";
+import { EditorState, TextSelection } from "@milkdown/kit/prose/state";
+import { EditorView } from "@milkdown/kit/prose/view";
 import { TableToolbar } from "../../src/components/Editor/TableToolbar";
+import {
+  hasActiveHydration,
+  startDocHydration,
+} from "../../src/components/Editor/tab-editor-cache";
 
 // mock block-commands，避免引入完整 Milkdown 链
 vi.mock("../../src/components/Editor/block-commands", () => ({
@@ -69,11 +76,15 @@ vi.mock("@milkdown/kit/core", async (importOriginal) => {
 });
 
 // 构造假 editor：action 回调里捕获 view 引用，记录调用顺序
-function makeFakeEditor() {
-  const view = {
+function makeFakeEditor(viewOverride?: unknown) {
+  const view = (viewOverride ?? {
     state: { selection: { from: 0, to: 0 } },
     dispatch: vi.fn(),
     focus: vi.fn(),
+  }) as {
+    state: { selection: { from: number; to: number } };
+    dispatch: ReturnType<typeof vi.fn>;
+    focus: ReturnType<typeof vi.fn>;
   };
   const commandsCalls: string[] = [];
   const editor = {
@@ -195,5 +206,55 @@ describe("TableToolbar", () => {
       "addColBefore",
       "addColAfter",
     ]);
+  });
+});
+
+describe("TableToolbar × 分片水合（#431 评审）", () => {
+  it("view 外的表格命令执行前补齐当前 view 的水合", () => {
+    const schema = new Schema({
+      nodes: {
+        doc: { content: "block+" },
+        paragraph: {
+          group: "block",
+          content: "text*",
+          toDOM: () => ["p", 0],
+          parseDOM: [{ tag: "p" }],
+        },
+        text: { group: "inline" },
+      },
+    });
+    const fullDoc = schema.nodes.doc.create(
+      null,
+      Array.from({ length: 40 }, (_, i) =>
+        schema.nodes.paragraph.create(null, schema.text(`block-${i}`)),
+      ),
+    );
+    const root = document.createElement("div");
+    document.body.append(root);
+    const real = new EditorView(root, {
+      state: EditorState.create({
+        doc: fullDoc,
+        selection: TextSelection.create(fullDoc, 1),
+      }),
+    });
+    const task = startDocHydration({
+      view: real,
+      fullDoc,
+      fromCache: true,
+      chunkSize: 8,
+    });
+    expect(hasActiveHydration(real)).toBe(true);
+
+    const { editor, commandsCalls } = makeFakeEditor(real);
+    render(<TableToolbar getEditor={() => editor as never} inTable={true} />);
+    fireEvent.click(screen.getByTitle("删除整张表格"));
+
+    // 命令执行前已补齐：不会在截断文档上操作
+    expect(hasActiveHydration(real)).toBe(false);
+    expect(real.state.doc.childCount).toBe(40);
+    expect(commandsCalls).toEqual(["selectTable", "deleteSelectedCells"]);
+
+    task.cancel();
+    real.destroy();
   });
 });

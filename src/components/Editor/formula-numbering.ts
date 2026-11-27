@@ -83,9 +83,16 @@ export const formulaNumberingPlugin = () =>
       const fixes = collectFixes(newState.doc, enabled);
       if (fixes.length === 0) return null;
       const tr = newState.tr;
-      // 编号只改运行时 attr，不进入 Markdown 输出：不进撤销历史，也不触发全文发布
+      // 编号只改运行时 attr，不进入 Markdown 输出：不进撤销历史。
+      // 只有**本批次没有用户 doc 变更**（纯 recalc / 水合校正）才跳过发布；
+      // 用户插入/删除/undo 公式时，编号 appendTransaction 与用户事务同批，
+      // 若也跳过发布，publisher 会把整批当成只改 attr，用户编辑永远不发布（#431 评审）。
+      const userEditInBatch = trs.some(
+        (batchTr) =>
+          batchTr.docChanged && !batchTr.getMeta(hydrationMetaKey)?.hydrating,
+      );
       tr.setMeta("addToHistory", false);
-      tr.setMeta(SKIP_MARKDOWN_PUBLISH_META, true);
+      if (!userEditInBatch) tr.setMeta(SKIP_MARKDOWN_PUBLISH_META, true);
       // 从后往前 setNodeMarkup，避免位置偏移影响（atom 节点改 attr 不改尺寸，但稳妥起见逆序）
       for (let i = fixes.length - 1; i >= 0; i -= 1) {
         const f = fixes[i];

@@ -22,6 +22,7 @@ import { downloadRemoteImage, mapRemoteImageError, type RemoteImage } from "../.
 import { extensionForMime, genAssetName, saveImageAsset } from "../../lib/assetStore";
 import { showMessage } from "../../lib/dialogs";
 import { isUntitledPath } from "../../lib/path-utils";
+import { documentIdentityOf, type DocumentIdentity } from "./document-identity";
 
 /** 单次粘贴最多下载的远程图片数（超出部分保留远程引用） */
 export const MAX_REMOTE_IMAGES_PER_PASTE = 30;
@@ -128,6 +129,8 @@ type ResolvedRemoteImageDeps = {
 class Runner {
   cancelled = false;
   private nextId = 1;
+  /** 入队时的文档身份：reload 会换内容（revision +1），旧下载结果不得回写新文档 */
+  private identity: DocumentIdentity | null = null;
 
   constructor(
     private readonly view: EditorView,
@@ -137,6 +140,7 @@ class Runner {
   enqueue(items: { pos: number; src: string }[]): Promise<void> {
     const docPath = this.deps.resolveDocumentPath();
     if (this.cancelled || isUntitledPath(docPath)) return Promise.resolve();
+    this.identity = documentIdentityOf(docPath);
     // 粘贴路径与历史回放入口可能先后投递同一批图片：按 (位置, 地址) 去重——
     // 已登记的 pending 不再重复入队（重复下载纯属浪费，内容哈希去重不能替代）
     const registered = new Set(
@@ -155,6 +159,21 @@ class Runner {
     return this.run(srcs, docPath);
   }
 
+  /**
+   * 下载结果是否仍属于入队时的文档：路径相同还不够——reloadFile 会保留路径、
+   * 但换掉内容并递增 revision，旧结果若按 src 匹配 pending 会写进新文档（#431 评审）。
+   */
+  private sameDocument(docPath: string): boolean {
+    if (this.cancelled) return false;
+    if (this.deps.resolveDocumentPath() !== docPath) return false;
+    if (!this.identity) return true;
+    const current = documentIdentityOf(docPath);
+    return (
+      current !== null &&
+      current.docId === this.identity.docId &&
+      current.revision === this.identity.revision
+    );
+  }
   private dispatchMeta(meta: RemoteImageMeta) {
     const tr = this.view.state.tr.setMeta(remoteImageKey, meta).setMeta("addToHistory", false);
     this.view.dispatch(tr);
@@ -176,7 +195,7 @@ class Runner {
           }
           continue;
         }
-        if (this.cancelled || this.deps.resolveDocumentPath() !== docPath) return;
+        if (!this.sameDocument(docPath)) return;
         try {
           const rel = await this.deps.save(
             docPath,
@@ -192,7 +211,7 @@ class Runner {
       }
     };
     await Promise.all(Array.from({ length: Math.min(DOWNLOAD_CONCURRENCY, srcs.length) }, worker));
-    if (failures.length > 0 && !this.cancelled && this.deps.resolveDocumentPath() === docPath) {
+    if (failures.length > 0 && this.sameDocument(docPath)) {
       const lines = failures.map((f) => `• ${shortUrl(f.src)}：${f.reason}`).join("\n");
       this.deps.notify(
         `${failures.length} 张远程图片未能保存到本地 assets/，已保留远程链接：\n${lines}`,
@@ -202,7 +221,7 @@ class Runner {
 
   /** 把仍指向 src 的待替换节点改为本地相对路径；rel 为 null 表示放弃（保留远程 URL） */
   private replace(src: string, rel: string | null, docPath: string) {
-    if (this.cancelled || this.view.isDestroyed || this.deps.resolveDocumentPath() !== docPath) return;
+    if (this.view.isDestroyed || !this.sameDocument(docPath)) return;
     const state = remoteImageKey.getState(this.view.state);
     const targets = state?.pending.filter((p) => p.src === src) ?? [];
     if (targets.length === 0) return;

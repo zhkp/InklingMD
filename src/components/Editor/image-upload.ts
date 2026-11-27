@@ -8,7 +8,8 @@ import { Plugin, PluginKey } from "@milkdown/kit/prose/state";
 import type { EditorView } from "@milkdown/kit/prose/view";
 import { saveImageAsset, genAssetName } from "../../lib/assetStore";
 import { showMessage } from "../../lib/dialogs";
-import { isUntitledPath } from "../../lib/path-utils";
+import { isSamePath, isUntitledPath } from "../../lib/path-utils";
+import { documentIdentityOf, type DocumentIdentity } from "./document-identity";
 import { useWorkspace } from "../../store/workspace";
 
 const key = new PluginKey("inkling-image-upload");
@@ -46,18 +47,13 @@ function fileToDataUrl(file: File): Promise<string> {
  */
 export { isUntitledPath };
 
-/** 文档身份 + revision：同一标签页另存为只换路径（docId 不变），外部重载 revision +1 */
-export interface DocumentIdentity {
-  docId: string;
-  revision: number;
-}
+// 文档身份类型与查询统一从 ./document-identity 导入
+//
 
-/** 读取指定路径 tab 的文档身份（tab 不存在或未登记 docId 返回 null） */
-export function documentIdentityOf(path: string): DocumentIdentity | null {
-  const tab = useWorkspace.getState().openTabs.find((t) => t.path === path);
-  if (!tab?.docId) return null;
-  return { docId: tab.docId, revision: tab.revision ?? 0 };
-}
+//
+//
+
+//
 
 /**
  * 上传期间「目标文档是否仍是当初那一份」（#431 评审）。
@@ -142,9 +138,17 @@ async function insertImages(
       if (!isUntitledPath(documentPath)) {
         const buf = await file.arrayBuffer();
         if (!stillSameDoc()) return;
+        const assetName = genImageName(file);
         // markdown 中用正斜杠相对路径（跨平台兼容）；相同内容复用已有文件
-        relSrc = await saveImageAsset(documentPath, new Uint8Array(buf), genImageName(file));
+        relSrc = await saveImageAsset(documentPath, new Uint8Array(buf), assetName);
         if (!stillSameDoc()) return;
+        // 落盘期间文档路径迁移（另存为 / 外部改名，docId 不变）：
+        // 资源刚写在旧目录，相对路径已不指向它；按当前路径重新落盘（#431 评审）。
+        const mountedPath = getDocumentPath();
+        if (!isSamePath(mountedPath, documentPath) && !isUntitledPath(mountedPath)) {
+          relSrc = await saveImageAsset(mountedPath, new Uint8Array(buf), assetName);
+          if (!stillSameDoc()) return;
+        }
       } else {
         // 未命名草稿（untitled-N 虚拟路径）没有可解析的本地目录，转 Data URL 内联插入；
         // 草稿另存到任意目录后图片依然随文档自带，不会产生失效的相对路径

@@ -6,6 +6,7 @@ import { EditorState, Transaction } from "@milkdown/kit/prose/state";
 import { EditorView } from "@milkdown/kit/prose/view";
 import { startDocHydration } from "../../src/components/Editor/tab-editor-cache";
 import { markdownPublisherPlugin } from "../../src/components/Editor/markdown-publisher";
+import { history, redo, undo } from "@milkdown/kit/prose/history";
 
 describe("Formula Numbering Plugin", () => {
   const schema = new Schema({
@@ -254,6 +255,162 @@ describe("Formula Numbering × 缓存水合（#431 评审 B3）", () => {
     });
     expect(numbersOf(view)).toEqual([1, 2]);
 
+    vi.advanceTimersByTime(400);
+    expect(serialize).not.toHaveBeenCalled();
+    expect(onChange).not.toHaveBeenCalled();
+    view.destroy();
+    vi.useRealTimers();
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════
+// #431 评审：编号 appendTransaction 不得吞掉同批次用户编辑的 Markdown 发布
+// ═══════════════════════════════════════════════════════════════════════
+
+describe("编号事务与 Markdown 发布（#431 评审）", () => {
+  const schema = new Schema({
+    nodes: {
+      doc: { content: "block+" },
+      paragraph: { group: "block", content: "text*", toDOM: () => ["p", 0] },
+      math_display: {
+        group: "block",
+        atom: true,
+        attrs: { value: { default: "" }, number: { default: null } },
+        toDOM: () => ["div", { class: "math-display" }],
+      },
+      text: { inline: true },
+    },
+  });
+
+  function mount() {
+    const onChange = vi.fn();
+    const serialize = vi.fn((doc: PMNode) => {
+      const parts: string[] = [];
+      doc.descendants((node) => {
+        if (node.type.name === "math_display") parts.push(node.attrs.value);
+        return true;
+      });
+      return parts.join(",");
+    });
+    let lastSynced = "";
+    const state = EditorState.create({
+      doc: schema.nodes.doc.create(
+        null,
+        schema.nodes.math_display.create({ value: "x0", number: 1 }),
+      ),
+      plugins: [
+        formulaNumberingPlugin(),
+        history(),
+        markdownPublisherPlugin({
+          serialize,
+          getLastSynced: () => lastSynced,
+          setLastSynced: (md) => {
+            lastSynced = md;
+          },
+          getFilePath: () => "/docs/formula.md",
+          onChange,
+        }),
+      ],
+    });
+    const root = document.createElement("div");
+    document.body.append(root);
+    const view = new EditorView(root, { state });
+    return { view, onChange, serialize, getLastSynced: () => lastSynced };
+  }
+
+  function numbersOf(view: EditorView): Array<number | null> {
+    const out: Array<number | null> = [];
+    view.state.doc.descendants((node) => {
+      if (node.type.name === "math_display") out.push(node.attrs.number);
+      return true;
+    });
+    return out;
+  }
+
+  it("插入公式：编号与用户编辑同批，Markdown 仍照常发布", () => {
+    vi.useFakeTimers();
+    useSettings.setState({ formulaAutoNumber: true });
+    const { view, onChange } = mount();
+    const pos = view.state.doc.content.size;
+    view.dispatch(
+      view.state.tr.insert(
+        pos,
+        schema.nodes.math_display.create({ value: "new", number: null }),
+      ),
+    );
+    expect(numbersOf(view)).toEqual([1, 2]);
+
+    vi.advanceTimersByTime(400);
+    expect(onChange).toHaveBeenCalledTimes(1);
+    expect(onChange).toHaveBeenCalledWith("x0,new");
+    view.destroy();
+    vi.useRealTimers();
+  });
+
+  it("删除公式：编号重排后仍照常发布", () => {
+    vi.useFakeTimers();
+    useSettings.setState({ formulaAutoNumber: true });
+    const { view, onChange } = mount();
+    // 先插入第二个公式并发布
+    view.dispatch(
+      view.state.tr.insert(
+        view.state.doc.content.size,
+        schema.nodes.math_display.create({ value: "x1", number: null }),
+      ),
+    );
+    vi.advanceTimersByTime(400);
+    onChange.mockClear();
+
+    // 删除第一个公式 → 编号重排为 [1]
+    view.dispatch(view.state.tr.delete(0, 1));
+    expect(numbersOf(view)).toEqual([1]);
+    vi.advanceTimersByTime(400);
+    expect(onChange).toHaveBeenCalledTimes(1);
+    expect(onChange).toHaveBeenCalledWith("x1");
+    view.destroy();
+    vi.useRealTimers();
+  });
+
+  it("undo / redo 公式插入：编号回退/重排后仍照常发布", () => {
+    vi.useFakeTimers();
+    useSettings.setState({ formulaAutoNumber: true });
+    const { view, onChange } = mount();
+    view.dispatch(
+      view.state.tr.insert(
+        view.state.doc.content.size,
+        schema.nodes.math_display.create({ value: "x1", number: null }),
+      ),
+    );
+    vi.advanceTimersByTime(400);
+    onChange.mockClear();
+
+    // undo → 回到单个公式，编号 [1]
+    undo(view.state, (tr) => view.dispatch(tr));
+    expect(numbersOf(view)).toEqual([1]);
+    vi.advanceTimersByTime(400);
+    expect(onChange).toHaveBeenCalledTimes(1);
+    expect(onChange).toHaveBeenCalledWith("x0");
+
+    // redo → 恢复两个公式，编号 [1,2]
+    onChange.mockClear();
+    redo(view.state, (tr) => view.dispatch(tr));
+    expect(numbersOf(view)).toEqual([1, 2]);
+    vi.advanceTimersByTime(400);
+    expect(onChange).toHaveBeenCalledTimes(1);
+    expect(onChange).toHaveBeenCalledWith("x0,x1");
+    view.destroy();
+    vi.useRealTimers();
+  });
+
+  it("纯开关 recalc（无用户编辑）不触发发布", () => {
+    vi.useFakeTimers();
+    useSettings.setState({ formulaAutoNumber: false });
+    const { view, onChange, serialize } = mount();
+    serialize.mockClear(); // 插件初始化会用当前 doc 建基线，不计入本次断言
+    view.dispatch(
+      view.state.tr.setMeta(formulaNumberingKey, { recalc: true }),
+    );
+    expect(numbersOf(view)).toEqual([null]);
     vi.advanceTimersByTime(400);
     expect(serialize).not.toHaveBeenCalled();
     expect(onChange).not.toHaveBeenCalled();

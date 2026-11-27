@@ -15,6 +15,7 @@ import {
   flushActiveHydration,
   hasActiveHydration,
   hydrationMetaKey,
+  markActiveHydrationInteraction,
   startDocHydration,
   type HydrationMeta,
   type TabEditorSnapshot,
@@ -187,6 +188,33 @@ describe("分片水合（#426）", () => {
     // 取消后再 flush 也不能继续（否则切 tab 后旧文档会写进新 tab）
     flushActiveHydration();
     expect(view.state.doc.childCount).toBe(8);
+    view.destroy();
+  });
+
+  it("水合末片不覆盖用户在水合窗口内改动的选区（#431 评审）", () => {
+    const { view } = mountView(40);
+    const task = startDocHydration({
+      view,
+      fullDoc: makeDoc(40),
+      fromCache: true,
+      selection: { anchor: 2, head: 8 },
+      chunkSize: 8,
+    });
+    // 首片已挂载；用户点击前缀（交互监听不补齐，但会标记交互），
+    // PM 把选区改到点击处
+    markActiveHydrationInteraction(view);
+    view.dispatch(
+      view.state.tr.setSelection(
+        TextSelection.near(view.state.doc.resolve(3)),
+      ),
+    );
+    expect(view.state.selection.from).toBe(3);
+
+    flushActiveHydration(view);
+    expect(task.isActive()).toBe(false);
+    // 末片保留现场选区，不能拽回缓存快照的 2..8
+    expect(view.state.selection.from).toBe(3);
+    expect(view.state.selection.to).toBe(3);
     view.destroy();
   });
 

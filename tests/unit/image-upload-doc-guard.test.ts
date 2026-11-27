@@ -8,8 +8,8 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import {
   documentIdentityOf,
-  stillSameDocument,
-} from "../../src/components/Editor/image-upload";
+} from "../../src/components/Editor/document-identity";
+import { stillSameDocument } from "../../src/components/Editor/image-upload";
 import { useWorkspace } from "../../src/store/workspace";
 
 const DOC = "/workspace/note.md";

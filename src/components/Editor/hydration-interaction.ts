@@ -6,7 +6,10 @@
 // - 只作用于传入的 view：无参 flush 会顺带把分屏另一侧的大文档同步插完。
 
 import type { EditorView } from "@milkdown/kit/prose/view";
-import { flushActiveHydration } from "./tab-editor-cache";
+import {
+  flushActiveHydration,
+  markActiveHydrationInteraction,
+} from "./tab-editor-cache";
 import { pointerNeedsHydration } from "./editor-root-click";
 
 /** 在编辑器 DOM 上安装交互补齐监听，返回卸载函数 */
@@ -14,7 +17,12 @@ export function attachHydrationFlushOnInteraction(view: EditorView): () => void 
   const flushOnInteraction = (event: Event) => {
     if (event.type === "mousedown") {
       const me = event as MouseEvent;
-      if (!pointerNeedsHydration(view, me.clientX, me.clientY)) return;
+      if (!pointerNeedsHydration(view, me.clientX, me.clientY)) {
+        // 命中已挂载前缀：不补齐，但用户选区已经被改到点击处，
+        // 末片不能再套用缓存选区（#431 评审）。
+        markActiveHydrationInteraction(view);
+        return;
+      }
     }
     flushActiveHydration(view);
   };

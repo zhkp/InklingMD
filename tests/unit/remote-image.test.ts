@@ -66,6 +66,7 @@ import {
 } from "../../src/components/Editor/remote-image";
 import { createHarness, type Harness } from "../fixtures/smartPasteHarness";
 import { CmdError } from "../../src/lib/cmd-error";
+import { useWorkspace } from "../../src/store/workspace";
 
 const DOC = "/docs/note.md";
 const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3]);
@@ -427,5 +428,53 @@ describe("文件型图片粘贴（既有能力）不受影响", () => {
     await vi.waitFor(() => expect(imageSrcs()).toHaveLength(2));
     expect(imageSrcs()[1]).toBe(imageSrcs()[0]);
     expect(files.size).toBe(1);
+  });
+});
+
+describe("远程图片落盘：重载身份护栏（#431 评审）", () => {
+  it("下载期间同路径重载（revision +1）：旧结果不得回写新文档", async () => {
+    let releaseDownload:
+      | ((value: { data: Uint8Array; mime: string }) => void)
+      | null = null;
+    downloadMock.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          releaseDownload = resolve;
+        }),
+    );
+    useWorkspace.setState({
+      openTabs: [
+        {
+          path: DOC,
+          docId: "doc-note",
+          revision: 0,
+          content: "",
+          dirty: false,
+        },
+      ] as never,
+    });
+    await setup();
+    expect(
+      pasteHtml('<p><img src="https://cdn.example.com/a.png"></p>'),
+    ).toBe(true);
+    await vi.waitFor(() => expect(releaseDownload).not.toBeNull());
+
+    // reloadFile：路径不变、内容被替换、revision +1
+    useWorkspace.setState({
+      openTabs: [
+        {
+          path: DOC,
+          docId: "doc-note",
+          revision: 1,
+          content: "",
+          dirty: false,
+        },
+      ] as never,
+    });
+    releaseDownload!({ data: PNG, mime: "image/png" });
+    await settle();
+
+    // 旧下载属于重载前的文档：结果必须丢弃，图片保留远程地址
+    expect(imageSrcs()).toEqual(["https://cdn.example.com/a.png"]);
   });
 });

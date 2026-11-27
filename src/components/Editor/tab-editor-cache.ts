@@ -178,13 +178,27 @@ function applySafeSelection(
 // 在途水合任务注册表：按 EditorView 索引。主编辑器与分屏是两个独立实例，
 // 「本编辑器是否还在水合」必须按 view 判定，否则分屏水合会误伤主编辑器的光标恢复
 // （#426 评审 S5）。
-const activeHydrations = new Map<EditorView, () => void>();
+interface ActiveHydration {
+  flush: () => void;
+  /** 用户在水合窗口内交互过（点击已挂载前缀）：末片不得再套用缓存选区 */
+  markInteraction: () => void;
+}
+const activeHydrations = new Map<EditorView, ActiveHydration>();
 
 export function flushActiveHydration(view?: EditorView): void {
   const targets = view ? (activeHydrations.has(view) ? [activeHydrations.get(view)!] : []) : [...activeHydrations.values()];
-  for (const flush of targets) {
-    flush();
+  for (const target of targets) {
+    target.flush();
   }
+}
+
+/**
+ * 标记用户在一次在途水合期间发生过交互（#431 评审）。
+ * 交互监听命中已挂载前缀时不会补齐水合，但用户选区已被改到点击处；
+ * 末片必须保留现场选区，不能套用开始水合时缓存的选区。
+ */
+export function markActiveHydrationInteraction(view: EditorView): void {
+  activeHydrations.get(view)?.markInteraction();
 }
 
 export function hasActiveHydration(view?: EditorView): boolean {
@@ -312,6 +326,7 @@ export function startDocHydration({
   let nextIndex = safeChunk;
   let cancelled = false;
   let completed = false;
+  let selectionTouched = false;
   let timerId: ReturnType<typeof setTimeout> | null = null;
 
   const cleanup = () => {
@@ -348,7 +363,11 @@ export function startDocHydration({
       } satisfies HydrationMeta);
 
     if (isLast) {
-      applySafeSelection(tr, selection);
+      // 用户在水合窗口内交互过（点击已挂载前缀）时保留现场选区，
+      // 不套用开始水合时的缓存快照（#431 评审）。
+      if (!selectionTouched) {
+        applySafeSelection(tr, selection);
+      }
       applyHistoryStateMeta(tr, plugins, historyState);
     } else {
       applyHistoryStateMeta(tr, plugins, undefined);
@@ -394,7 +413,12 @@ export function startDocHydration({
     }, 0);
   };
 
-  activeHydrations.set(view, flush);
+  activeHydrations.set(view, {
+    flush,
+    markInteraction: () => {
+      selectionTouched = true;
+    },
+  });
   scheduleNext();
 
   const estimateFullHeight = (): number => {

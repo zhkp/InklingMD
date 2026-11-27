@@ -7,7 +7,7 @@ import type { Editor } from "@milkdown/kit/core";
 import { editorViewCtx } from "@milkdown/kit/core";
 import { TextSelection } from "@milkdown/kit/prose/state";
 import type { EditorView } from "@milkdown/kit/prose/view";
-import { flushActiveHydration } from "./tab-editor-cache";
+import { flushActiveHydration, markActiveHydrationInteraction } from "./tab-editor-cache";
 
 /**
  * 该坐标是否落在尚未水合的尾部区域（需要先同步补齐全文）。
@@ -34,8 +34,12 @@ export function placeCursorForRootClick(
 ) {
   editor.action((ctx) => {
     const view = ctx.get(editorViewCtx);
-    // 命中已挂载内容：ProseMirror 自己会把光标放准，不补齐尾部（#431 评审）。
-    if (!pointerNeedsHydration(view, e.clientX, e.clientY)) return;
+    // 命中已挂载内容：ProseMirror 自己会把光标放准，不补齐尾部（#431 评审）；
+    // 但用户选区已改变，末片不得再套用缓存选区。
+    if (!pointerNeedsHydration(view, e.clientX, e.clientY)) {
+      markActiveHydrationInteraction(view);
+      return;
+    }
     // 点击落在尚未挂载的尾部区域：先补齐这个编辑器的分片水合，坐标映射才完整。
     // 只作用于当前 view——无参 flush 会顺带把分屏另一侧的大文档同步插完，
     // 一次点击就能重建 0.6–0.8s 的长任务。

@@ -265,4 +265,48 @@ describe("imageUploadPlugin 粘贴图片", () => {
     expect(inserted?.attrs.src).toMatch(/^assets\/.+\.png$/);
     expect(showMessageMock).not.toHaveBeenCalled();
   });
+
+  it("落盘期间另存为到新路径：资源按新路径重新落盘，不产生失效相对路径（#431 评审）", async () => {
+    let releaseWrite: (() => void) | null = null;
+    writeBinaryFileMock.mockImplementationOnce(
+      () => new Promise<void>((resolve) => {
+        releaseWrite = resolve;
+      }),
+    );
+    let currentPath = "/docs/note.md";
+    const plugin = imageUploadPlugin(() => currentPath);
+    const file = new File([new Uint8Array([1, 2, 3])], "move.png", {
+      type: "image/png",
+    });
+    (plugin.props.handlePaste as any)(view, makePasteEvent(file));
+    await flushAsync();
+    expect(releaseWrite).not.toBeNull();
+
+    // 另存为：docId/revision 不变，路径换到 other.md（资源相对路径基准随之改变）
+    useWorkspace.setState({
+      openTabs: [
+        {
+          path: "/docs/other.md",
+          docId: "doc-note",
+          content: "",
+          dirty: false,
+          revision: 0,
+        },
+      ] as never,
+    });
+    currentPath = "/docs/other.md";
+    releaseWrite!();
+    await flushAsync();
+
+    // 旧目录写了一次；检测到路径迁移后按新路径再写一次
+    expect(writeBinaryFileMock).toHaveBeenCalledTimes(2);
+    const anchors = writeBinaryFileMock.mock.calls.map(
+      (call) => (call[2] as { anchorPath?: string } | undefined)?.anchorPath,
+    );
+    expect(anchors).toEqual(["/docs/note.md", "/docs/other.md"]);
+    const inserted = view.state.doc.firstChild?.content.firstChild;
+    expect(inserted?.type.name).toBe("image");
+    expect(inserted?.attrs.src).toMatch(/^assets\/.+\.png$/);
+    expect(showMessageMock).not.toHaveBeenCalled();
+  });
 });
