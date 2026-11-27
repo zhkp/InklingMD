@@ -217,6 +217,11 @@ export interface HydrationTask {
   cancel: () => void;
   flush: () => void;
   isActive: () => boolean;
+  /**
+   * 水合窗口内用户是否交互过（点击已挂载前缀，见 markActiveHydrationInteraction）。
+   * 切走时据此决定缓存现场选区还是启动水合时的快照（#431 评审）。
+   */
+  userInteracted: () => boolean;
 }
 
 export interface StartHydrationOptions {
@@ -300,6 +305,7 @@ export function startDocHydration({
       cancel: () => {},
       flush: () => {},
       isActive: () => false,
+      userInteracted: () => false,
     };
   }
 
@@ -444,5 +450,6 @@ export function startDocHydration({
     cancel,
     flush,
     isActive: () => !cancelled && !completed,
+    userInteracted: () => selectionTouched,
   };
 }

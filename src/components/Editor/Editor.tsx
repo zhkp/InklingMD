@@ -453,8 +453,12 @@ function EditorInner({
 
               const wasHydrating = inflightTask?.isActive() ?? false;
               const fullDoc = wasHydrating ? inflightTask!.fullDoc : view.state.doc;
+              // 水合窗口内用户点击过已挂载前缀（标记了交互）：现场选区才是用户意图，
+              // 不能用启动水合时的快照（否则切回后光标回到点击前的位置，#431 评审）。
               const selection =
-                wasHydrating && inflightTask?.selection
+                wasHydrating &&
+                inflightTask?.selection &&
+                !inflightTask.userInteracted()
                   ? inflightTask.selection
                   : {
                       anchor: view.state.selection.anchor,
