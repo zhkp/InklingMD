@@ -11,6 +11,7 @@ import { useWorkspace } from "../../store/workspace";
 import { searchInWorkspace, type SearchHit } from "../../lib/fs";
 import { mergeSearchResults } from "../../lib/bufferSearch";
 import { flushAllMarkdownPublishers } from "../Editor/markdown-publisher";
+import { flushActiveHydration } from "../Editor/tab-editor-cache";
 import { relativeToRoot } from "../../lib/path";
 import { IconFileText, IconX } from "../icons";
 import "./GlobalSearchPanel.css";
@@ -193,6 +194,9 @@ export function GlobalSearchPanel({ getEditor, onClose }: GlobalSearchPanelProps
       if (!editor) return;
       editor.action((ctx) => {
         const view = ctx.get(editorViewCtx);
+        // #431 评审：大文档切回时是分片水合，view.state.doc 可能只有首片。
+        // 不补齐就按文本查找，命中在后续分片时会找不到而回退到位置 0（跳到文首）。
+        flushActiveHydration(view);
         const doc = view.state.doc;
 
         // 1) 文本匹配定位：找到「点击项是本文件第几处命中」，定位到对应的第 N 次出现，
