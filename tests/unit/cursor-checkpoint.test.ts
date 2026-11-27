@@ -10,6 +10,13 @@ vi.mock("@tauri-apps/api/core", () => ({
 vi.mock("@tauri-apps/api/window", () => ({
   getCurrentWindow: () => ({ label: "main" }),
 }));
+// 默认 IO 的通道归属：恢复区读取必须走 read_recovery_file，不能落到文档 read_text_file
+const fsMocks = vi.hoisted(() => ({
+  readRecoveryFile: vi.fn(async () => ""),
+  readTextFile: vi.fn(async () => "文档通道不该被调用"),
+  writeRecoveryFile: vi.fn(async () => undefined),
+}));
+vi.mock("../../src/lib/fs", () => fsMocks);
 
 import {
   CURSOR_THROTTLE_MS,
@@ -26,10 +33,13 @@ let failWrite = false;
 beforeEach(() => {
   files.clear();
   failWrite = false;
+  fsMocks.readRecoveryFile.mockReset().mockResolvedValue("");
+  fsMocks.readTextFile.mockReset();
+  fsMocks.writeRecoveryFile.mockReset();
   __resetCursorCheckpoint();
   __setCursorIo({
     appDataDir: async () => "/appdata",
-    readTextFile: async (path) => files.get(path) ?? "",
+    readRecoveryFile: async (path) => files.get(path) ?? "",
     writeTextFile: async (path, content) => {
       if (failWrite) throw new Error("disk full");
       files.set(path, content);
@@ -90,7 +100,7 @@ describe("#378 光标 checkpoint", () => {
     );
     __setCursorIo({
       appDataDir: async () => "/appdata",
-      readTextFile: async () => {
+      readRecoveryFile: async () => {
         throw new Error("EIO: 瞬时读失败");
       },
       writeTextFile: async (p, c) => {
@@ -133,5 +143,20 @@ describe("#378 光标 checkpoint", () => {
     expect(await flushCursorCheckpoint()).toBe(true);
     expect(await readCursorCheckpoint("/w/fresh.md")).toMatchObject({ pos: 12 });
     expect(await readCursorCheckpoint("/w/again.md")).toMatchObject({ pos: 13 });
+  });
+
+  it("默认 IO 读 cursor.json 走恢复区通道，不落到文档 read_text_file", async () => {
+    fsMocks.readRecoveryFile.mockResolvedValueOnce(
+      JSON.stringify({
+        version: 1,
+        tabs: { "/w/a.md": { pos: 4, scrollTop: 40, updatedAt: 1 } },
+      }),
+    );
+    // 丢掉内存 io，逼回 defaultIo（它才会动态 import ./fs）
+    __resetCursorCheckpoint();
+
+    expect(await readCursorCheckpoint("/w/a.md")).toMatchObject({ pos: 4 });
+    expect(fsMocks.readRecoveryFile).toHaveBeenCalledWith("/appdata/recovery/main/cursor.json");
+    expect(fsMocks.readTextFile).not.toHaveBeenCalled();
   });
 });

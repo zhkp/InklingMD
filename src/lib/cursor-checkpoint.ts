@@ -26,7 +26,8 @@ interface CursorFile {
 /** 测试注入用；生产实现见 `defaultIo` */
 export interface CursorIo {
   appDataDir(): Promise<string>;
-  readTextFile(path: string): Promise<string>;
+  /** 恢复区专用读取（`read_recovery_file`，12MB + `recovery/` 守卫），不是文档通道 */
+  readRecoveryFile(path: string): Promise<string>;
   writeTextFile(path: string, content: string, durability: "sync" | "none"): Promise<void>;
 }
 
@@ -38,9 +39,14 @@ const defaultIo: CursorIo = {
     const { appDataRoot } = await import("./appDataRoot");
     return appDataRoot();
   },
-  async readTextFile(path) {
-    const { readTextFile } = await import("./fs");
-    return readTextFile(path);
+  async readRecoveryFile(path) {
+    // cursor.json 在 `recovery/<label>/` 下，读必须与写同一条通道：
+    // 文档通道的 10MB 护栏会把「文件不存在」之外的失败也报成「无法打开」，
+    // 而 `readFile()` 靠错误文案区分「没写过」与「读不出来」，通道必须一致。
+    // 注意：超大恢复区文件仍会被 mapReadError 改写成「无法打开」——
+    // cursor.json 只有一条 tab 百字节，不会走到那里。
+    const { readRecoveryFile } = await import("./fs");
+    return readRecoveryFile(path);
   },
   async writeTextFile(path, content, durability) {
     const { writeRecoveryFile } = await import("./fs");
@@ -94,7 +100,7 @@ function emptyFile(): CursorFile {
 async function readFile(): Promise<{ ok: boolean; file: CursorFile }> {
   let raw: string;
   try {
-    raw = await io.readTextFile(await cursorPath());
+    raw = await io.readRecoveryFile(await cursorPath());
   } catch (err) {
     const missing = err instanceof Error && /not found|不存在|ENOENT/i.test(err.message);
     // 文件不存在可以按空表写；真正的读 IO 失败必须拒绝覆盖（仍可能有完好的其它 tab）

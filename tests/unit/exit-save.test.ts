@@ -2,15 +2,21 @@ import { act, renderHook } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { OpenTab } from "../../src/store/workspace";
 
-const { onCloseRequestedMock, destroyMock, messageMock, flushMock, flushDraftsMock } = vi.hoisted(
-  () => ({
-    onCloseRequestedMock: vi.fn(),
-    destroyMock: vi.fn(),
-    messageMock: vi.fn(),
-    flushMock: vi.fn(),
-    flushDraftsMock: vi.fn(async () => undefined),
-  }),
-);
+const {
+  onCloseRequestedMock,
+  destroyMock,
+  messageMock,
+  flushMock,
+  flushDraftsMock,
+  countDraftlessMock,
+} = vi.hoisted(() => ({
+  onCloseRequestedMock: vi.fn(),
+  destroyMock: vi.fn(),
+  messageMock: vi.fn(),
+  flushMock: vi.fn(),
+  flushDraftsMock: vi.fn(async () => undefined),
+  countDraftlessMock: vi.fn((_paths: readonly string[]) => 0),
+}));
 vi.mock("@tauri-apps/api/core", () => ({ isTauri: () => true }));
 vi.mock("@tauri-apps/api/window", () => ({
   getCurrentWindow: () => ({ onCloseRequested: onCloseRequestedMock, destroy: destroyMock }),
@@ -20,13 +26,12 @@ vi.mock("../../src/components/Editor/markdown-publisher", () => ({
   flushAllMarkdownPublishers: flushMock,
 }));
 // 退出/会话底座在单测里不写真实 app data 目录
+// 只 mock `useExitHandler` 真正 import 的 4 个符号，多一个都会跟真实导出对不上
 vi.mock("../../src/lib/exit-session", () => ({
   flushAllDrafts: flushDraftsMock,
-  hasRecoverableDraft: () => false,
+  countDraftlessTabs: countDraftlessMock,
   markCleanExit: vi.fn(async () => true),
   markUncleanExit: vi.fn(async () => true),
-  journalHealth: "healthy",
-  lastDraftWriteOk: new Map(),
 }));
 
 import { useExitHandler } from "../../src/lib/useExitHandler";
@@ -94,6 +99,7 @@ describe("real window close handler", () => {
     destroyMock.mockReset().mockResolvedValue(undefined);
     messageMock.mockReset().mockResolvedValue(CANCEL);
     flushMock.mockReset();
+    countDraftlessMock.mockReset().mockReturnValue(0);
   });
 
   async function mount() {
@@ -199,6 +205,37 @@ describe("real window close handler", () => {
     expect(destroyMock).not.toHaveBeenCalled();
     release();
     await first;
+    expect(destroyMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("部分 tab 没有副本时必须弹「永久丢失」确认，不能因别的 tab 有副本就放行", async () => {
+    installState([tab("/big.md"), tab("/ok.md")]);
+    // 保存不成功 → 两个 tab 都 unresolved
+    useWorkspace.setState({ saveTab: vi.fn(async () => undefined) });
+    countDraftlessMock.mockReturnValue(1); // /big.md 超限且无副本
+    messageMock.mockResolvedValueOnce(DISCARD).mockResolvedValueOnce(CANCEL);
+    await mount();
+    await act(() => closeHandler({ preventDefault: vi.fn() }));
+
+    expect(countDraftlessMock).toHaveBeenCalledWith(["/big.md", "/ok.md"]);
+    expect(messageMock).toHaveBeenLastCalledWith(
+      expect.stringContaining("1 个文档没有恢复副本"),
+      expect.objectContaining({ title: "退出确认" }),
+    );
+    expect(destroyMock).not.toHaveBeenCalled();
+  });
+
+  it("所有 unresolved tab 都有副本时不弹「永久丢失」确认，直接放行", async () => {
+    installState([tab("/a.md"), tab("/b.md")]);
+    useWorkspace.setState({ saveTab: vi.fn(async () => undefined) });
+    countDraftlessMock.mockReturnValue(0);
+    messageMock.mockResolvedValue(DISCARD); // 三选一选「放弃并退出」
+    await mount();
+    await act(() => closeHandler({ preventDefault: vi.fn() }));
+
+    expect(countDraftlessMock).toHaveBeenCalledWith(["/a.md", "/b.md"]);
+    const asked = messageMock.mock.calls.filter((c) => String(c[0]).includes("没有恢复副本"));
+    expect(asked).toHaveLength(0);
     expect(destroyMock).toHaveBeenCalledTimes(1);
   });
 

@@ -171,3 +171,10 @@ commands.allow = ["save_document"]
 identifier = "allow-write-recovery-file"
 description = "Allow write_recovery_file command"
 commands.allow = ["write_recovery_file"]
+
+# 恢复区读取（#409 配额片）：草稿正文按 10MB 计，序列化后超过文档通道的 10MB 护栏。
+# 读取命令自带恢复区路径守卫，只允许 recovery/ 子树。
+[[permission]]
+identifier = "allow-read-recovery-file"
+description = "Allow read_recovery_file command"
+commands.allow = ["read_recovery_file"]

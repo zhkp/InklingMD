@@ -1,0 +1,20 @@
+/* 底部居中的轻提示：不遮挡编辑器内容，也不拦截点击 */
+@layer base {
+  .recovery-notice {
+    position: fixed;
+    left: 50%;
+    bottom: 56px;
+    transform: translateX(-50%);
+    z-index: 90;
+    max-width: min(560px, calc(100vw - 32px));
+    padding: 8px 14px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg-elevated);
+    color: var(--text);
+    box-shadow: var(--shadow-lg);
+    font-size: 12.5px;
+    line-height: 1.5;
+    pointer-events: none;
+  }
+}

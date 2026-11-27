@@ -99,4 +99,24 @@ describe("useUI store", () => {
     expect(persisted.sidebarVisible).toBe(false);
     expect(persisted.outlineVisible).toBe(false);
   });
+
+  it("showNotice / dismissNotice：按 id 只关自己那条，且不持久化", async () => {
+    const useUI = await loadUI();
+    useUI.getState().showNotice("该文档超过 10 MB，未建立崩溃恢复副本");
+    const first = useUI.getState().notice!;
+    expect(first.text).toContain("未建立崩溃恢复副本");
+
+    // 自动关闭带的是旧 id：期间来了新提示时不能把它一起关掉
+    useUI.getState().showNotice("第二条");
+    const second = useUI.getState().notice!;
+    expect(second.id).not.toBe(first.id);
+    useUI.getState().dismissNotice(first.id);
+    expect(useUI.getState().notice?.id).toBe(second.id);
+
+    useUI.getState().dismissNotice(second.id);
+    expect(useUI.getState().notice).toBeNull();
+
+    // 提示是瞬时 UI 状态，不进 localStorage
+    expect(localStorage.getItem("inkling-ui") ?? "").not.toContain("未建立崩溃恢复副本");
+  });
 });

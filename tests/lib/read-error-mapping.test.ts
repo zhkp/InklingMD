@@ -21,7 +21,7 @@ vi.mock("@tauri-apps/api/path", () => ({
   resolve: (...args: string[]) => Promise.resolve(args.join("/")),
 }));
 
-import { readTextFile } from "../../src/lib/fs";
+import { readRecoveryFile, readTextFile } from "../../src/lib/fs";
 
 beforeEach(() => {
   invokeMock.mockReset();
@@ -84,5 +84,32 @@ describe("#159 readTextFile 结构化错误映射", () => {
     invokeMock.mockResolvedValue("# 正常内容");
 
     await expect(readTextFile("/notes/ok.md")).resolves.toBe("# 正常内容");
+  });
+});
+
+describe("#409 readRecoveryFile 走恢复区专用通道", () => {
+  it("调用 read_recovery_file 并传 path（不是文档的 read_text_file）", async () => {
+    invokeMock.mockResolvedValue("{\"content\":\"草稿\"}");
+
+    await expect(readRecoveryFile("/appdata/recovery/main/drafts/k.json")).resolves.toBe(
+      "{\"content\":\"草稿\"}",
+    );
+    expect(invokeMock).toHaveBeenCalledTimes(1);
+    expect(invokeMock).toHaveBeenCalledWith("read_recovery_file", {
+      path: "/appdata/recovery/main/drafts/k.json",
+    });
+  });
+
+  it("恢复区超限仍映射为可读中文，不透传结构化标记", async () => {
+    invokeMock.mockRejectedValue(
+      new Error("FILE_TOO_LARGE: 文件过大（超过 12 MB 读取上限），无法读取"),
+    );
+
+    await expect(readRecoveryFile("/appdata/recovery/main/drafts/big.json")).rejects.toThrow(
+      "无法打开：文件过大，超过打开大小上限",
+    );
+    await expect(
+      readRecoveryFile("/appdata/recovery/main/drafts/big.json"),
+    ).rejects.not.toThrow("FILE_TOO_LARGE");
   });
 });

@@ -136,7 +136,6 @@ describe("#365 多窗口隔离", () => {
       writeTextFile: async (path: string, content: string) => {
         files.set(path, content);
       },
-      readTextFile: async (path: string) => files.get(path) ?? "",
       appDataDir: async () => "/appdata",
       removeFile: async (path: string) => {
         files.delete(path);
@@ -173,7 +172,6 @@ describe("#365 多窗口隔离", () => {
       writeTextFile: async (path, content) => {
         files.set(path, content);
       },
-      readTextFile: async (path) => files.get(path) ?? "",
       appDataDir: async () => "/appdata",
       removeFile: async (path) => {
         files.delete(path);
@@ -199,7 +197,6 @@ describe("#365 草稿元信息与清理时机", () => {
       writeTextFile: async (path, content) => {
         files.set(path, content);
       },
-      readTextFile: async (path) => files.get(path) ?? "",
       appDataDir: async () => "/appdata",
       removeFile: async (path) => {
         files.delete(path);
@@ -228,7 +225,6 @@ describe("#365 草稿元信息与清理时机", () => {
       writeTextFile: async (path, content) => {
         files.set(path, content);
       },
-      readTextFile: async (path) => files.get(path) ?? "",
       appDataDir: async () => "/appdata",
       removeFile: async (path) => {
         files.delete(path);
@@ -272,7 +268,6 @@ describe("#365 草稿元信息与清理时机", () => {
       writeTextFile: async (path, content) => {
         files.set(path, content);
       },
-      readTextFile: async (path) => files.get(path) ?? "",
       appDataDir: async () => "/appdata",
       removeFile: async (path) => {
         files.delete(path);
@@ -304,7 +299,6 @@ describe("#365 草稿元信息与清理时机", () => {
       writeTextFile: async (path, content) => {
         files.set(path, content);
       },
-      readTextFile: async (path) => files.get(path) ?? "",
       appDataDir: async () => "/appdata",
       removeFile: async (path) => {
         files.delete(path);

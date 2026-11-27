@@ -5,7 +5,7 @@ import { flushAllMarkdownPublishers } from "../components/Editor/markdown-publis
 import { useWorkspace } from "../store/workspace";
 import {
   flushAllDrafts,
-  hasRecoverableDraft,
+  countDraftlessTabs,
   markCleanExit,
   markUncleanExit,
 } from "./exit-session";
@@ -89,7 +89,7 @@ export function useExitHandler(): void {
               }
               if (choice === RETRY) continue;
               // DISCARD 或超过重试上限 → 走「放弃并退出」
-              if (!(await confirmDiscard(unresolved.length))) {
+              if (!(await confirmDiscard(unresolved.map((t) => t.path)))) {
                 if (originalActivePath) useWorkspace.getState().switchTab(originalActivePath);
                 return;
               }
@@ -163,14 +163,20 @@ async function askExitChoice(unresolvedCount: number, attempt: number): Promise<
   }
 }
 
-/** 没有恢复副本时的二选一确认；返回 true 表示仍然退出 */
-async function confirmDiscard(unresolvedCount: number): Promise<boolean> {
-  // 草稿正文已落盘：退出后仍可从恢复区取回，不必再问「永久丢失」
-  if (hasRecoverableDraft()) return true;
+/**
+ * 没有恢复副本时的二选一确认；返回 true 表示仍然退出。
+ *
+ * 逐条判定：只要有一个 unresolved tab 没有副本就必问，并在文案里给出**确实缺副本**的条数
+ * （全局「任意一条有副本」会让超限文档随另一个 tab 一起被静默放弃）。
+ */
+async function confirmDiscard(unresolvedPaths: readonly string[]): Promise<boolean> {
+  const missing = countDraftlessTabs(unresolvedPaths);
+  // 每一条 unresolved 都有副本：退出后仍可从恢复区取回，不必再问「永久丢失」
+  if (missing === 0) return true;
   try {
     const { message } = await import("@tauri-apps/plugin-dialog");
     const choice = await message(
-      `其中 ${unresolvedCount} 个文档没有恢复副本，退出将永久丢失这些修改。仍然退出？`,
+      `其中 ${missing} 个文档没有恢复副本，退出将永久丢失这些修改。仍然退出？`,
       { title: "退出确认", kind: "warning", buttons: { ok: DISCARD, cancel: CANCEL } },
     );
     return choice === DISCARD || choice === "Ok" || choice === "Yes";

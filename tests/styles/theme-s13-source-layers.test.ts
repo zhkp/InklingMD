@@ -7,21 +7,21 @@ import {
 } from "../helpers/theme-css";
 
 // #224 S13 源级部分（E2E 部分见 theme-layers.spec.ts，含 N17 公式触发）：
-// 18 个 base 入口必须全部入层——
+// 19 个 base 入口必须全部入层——
 //   wrap=source        ：文件整体 @layer base { … } 源码包裹；
 //   wrap=import-layer  ：wrapper CSS 仅含 @import "…" layer(base)（@import 须在表首）。
 // 层序 statement 必须在 index.html 内联、且位于任何 script/样式表之前（N1 唯一落点）。
-describe("S13 源级：18 个 base 入口全部入层 + statement 落点（N1/N2/N17）", () => {
+describe("S13 源级：19 个 base 入口全部入层 + statement 落点（N1/N2/N17）", () => {
   const fixture = readFixture();
   const layers = fixture.layers;
 
-  it("base 入口展开后恰好 18 个（1 App.css + 14 组件 CSS + 3 vendor 插件包裹）", () => {
+  it("base 入口展开后恰好 19 个（1 App.css + 15 组件 CSS + 3 vendor 插件包裹）", () => {
     const sourceEntries = layers.base.filter((b) => b.wrap === "source");
     const pluginEntries = layers.base.filter((b) => b.wrap === "plugin-transform");
     const resolvedSource = expandEntries(sourceEntries.map((e) => e.entry));
-    expect(resolvedSource).toHaveLength(15);
+    expect(resolvedSource).toHaveLength(16);
     expect(pluginEntries).toHaveLength(3);
-    expect(resolvedSource.length + pluginEntries.length).toBe(18);
+    expect(resolvedSource.length + pluginEntries.length).toBe(19);
   });
 
   it("wrap=source 的文件首条规则为 @layer base 开块、文件以其闭块收尾", () => {

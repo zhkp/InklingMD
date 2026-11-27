@@ -43,6 +43,7 @@
     "allow-file-stat",
     "allow-read-document",
     "allow-save-document",
-    "allow-write-recovery-file"
+    "allow-write-recovery-file",
+    "allow-read-recovery-file"
   ]
 }

@@ -20,6 +20,8 @@ import {
   currentSessionStartedAt,
   currentWindowLabel,
   ensureWindowLabel,
+  lastDraftWriteOk,
+  lastDraftWriteOutcome,
   writeDraftNow,
 } from "./draft-journal";
 
@@ -28,10 +30,7 @@ export type JournalHealth = "healthy" | "degraded";
 /** 内容副本健康度：只由草稿正文写入结果决定；光标 checkpoint 失败不参与 */
 export let journalHealth: JournalHealth = "healthy";
 
-/** draftId(tabPath) → 最近一次写盘是否成功 */
-export const lastDraftWriteOk = new Map<string, boolean>();
-
-/** 仅供测试：重置健康度与写盘结果表 */
+/** 仅供测试：重置健康度与写盘结果表（表本体在 draft-journal，clearDraft 也要清） */
 export function __resetJournalHealth(): void {
   journalHealth = "healthy";
   lastDraftWriteOk.clear();
@@ -70,8 +69,15 @@ export async function flushAllDrafts(
         },
         { durability: options.durability ?? "none" },
       );
-      lastDraftWriteOk.set(tab.path, ok);
-      if (!ok) failed += 1;
+      const outcome = lastDraftWriteOutcome.get(tab.path);
+      // 超限时旧副本是**刻意留着**的（见 rejectOversize）：若本次之前已经写成功过，
+      // 盘上仍有一份可供恢复的内容，不能把它降级成「没有副本」，否则退出确认会说反话。
+      // 只有「本次超限且此前从未写成」才记 false（那才是真的没有副本）。
+      const keepsOldCopy = outcome === "oversize" && lastDraftWriteOk.get(tab.path) === true;
+      if (!keepsOldCopy) lastDraftWriteOk.set(tab.path, ok);
+      // 单条超限是「主动跳过」，不是写盘故障：把它算成失败会让 health 误降，
+      // 其它明明有副本的文档在退出确认里也会被说成「退出将永久丢失」
+      if (!ok && outcome !== "oversize") failed += 1;
     }),
   );
   // 只由本次草稿写入结果决定：失败时不能承诺「有恢复副本」；
@@ -79,11 +85,17 @@ export async function flushAllDrafts(
   journalHealth = failed === 0 ? "healthy" : "degraded";
 }
 
-/** 是否存在可信的恢复副本（草稿写成功过，且健康度正常） */
-export function hasRecoverableDraft(): boolean {
-  if (journalHealth !== "healthy") return false;
-  for (const ok of lastDraftWriteOk.values()) if (ok) return true;
-  return false;
+/**
+ * 这些 tab 里有多少条**没有**可信的恢复副本（退出确认按这个数量决定是否放行）。
+ *
+ * 必须逐条判定：早先的 `hasRecoverableDraft()` 是「任意一条有副本就算有」的全局口径，
+ * 于是「A 超限没副本 + B 有副本」会直接跳过确认，A 的最后修改静默丢失。
+ * health 非 healthy 时所有副本都不可信，按全部缺失计。
+ */
+export function countDraftlessTabs(paths: readonly string[]): number {
+  if (paths.length === 0) return 0;
+  if (journalHealth !== "healthy") return paths.length;
+  return paths.filter((path) => lastDraftWriteOk.get(path) !== true).length;
 }
 
 function sessionFilePath(dir: string): string {
