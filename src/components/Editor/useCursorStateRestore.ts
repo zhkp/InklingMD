@@ -57,8 +57,13 @@ export function useCursorStateRestore({
       const view = ctx.get(editorViewCtx);
       // 本编辑器实例是否仍在分片水合（按 view 判定：分屏侧水合不该牵连主编辑器）
       const hydratingHere = () => hasActiveHydration(view);
+      // 位置记忆只恢复折叠光标：切回缓存 tab 时 Editor 已恢复切走前的区间选区，
+      // 这里再用 TextSelection.near(pos) 会把它折叠成单点。小文档缓存命中时
+      // 水合在 Editor 的 layout effect 里同步完成，本 effect 运行时
+      // hasActiveHydration 已为 false，原判据拦不住（#431 评审）。
+      const hasRangeSelection = !view.state.selection.empty;
       // 恢复光标位置，夹紧到文档有效范围（水合未完成时末片会用缓存选区再恢复一次）
-      if (pos != null && !hydratingHere()) {
+      if (pos != null && !hydratingHere() && !hasRangeSelection) {
         const docSize = view.state.doc.content.size;
         const safePos = Math.max(0, Math.min(pos, docSize));
         try {

@@ -14,7 +14,10 @@ interface ScrollElMock {
   isConnected: boolean;
 }
 
-function makeMockEditor(scrollEl: ScrollElMock) {
+function makeMockEditor(
+  scrollEl: ScrollElMock,
+  options: { selectionEmpty?: boolean } = {},
+) {
   const resolve = vi.fn().mockReturnValue({ pos: 10 });
   const view = {
     state: {
@@ -25,6 +28,7 @@ function makeMockEditor(scrollEl: ScrollElMock) {
         resolve,
       },
       tr: { setSelection: vi.fn().mockReturnThis() },
+      selection: { empty: options.selectionEmpty ?? true },
     },
     dispatch: vi.fn(),
     scrollDOM: scrollEl,
@@ -146,6 +150,35 @@ describe("useCursorStateRestore", () => {
     expect(scrollEl.scrollTop).toBe(210);
     while (rafQueue.length) rafQueue.shift()?.(0);
     expect(scrollEl.scrollTop).toBe(210);
+  });
+
+  it("切回缓存 tab 时已有区间选区，不被位置记忆折叠成单点（#431 评审）", () => {
+    // 小文档缓存命中：分片水合在 Editor 的 layout effect 里同步完成，
+    // 本 effect 运行时 hasActiveHydration 已为 false，只能在选区侧拦截。
+    useWorkspace.setState({
+      openTabs: [
+        { path: "/tmp/a.md", content: "# A", dirty: false, lastSavedAt: null, cursorPos: 40, scrollTop: 77 },
+      ],
+    });
+    const { editor, view, resolve } = makeMockEditor(scrollEl, {
+      selectionEmpty: false,
+    });
+
+    renderHook(() =>
+      useCursorStateRestore({
+        sourceMode: false,
+        filePath: "/tmp/a.md",
+        revision: 0,
+        loading: false,
+        getEditor: () => editor as never,
+      }),
+    );
+
+    // 缓存选区必须原样保留：不解析记忆位置、不 dispatch 折叠选区
+    expect(resolve).not.toHaveBeenCalled();
+    expect(view.dispatch).not.toHaveBeenCalled();
+    // 滚动位置仍照常恢复
+    expect(scrollEl.scrollTop).toBe(77);
   });
 
   it("无滚动记忆时显式归零，不残留上一文件的滚动位置", () => {
