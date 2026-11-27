@@ -71,8 +71,6 @@ export function GlobalSearchPanel({ getEditor, onClose }: GlobalSearchPanelProps
   const rootPath = useWorkspace((s) => s.rootPath);
   const openFile = useWorkspace((s) => s.openFile);
   const [query, setQuery] = useState("");
-  const [replaceText] = useState("");
-  void replaceText;
   const [caseSensitive, setCaseSensitive] = useState(false);
   const [useRegex, setUseRegex] = useState(false);
   const [hits, setHits] = useState<SearchHit[]>([]);
@@ -331,6 +329,9 @@ export function GlobalSearchPanel({ getEditor, onClose }: GlobalSearchPanelProps
               该正则在未保存内容中不受支持，结果未包含未保存/未命名文件
             </span>
           )}
+          <span className="gs-guidance" role="note">
+            此面板仅支持工作区搜索；替换请打开对应文件使用查找替换。
+          </span>
         </div>
         <div className="gs-results">
           {grouped.map((group) => {

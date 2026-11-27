@@ -147,6 +147,19 @@ describe("#365 草稿日志", () => {
     expect(writes.at(-1)?.options?.createParents).toBe(true);
   });
 
+  it("路径无法编码时只返回 false，不让 flushAllDrafts 整体 reject", async () => {
+    await expect(
+      writeDraftNow({ path: "\ud800", isUntitled: false, content: "x" }),
+    ).resolves.toBe(false);
+    expect(files.size).toBe(0);
+
+    // 聚合点也必须只是「有一条没写成」，不能让退出 flush 整体 reject
+    useWorkspace.setState({ openTabs: [tab("\ud800")] } as never);
+    await expect(flushAllDrafts({ durability: "sync" })).resolves.toBeUndefined();
+    expect(journalHealth).toBe("degraded");
+    expect(hasRecoverableDraft()).toBe(false);
+  });
+
   it("scheduleDraft 按 1.2s 防抖：连续输入只写最后一次", async () => {
     vi.useFakeTimers();
     scheduleDraft({ path: "/w/a.md", isUntitled: false, content: "v1" });

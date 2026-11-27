@@ -9,6 +9,7 @@ import { Decoration, DecorationSet } from "@milkdown/kit/prose/view";
 import type { EditorView } from "@milkdown/kit/prose/view";
 import type { Node } from "@milkdown/kit/prose/model";
 import { hydrationMetaKey } from "./tab-editor-cache";
+import { expandReplacementReferences } from "../../lib/regex-replacement";
 
 export interface SearchOpts {
   find: string;
@@ -16,9 +17,17 @@ export interface SearchOpts {
   useRegex: boolean;
 }
 
+interface SearchMatch {
+  from: number;
+  to: number;
+  text: string;
+  captures: (string | undefined)[];
+  groups: Record<string, string | undefined>;
+}
+
 interface SearchState {
   opts: SearchOpts | null;
-  matches: { from: number; to: number }[];
+  matches: SearchMatch[];
   current: number;
   /** 与 matches/current 同构的装饰集（issue #192：在 apply 内增量维护，
    * 因 apply 持有 tr 才能做 mapping 增量；props 直接返回） */
@@ -48,8 +57,8 @@ function buildRegex(opts: SearchOpts): RegExp | null {
   }
 }
 
-/** 遍历文档文本块，收集所有匹配区间 */
-function computeMatches(doc: Node, regex: RegExp): { from: number; to: number }[] {
+/** 遍历文档文本块，收集匹配区间及正则捕获信息 */
+function computeMatches(doc: Node, regex: RegExp): SearchMatch[] {
   return computeMatchesInRange(doc, regex, 0, doc.content.size);
 }
 
@@ -96,8 +105,8 @@ function computeMatchesInRange(
   regex: RegExp,
   from: number,
   to: number,
-): { from: number; to: number }[] {
-  const matches: { from: number; to: number }[] = [];
+): SearchMatch[] {
+  const matches: SearchMatch[] = [];
   doc.nodesBetween(from, to, (node, pos) => {
     // 非文本块（引用/列表/表格/告警块等容器）继续下钻到其内部的文本块；
     // 文本块自身即匹配边界，不跨段落/标题/单元格产生匹配
@@ -110,7 +119,13 @@ function computeMatchesInRange(
           regex.lastIndex++;
           continue;
         }
-        matches.push({ from: runPos + m.index, to: runPos + m.index + m[0].length });
+        matches.push({
+          from: runPos + m.index,
+          to: runPos + m.index + m[0].length,
+          text: m[0],
+          captures: m.slice(1),
+          groups: m.groups ?? {},
+        });
       }
     });
     return false;
@@ -121,7 +136,7 @@ function computeMatchesInRange(
 /** 由匹配集构建装饰集（current 索引用高亮类标记） */
 function buildDecorations(
   doc: Node,
-  matches: { from: number; to: number }[],
+  matches: SearchMatch[],
   current: number,
 ): DecorationSet {
   if (matches.length === 0) return DecorationSet.empty;
@@ -173,16 +188,16 @@ function updateIncrementally(
   });
 
   // 窗外：旧匹配区间经 mapping 平移保留；窗内：丢弃后重扫
-  const keptBefore: { from: number; to: number }[] = [];
-  const keptAfter: { from: number; to: number }[] = [];
+  const keptBefore: SearchMatch[] = [];
+  const keptAfter: SearchMatch[] = [];
   for (const m of value.matches) {
     const from2 = tr.mapping.map(m.from);
     const to2 = tr.mapping.map(m.to);
     // 匹配整体落入删除区间 → mapping 坍缩为空区间（from >= to），
     // 该匹配已消亡，直接丢弃；否则会留下 {n,n} 幽灵空匹配
     if (from2 >= to2) continue;
-    if (to2 <= windowFrom) keptBefore.push({ from: from2, to: to2 });
-    else if (from2 >= windowTo) keptAfter.push({ from: from2, to: to2 });
+    if (to2 <= windowFrom) keptBefore.push({ ...m, from: from2, to: to2 });
+    else if (from2 >= windowTo) keptAfter.push({ ...m, from: from2, to: to2 });
   }
   const windowMatches = computeMatchesInRange(newState.doc, regex, windowFrom, windowTo);
   const matches = [...keptBefore, ...windowMatches, ...keptAfter];
@@ -320,6 +335,22 @@ export function scrollToCurrent(view: EditorView): void {
   );
 }
 
+function applyReplacement(
+  view: EditorView,
+  tr: Transaction,
+  match: SearchMatch,
+  replacement: string,
+  useRegex: boolean,
+): void {
+  const text = useRegex ? expandReplacementReferences(replacement, match) : replacement;
+  // ProseMirror 禁止空文本节点，空串替换必须走 delete（#178）
+  if (text === "") {
+    tr.delete(match.from, match.to);
+  } else {
+    tr.replaceWith(match.from, match.to, view.state.schema.text(text));
+  }
+}
+
 /**
  * 替换当前匹配；替换串为空表示删除匹配文本。
  *
@@ -335,12 +366,7 @@ export function replaceCurrent(view: EditorView, replacement: string): void {
   const m = s.matches[s.current];
   if (!m) return;
   const tr = view.state.tr;
-  // ProseMirror 禁止空文本节点，空串替换必须走 delete（#178）
-  if (replacement === "") {
-    tr.delete(m.from, m.to);
-  } else {
-    tr.replaceWith(m.from, m.to, view.state.schema.text(replacement));
-  }
+  applyReplacement(view, tr, m, replacement, s.opts.useRegex);
   view.dispatch(tr);
 }
 
@@ -352,11 +378,7 @@ export function replaceAll(view: EditorView, replacement: string): number {
   // 倒序：低位坐标不受高位替换影响，故可复用同一批 matches（不会用到过期下标）
   const sorted = [...s.matches].sort((a, b) => b.from - a.from);
   for (const m of sorted) {
-    if (replacement === "") {
-      tr.delete(m.from, m.to);
-    } else {
-      tr.replaceWith(m.from, m.to, view.state.schema.text(replacement));
-    }
+    applyReplacement(view, tr, m, replacement, s.opts.useRegex);
   }
   view.dispatch(tr);
   return sorted.length;
