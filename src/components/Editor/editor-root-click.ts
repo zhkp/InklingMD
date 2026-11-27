@@ -6,6 +6,7 @@
 import type { Editor } from "@milkdown/kit/core";
 import { editorViewCtx } from "@milkdown/kit/core";
 import { TextSelection } from "@milkdown/kit/prose/state";
+import { flushActiveHydration } from "./tab-editor-cache";
 
 export function placeCursorForRootClick(
   editor: Editor,
@@ -13,6 +14,10 @@ export function placeCursorForRootClick(
 ) {
   editor.action((ctx) => {
     const view = ctx.get(editorViewCtx);
+    // 点击前先补齐**这个**编辑器的分片水合（#431 评审）：坐标映射需要完整 doc。
+    // 只作用于当前 view——无参 flush 会顺带把分屏另一侧的大文档同步插完，
+    // 一次点击就能重建 0.6–0.8s 的长任务。
+    flushActiveHydration(view);
     // 原始坐标落在可编辑内容上：交给 ProseMirror 自行处理光标定位
     const direct = view.posAtCoords({ left: e.clientX, top: e.clientY });
     if (direct != null) return;

@@ -477,10 +477,20 @@ function EditorInner({
                 .getState()
                 .openTabs.some((t) => t.path === prev.filePath);
               if (stillOpen) {
+                // 缓存内容必须取 **flush 之后** 的值（#431 评审 P2）：若用户在
+                // 150ms 发布防抖窗口内切 tab，上面的 flush 已经把新内容写进 store，
+                // 而 `prev.value` 还是 flush 前的 prop。用它写缓存会让下次打开时
+                // `cachedContent !== value` → 缓存 miss → 重新解析并清空
+                // ProseMirror history（Ctrl+Z 丢最近编辑）。
+                const flushedContent =
+                  useWorkspace
+                    .getState()
+                    .openTabs.find((t) => t.path === prev.filePath)?.content ??
+                  prev.value;
                 cache.set({
                   filePath: prev.filePath,
                   revision: prev.revision,
-                  cachedContent: prev.value,
+                  cachedContent: flushedContent,
                   fullDoc,
                   selection,
                   historyState,
@@ -740,7 +750,10 @@ function EditorInner({
                 const docSize = view.state.doc.content.size;
                 if (hit && hit.pos < docSize - 2) return;
               }
-              flushActiveHydration();
+              // 只补齐**触发事件的这个编辑器**（#431 评审）：无参调用会遍历所有
+              // 活跃水合任务，分屏时在一个 pane 点一下就可能把另一个 pane 剩余的
+              // O(n) 插入同步做完，重新造出长任务。
+              flushActiveHydration(view);
             };
             view.dom.addEventListener("mousedown", flushOnInteraction, true);
             view.dom.addEventListener("keydown", flushOnInteraction, true);
@@ -803,8 +816,13 @@ function EditorInner({
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
         try {
-          flushActiveHydration();
-          editor.action((ctx) => scrollToAnchorInView(ctx.get(editorViewCtx), fragment));
+          editor.action((ctx) => {
+            const view = ctx.get(editorViewCtx);
+            // 只补齐本文档自己的编辑器（#431 评审）：全局 flush 会顺带把分屏另一侧
+            // 的大文档同步插完，把「打开文件定位」变成长任务。
+            flushActiveHydration(view);
+            scrollToAnchorInView(view, fragment);
+          });
         } catch {
           // 滚动失败不影响文件已打开
         }
@@ -840,8 +858,9 @@ function EditorInner({
   });
 
   // 点击编辑器空白区域时的光标定位（详见 editor-root-click.ts）
+  // 水合补齐已移进 `placeCursorForRootClick` 内部，按**被点击的那个 view** 作用域
+  // 执行（#431 评审）：这里无参调用会把分屏另一侧的剩余分片同步插入完。
   const handleRootMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
-    flushActiveHydration();
     const editor = getEditorRef.current();
     if (editor) placeCursorForRootClick(editor, e);
   };
@@ -855,9 +874,11 @@ function EditorInner({
       lastFocus = s.focusMode;
       const editor = getEditorRef.current();
       if (!editor) return;
-      flushActiveHydration();
       editor.action((ctx) => {
         const view = ctx.get(editorViewCtx);
+        // 设置变更只影响本编辑器：按 view 补齐水合即可（#431 评审），
+        // 无参调用会把分屏另一侧的大文档同步插完。
+        flushActiveHydration(view);
         // 发送 recalc meta 触发公式编号重算（空 tr 本身不 docChanged，需 meta 显式触发）
         view.dispatch(view.state.tr.setMeta(formulaNumberingKey, { recalc: true }));
       });
