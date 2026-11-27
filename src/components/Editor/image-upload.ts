@@ -9,6 +9,7 @@ import type { EditorView } from "@milkdown/kit/prose/view";
 import { saveImageAsset, genAssetName } from "../../lib/assetStore";
 import { showMessage } from "../../lib/dialogs";
 import { isUntitledPath } from "../../lib/path-utils";
+import { useWorkspace } from "../../store/workspace";
 
 const key = new PluginKey("inkling-image-upload");
 
@@ -54,6 +55,35 @@ export { isUntitledPath };
  * @param pos 插入位置（drop 时由坐标计算，paste 时为 null 用当前选区）
  * @param documentPath 当前 Markdown 文件完整路径
  */
+/** 该路径 tab 的 revision（外部重载会 +1；普通编辑不动它） */
+export function revisionOf(documentPath: string): number {
+  return (
+    useWorkspace.getState().openTabs.find((t) => t.path === documentPath)
+      ?.revision ?? 0
+  );
+}
+
+/**
+ * 上传期间「目标文档是否仍是当初那一份」（#431 评审）。
+ *
+ * 只比较路径不够：外部重载（`reloadFile`）会把同一路径的内容换成磁盘版本并把
+ * `revision` +1，此时 pending 的上传仍会通过路径判等，把图片节点插进新内容里
+ * 的旧位置。所以路径、revision、view 存活三者都要一致。
+ */
+export function stillSameDocument(args: {
+  view: Pick<EditorView, "isDestroyed">;
+  documentPath: string;
+  revision: number;
+  getDocumentPath: () => string;
+}): boolean {
+  const { view, documentPath, revision, getDocumentPath } = args;
+  return (
+    !view.isDestroyed &&
+    getDocumentPath() === documentPath &&
+    revisionOf(documentPath) === revision
+  );
+}
+
 async function insertImages(
   files: File[],
   view: EditorView,
@@ -65,7 +95,15 @@ async function insertImages(
   if (imageFiles.length === 0) return;
   // 编辑器实例现在跨 tab 复用（#426）：每个 await 之后必须复核「当前仍是同一个文档」，
   // 否则上传/落盘期间切走 tab 会把图片节点插进新 tab，并把旧文档的相对路径带过去。
-  const stillSameDoc = () => !view.isDestroyed && getDocumentPath() === documentPath;
+  // #431 评审：路径相同但被外部重载（revision 变化）时同样必须放弃。
+  const documentRevision = revisionOf(documentPath);
+  const stillSameDoc = () =>
+    stillSameDocument({
+      view,
+      documentPath,
+      revision: documentRevision,
+      getDocumentPath,
+    });
 
   let insertPos = pos;
   const failedFiles: { name: string; reason: string }[] = [];

@@ -240,7 +240,11 @@ export function useSourceModeTransition({
       return;
     }
     if (sourceMode && !prev) {
-      flushActiveHydration();
+      // 只为**正在切换的这个编辑器**补齐水合（#431 评审）：进入源码模式要序列化
+      // 完整 doc，但分屏另一侧的大文档没必要在本帧同步插完——无参 flush 会把它
+      // 一起做掉，重新造出分片水合想避免的长任务。
+      const entering = getEditor();
+      entering?.action((ctx) => flushActiveHydration(ctx.get(editorViewCtx)));
       const settings = useSettings.getState();
       if (settings.focusMode) settings.setFocusMode(false);
       if (settings.typewriterMode) settings.setTypewriterMode(false);

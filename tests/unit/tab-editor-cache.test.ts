@@ -471,6 +471,16 @@ describe("水合补齐的作用域（#431 评审）", () => {
     );
   });
 
+  it("进入源码模式只补齐自己的编辑器（#431 评审）", () => {
+    const src = readFileSync(
+      "src/components/Editor/useSourceModeTransition.ts",
+      "utf8",
+    );
+    expect(src).toContain("flushActiveHydration(ctx.get(editorViewCtx))");
+    // 不允许残留无参调用（那会顺带把分屏另一侧的水合同步做完）
+    expect(src).not.toMatch(/flushActiveHydration\(\s*\)/);
+  });
+
   it("切走时缓存内容取 flush 之后的值，不用 flush 前的 prop（#431 评审）", () => {
     const editor = readFileSync("src/components/Editor/Editor.tsx", "utf8");
     expect(editor).toContain("cachedContent: flushedContent");
