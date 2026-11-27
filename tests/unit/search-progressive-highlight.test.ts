@@ -114,15 +114,22 @@ describe("#427 搜索高亮分批写入", () => {
     expect(state.decorated).toHaveLength(400);
     // 首批（160）立即写入，其余留待分批
     expect(decoratedCount(view)).toBe(160);
+    expect(state.decoCursor).toBe(160);
     expect(state.current).toBe(0);
     const initial = decosOf(view, plugin);
     expect(initial).toHaveLength(160);
     expect(initial.filter((d) => classOf(d) === "search-match-current")).toHaveLength(1);
 
+    // 每批从游标继续（不在每批重扫已装饰前缀），游标单调推进
+    vi.advanceTimersByTime(0);
+    expect(decoratedCount(view)).toBe(320);
+    expect(searchKey.getState(view.state)!.decoCursor).toBe(320);
+
     decorateAllPending(view);
 
     const final = decosOf(view, plugin);
     expect(decoratedCount(view)).toBe(400);
+    expect(searchKey.getState(view.state)!.decoCursor).toBe(400);
     // 每个匹配恰好一个装饰：重复写入会让数量超过匹配数
     expect(final).toHaveLength(400);
     expect(final.filter((d) => classOf(d) === "search-match-current")).toHaveLength(1);
@@ -312,6 +319,8 @@ describe("#427 搜索高亮分批写入", () => {
     const mid = searchKey.getState(view.state)!;
     expect(mid.matches).toHaveLength(400);
     expect(mid.decorated).toHaveLength(400);
+    // 编辑后游标回到第一个空洞（320），下一批从空洞继续而不是从 0 重扫
+    expect(mid.decoCursor).toBe(320);
     // 窗口内重扫的匹配已写入装饰（允许中间空洞），但不得出现重复装饰
     const midDecos = decosOf(view, plugin);
     expect(midDecos).toHaveLength(decoratedCount(view));

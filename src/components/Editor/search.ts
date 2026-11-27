@@ -37,6 +37,11 @@ interface SearchState {
    *  空洞（窗口之后、尚未补齐的匹配仍无装饰），前缀计数会把覆盖范围算错并
    *  重复写入同一区间。false 的条目由插件在后续任务中分批补入。 */
   decorated: boolean[];
+  /** 下一批补写的扫描起点，保证所有 < decoCursor 的匹配都已装饰。
+   *  每批从游标继续而不是从 0 重扫，总检查量 O(N)（#427 评审：否则 N 个匹配
+   *  会被扫 O(N²/160) 次，超大结果集下回调本身就可能顶出长任务）。
+   *  文档编辑后由 `firstUndecorated` 重算，兼容窗口重扫造成的中间空洞。 */
+  decoCursor: number;
 }
 
 export const searchKey = new PluginKey<SearchState>("inkling-search");
@@ -57,6 +62,12 @@ type SearchMeta =
  * 稳定低于 Epic #387 的 50ms 上限；首批包含 current，当前命中立即可见。
  */
 const DECORATION_CHUNK_SIZE = 160;
+
+/** 第一个尚未写入装饰的匹配下标；全部写完时返回 matches 长度 */
+function firstUndecorated(decorated: boolean[]): number {
+  const idx = decorated.indexOf(false);
+  return idx < 0 ? decorated.length : idx;
+}
 
 /** 根据选项构建正则，非法时返回 null */
 function buildRegex(opts: SearchOpts): RegExp | null {
@@ -175,7 +186,7 @@ function decorationFor(m: SearchMatch, index: number, current: number): Decorati
 function initialDecorations(
   doc: Node,
   matches: SearchMatch[],
-): { deco: DecorationSet; decorated: boolean[] } {
+): { deco: DecorationSet; decorated: boolean[]; decoCursor: number } {
   const decorated = matches.map((_, i) => i < DECORATION_CHUNK_SIZE);
   const decos = matches
     .map((m, i) => (decorated[i] ? decorationFor(m, i, 0) : null))
@@ -183,6 +194,7 @@ function initialDecorations(
   return {
     deco: decos.length > 0 ? DecorationSet.create(doc, decos) : DecorationSet.empty,
     decorated,
+    decoCursor: firstUndecorated(decorated),
   };
 }
 
@@ -244,6 +256,7 @@ function updateIncrementally(
   current: number;
   deco: DecorationSet;
   decorated: boolean[];
+  decoCursor: number;
 } {
   // 唯一 step 的变更区间（map.forEach 给出的新坐标；单步即最终坐标）
   let newStart = Infinity;
@@ -338,7 +351,7 @@ function updateIncrementally(
     deco = buildDecorations(newState.doc, matches, current);
     decorated = matches.map(() => true);
   }
-  return { matches, current, deco, decorated };
+  return { matches, current, deco, decorated, decoCursor: firstUndecorated(decorated) };
 }
 
 export const searchPlugin = () => {
@@ -351,6 +364,7 @@ export const searchPlugin = () => {
         current: -1,
         deco: DecorationSet.empty,
         decorated: [],
+        decoCursor: 0,
       }),
       apply: (tr, value, _oldState, newState) => {
         const meta = tr.getMeta(searchKey) as SearchMeta | undefined;
@@ -361,6 +375,7 @@ export const searchPlugin = () => {
             current: -1,
             deco: DecorationSet.empty,
             decorated: [],
+            decoCursor: 0,
           };
         }
         if (meta?.type === "set") {
@@ -375,19 +390,23 @@ export const searchPlugin = () => {
           };
         }
         if (meta?.type === "decoChunk") {
-          // #427：把下一批尚未写入的匹配装饰补进 deco（不改文档、不改匹配）
+          // #427：把下一批尚未写入的匹配装饰补进 deco（不改文档、不改匹配）。
+          // 从 decoCursor 继续扫描：所有 < cursor 的匹配都已装饰，每批只扫新区域，
+          // 避免每批从 0 重扫已完成的 O(N²/160) 检查（Codex 评审）。
           const pending: number[] = [];
-          for (let i = 0; i < value.matches.length; i += 1) {
-            if (value.decorated[i]) continue;
-            pending.push(i);
-            if (pending.length >= DECORATION_CHUNK_SIZE) break;
+          let cursor = Math.min(value.decoCursor, value.matches.length);
+          while (cursor < value.matches.length && pending.length < DECORATION_CHUNK_SIZE) {
+            if (!value.decorated[cursor]) pending.push(cursor);
+            cursor += 1;
           }
-          if (pending.length === 0) return value;
+          if (cursor >= value.matches.length) cursor = value.matches.length;
+          if (pending.length === 0) return { ...value, decoCursor: cursor };
           const decorated = value.decorated.slice();
           for (const i of pending) decorated[i] = true;
           return {
             ...value,
             decorated,
+            decoCursor: cursor,
             deco: value.deco.add(
               newState.doc,
               pending.map((i) => decorationFor(value.matches[i], i, value.current)),
@@ -425,6 +444,7 @@ export const searchPlugin = () => {
               current: -1,
               deco: DecorationSet.empty,
               decorated: [],
+              decoCursor: 0,
             };
           }
           if (tr.steps.length !== 1) {
@@ -437,6 +457,7 @@ export const searchPlugin = () => {
               current,
               deco: buildDecorations(newState.doc, matches, current),
               decorated: matches.map(() => true),
+              decoCursor: matches.length,
             };
           }
           const updated = updateIncrementally(value, tr, newState, regex);
@@ -455,10 +476,11 @@ export const searchPlugin = () => {
           chunkTimer = null;
         }
       };
+      const hasPending = (state: SearchState | undefined): boolean =>
+        !!state && state.decoCursor < state.matches.length;
       const scheduleChunk = () => {
         if (chunkTimer !== null || view.isDestroyed) return;
-        const state = searchKey.getState(view.state);
-        if (!state || !state.decorated.some((done) => !done)) return;
+        if (!hasPending(searchKey.getState(view.state))) return;
         chunkTimer = setTimeout(() => {
           chunkTimer = null;
           if (view.isDestroyed) return;
@@ -468,8 +490,7 @@ export const searchPlugin = () => {
       return {
         update: () => {
           if (view.isDestroyed) return;
-          const state = searchKey.getState(view.state);
-          if (state && state.decorated.some((done) => !done)) scheduleChunk();
+          if (hasPending(searchKey.getState(view.state))) scheduleChunk();
           else cancelChunk();
         },
         destroy: cancelChunk,
