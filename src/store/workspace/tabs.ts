@@ -831,7 +831,9 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
         activeTabPath: path,
         currentFile: path,
         currentContent: initialContent,
-        dirty: initialContent.length > 0,
+        // 新建草稿即成为活跃 tab：镜像必须整体派生，不能只写 dirty 而让上一个
+        // tab 的 saving / conflictPending 残留（#383 评审 B1）
+        ...activeTabStatusPatch(tab),
         saveError: null,
         lastSavedAt: null,
       });
@@ -976,13 +978,10 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
             : t,
         );
         const activeTab = openTabs.find((t) => t.path === state.activeTabPath);
-        const activeStatus = activeTabStatusPatch(activeTab);
+        // 镜像直接从刚更新的活跃 tab 派生（该 tab 的 conflictPending 已是 true）；
+        // 原 `activeTab ? … : true` 两个分支同值，属恒真死分支（#383 评审 B2）
         return state.activeTabPath === filePath
-          ? {
-              openTabs,
-              ...activeStatus,
-              conflictPending: activeTab ? activeStatus.conflictPending : true,
-            }
+          ? { openTabs, ...activeTabStatusPatch(activeTab) }
           : { openTabs };
       });
       useConflict.getState().openConflict({
@@ -1033,7 +1032,9 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
             activeTabPath: null,
             currentFile: null,
             currentContent: "",
-            dirty: false,
+            // 没有活跃 tab 时镜像全部归零；只清 dirty 会让 saving /
+            // conflictPending 残留到下一次切换（#383 评审 B1）
+            ...activeTabStatusPatch(undefined),
             lastSavedAt: null,
             saveError: null,
             currentHeadingSlug: null,
@@ -1110,7 +1111,8 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
         activeTabPath: null,
         currentFile: null,
         currentContent: "",
-        dirty: false,
+        // 同 closeTab 最后一个 tab：镜像三者一起归零（#383 评审 B1）
+        ...activeTabStatusPatch(undefined),
         lastSavedAt: null,
         saveError: null,
         currentHeadingSlug: null,
@@ -1293,15 +1295,12 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
                   t.path === activeTabPath ? { ...t, conflictPending: true, saving: false } : t,
                 );
                 const activeTab = openTabs.find((t) => t.path === current.activeTabPath);
-                const activeStatus = activeTabStatusPatch(activeTab);
-                const savingTargetIsActive = current.activeTabPath === activeTabPath;
-                const conflictPending = savingTargetIsActive
-                  ? activeStatus.conflictPending || !activeTab
-                  : current.conflictPending;
+                // 顶层镜像统一从更新后的活跃 tab 派生：保存目标是活跃 tab 时它已被
+                // 置 conflictPending，否则沿用活跃 tab 自身状态。原三元两个分支同值，
+                // 是恒真死逻辑（#383 评审 B2）。
                 return {
                   openTabs,
-                  ...activeStatus,
-                  conflictPending,
+                  ...activeTabStatusPatch(activeTab),
                 };
               });
               return;
