@@ -16,6 +16,28 @@ use commands::{
 use std::sync::Mutex;
 use tauri::{Emitter, Manager};
 
+/// Windows 窗口图标（即任务栏按钮图标）的像素来源（issue #432）。
+///
+/// Tauri 在 Windows 上把 `bundle.icon` 里第一个 `.ico` 的**目录首档**解成默认窗口图标
+/// （tauri-codegen `CachedIcon::new_ico` 只取 `entries()[0]`），运行时再以
+/// `WM_SETICON(ICON_SMALL)` 落到窗口上。Logo v3 的 `icon.ico` 首档是 16×16，
+/// 而任务栏按钮在 100% / 125% / 150% / 200% 缩放下要画 24 / 30 / 36 / 48 px，
+/// 16×16 被逐级放大后必然发糊——这就是「任务栏图标模糊」的直接成因。
+///
+/// Tauri 只暴露 `Window::set_icon`（落到 ICON_SMALL），没有暴露 tao 的
+/// `set_taskbar_icon`（ICON_BIG），所以这里能改善的就是任务栏实际取到的那一张位图：
+/// 改用同一份 Logo v3 母版直接缩放出的 256×256 预渲染档
+/// （`icons/128x128@2x.png`，8bit RGBA；`@2x` 故实为 256×256），由系统按实际 DPI
+/// 降采样。`icon.ico` 本身不动：它是设计包逐字节锁定的资源（#398，
+/// tests/unit/brand-assets.test.ts 会校验其目录结构与整体摘要）。
+const WINDOW_ICON_PNG: &[u8] = include_bytes!("../icons/128x128@2x.png");
+
+/// 解码内置的高清窗口图标；失败时调用方回退到 codegen 的默认窗口图标
+/// （Windows 上是 ICO 首档，其他平台是首个 PNG）。
+fn high_resolution_window_icon() -> tauri::Result<tauri::image::Image<'static>> {
+    tauri::image::Image::from_bytes(WINDOW_ICON_PNG)
+}
+
 /// 待打开文件：首次启动时从 argv 提取，前端就绪后通过 take_pending_file 拉取。
 /// 用 Mutex<Option> 让命令能 take 走值，避免重复打开。
 struct PendingFile(Mutex<Option<String>>);
@@ -102,6 +124,19 @@ pub fn run() {
         }));
     }
 
+    // #432：窗口图标必须在 `run` 之前换掉——窗口管理器在构建期就把 context 里的
+    // 默认图标取走了（`AppManager::with_handlers` → `WindowManager::default_icon`），
+    // 之后创建的所有窗口（含前端 `WebviewWindow` 新建的派生窗口）才会拿到它。
+    let mut context = tauri::generate_context!();
+    match high_resolution_window_icon() {
+        Ok(icon) => context.set_default_window_icon(Some(icon)),
+        // 解码失败不阻止启动：退回 codegen 默认窗口图标（发糊但可用）。
+        // release 是 GUI 子系统，stderr 不可见，故与既有启动错误一致落盘到临时目录日志。
+        Err(e) => app_paths::record_startup_error(&format!(
+            "[icon] 高清窗口图标解码失败，回退 codegen 默认窗口图标: {e}"
+        )),
+    }
+
     builder
         // #298：导航兜底——任何 webview 都不得被导航到应用自身 origin 之外
         .plugin(navigation_guard::init())
@@ -164,7 +199,7 @@ pub fn run() {
             app_paths::app_data_root,
             app_paths::take_portable_migration
         ])
-        .run(tauri::generate_context!())
+        .run(context)
         .expect("error while running tauri application");
 }
 
@@ -235,5 +270,55 @@ mod tests {
     fn open_file_target_none_when_no_windows_alive() {
         let labels: [&str; 0] = [];
         assert_eq!(pick_open_file_target_label(labels.iter().copied()), None);
+    }
+
+    #[test]
+    fn window_icon_source_is_a_256px_bitmap() {
+        let icon = high_resolution_window_icon().expect("内置窗口图标必须可解码");
+        // 16×16（ICO 首档）在任务栏任何缩放比例下都要放大，必须换 256×256 档；
+        // 256 也是设计包 ICO 的最大档，保证 200% 缩放（需 48px）走降采样。
+        assert_eq!(
+            (icon.width(), icon.height()),
+            (256, 256),
+            "窗口图标源必须是 256×256 档，否则任务栏会放大显示"
+        );
+        assert_eq!(
+            icon.rgba().len() as u32,
+            icon.width() * icon.height() * 4,
+            "解码后的位图必须是 w*h*4 的 RGBA8 缓冲（HICON 按 4 通道读取）"
+        );
+    }
+
+    #[test]
+    fn window_icon_source_is_the_confirmed_rounded_brand_mark() {
+        let icon = high_resolution_window_icon().expect("内置窗口图标必须可解码");
+        let width = icon.width();
+        let height = icon.height();
+        let rgba = icon.rgba();
+        let alpha_at = |x: u32, y: u32| rgba[((y * width + x) * 4 + 3) as usize];
+        // 白底圆角方形：四角因圆角而透明，中心是不透明底板
+        for (x, y) in [
+            (0, 0),
+            (width - 1, 0),
+            (0, height - 1),
+            (width - 1, height - 1),
+        ] {
+            assert_eq!(alpha_at(x, y), 0, "({x}, {y}) 应因圆角透明");
+        }
+        assert_eq!(alpha_at(width / 2, height / 2), 255, "中心应为不透明底板");
+
+        let mut opaque = 0usize;
+        let mut dark = 0usize;
+        for chunk in rgba.chunks_exact(4) {
+            if chunk[3] == 255 {
+                opaque += 1;
+            }
+            // 品牌图形为深色线条：确认嵌入的是图形本身，而不是空白 / 纯底板
+            if chunk[3] > 200 && chunk[0] < 120 && chunk[1] < 120 && chunk[2] < 160 {
+                dark += 1;
+            }
+        }
+        assert!(opaque > 50_000, "不透明底板像素过少（{opaque}），图标素材可能被替换");
+        assert!(dark > 1_000, "品牌图形像素过少（{dark}），嵌入的可能不是确认母版");
     }
 }
