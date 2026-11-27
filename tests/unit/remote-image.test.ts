@@ -477,4 +477,69 @@ describe("远程图片落盘：重载身份护栏（#431 评审）", () => {
     // 旧下载属于重载前的文档：结果必须丢弃，图片保留远程地址
     expect(imageSrcs()).toEqual(["https://cdn.example.com/a.png"]);
   });
+
+  it("重载后又粘贴同一 URL：前一批迟到结果不得覆盖新一批（身份按批捕获）", async () => {
+    const OLD = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 1, 1, 1]);
+    const NEW = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 2, 2, 2]);
+    let releaseOld!: (v: { data: Uint8Array; mime: string }) => void;
+    let releaseNew!: (v: { data: Uint8Array; mime: string }) => void;
+    downloadMock
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            releaseOld = resolve;
+          }),
+      )
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            releaseNew = resolve;
+          }),
+      );
+
+    useWorkspace.setState({
+      openTabs: [
+        {
+          path: DOC,
+          docId: "doc-note",
+          revision: 0,
+          content: "",
+          dirty: false,
+        },
+      ] as never,
+    });
+    await setup();
+    const URL = "https://cdn.example.com/same.png";
+    expect(pasteHtml(`<p><img src="${URL}"></p>`)).toBe(true);
+    await vi.waitFor(() => expect(downloadMock).toHaveBeenCalledTimes(1));
+
+    // reloadFile：路径不变、revision +1；随后用户再次粘贴同一 URL（第二批开始下载）
+    useWorkspace.setState({
+      openTabs: [
+        {
+          path: DOC,
+          docId: "doc-note",
+          revision: 1,
+          content: "",
+          dirty: false,
+        },
+      ] as never,
+    });
+    h.cursorToEnd();
+    expect(pasteHtml(`<p><img src="${URL}"></p>`)).toBe(true);
+    await vi.waitFor(() => expect(downloadMock).toHaveBeenCalledTimes(2));
+
+    // 第一批（属于重载前文档）先完成：结果必须整体丢弃，不得写盘、不得替换新文档的待替换节点
+    releaseOld({ data: OLD, mime: "image/png" });
+    await settle();
+    expect(imageSrcs()).toEqual([URL, URL]);
+
+    // 第二批（属于重载后文档）完成：只有它的结果落盘并替换
+    releaseNew({ data: NEW, mime: "image/png" });
+    await vi.waitFor(() => expect(imageSrcs().every((s) => s.startsWith("assets/"))).toBe(true));
+    await settle();
+    expect(new Set(imageSrcs()).size).toBe(1);
+    expect(files.size).toBe(1);
+    expect(files.get(`/docs/${imageSrcs()[0]}`)).toEqual(NEW);
+  });
 });
