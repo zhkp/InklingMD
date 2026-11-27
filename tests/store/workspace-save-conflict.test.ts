@@ -160,16 +160,30 @@ describe("saveCurrent 外部修改冲突保护", () => {
     await useWorkspace.getState().saveCurrent({ interactive: false });
     expect(writeTextFileMock).toHaveBeenCalledTimes(1);
   });
-  it("自动保存（非交互）：外部冲突时不弹窗，标记 conflictPending", async () => {
-    fileMtimeMock.mockResolvedValue(2_000);
+  it("自动保存（非交互）：冲突异步出口重新同步活跃 tab 的全部镜像", async () => {
+    let resolveFileMtime!: (value: number) => void;
+    fileMtimeMock.mockImplementationOnce(
+      () => new Promise<number>((resolve) => {
+        resolveFileMtime = resolve;
+      }),
+    );
     readTextFileMock.mockResolvedValue("外部新内容");
 
-    await useWorkspace.getState().saveCurrent({ interactive: false });
+    const saving = useWorkspace.getState().saveCurrent({ interactive: false });
+    await vi.waitFor(() => expect(fileMtimeMock).toHaveBeenCalledTimes(1));
+    // 模拟另一个异步出口在磁盘读取期间留下过期的活跃镜像。
+    useWorkspace.setState({ dirty: false, saving: true });
+    resolveFileMtime(2_000);
+    await saving;
 
     expect(askMock).not.toHaveBeenCalled();
     expect(writeTextFileMock).not.toHaveBeenCalled();
-    expect(useWorkspace.getState().conflictPending).toBe(true);
-    expect(useWorkspace.getState().openTabs[0].conflictPending).toBe(true);
+    const state = useWorkspace.getState();
+    const activeTab = state.openTabs[0];
+    expect(activeTab).toMatchObject({ dirty: true, saving: false, conflictPending: true });
+    expect(state.dirty).toBe(activeTab.dirty);
+    expect(state.saving).toBe(!!activeTab.saving);
+    expect(state.conflictPending).toBe(!!activeTab.conflictPending);
   });
 
   it("mtime 获取失败时回退到磁盘全文比对", async () => {
