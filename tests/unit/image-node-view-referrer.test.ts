@@ -17,7 +17,7 @@ function fakeNode(): Node {
 
 function makeView(): ImageNodeView {
   const view = { dispatch: vi.fn() } as unknown as PMView;
-  return new ImageNodeView(fakeNode(), view, () => undefined, "/doc.md");
+  return new ImageNodeView(fakeNode(), view, () => undefined, () => "/doc.md");
 }
 
 /** ImageNodeView.img 是私有字段，测试从渲染出的 DOM 读取 img 元素 */
@@ -40,7 +40,7 @@ describe("#162 图片 referrerpolicy", () => {
       type: { name: "image" },
     } as unknown as Node;
     const view = { dispatch: vi.fn() } as unknown as PMView;
-    const v = new ImageNodeView(node, view, () => undefined, "/doc.md");
+    const v = new ImageNodeView(node, view, () => undefined, () => "/doc.md");
     expect(imgOf(v).getAttribute("referrerpolicy")).toBe("no-referrer");
     v.destroy();
   });

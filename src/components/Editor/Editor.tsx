@@ -23,7 +23,7 @@ import "@milkdown/kit/prose/tables/style/tables.css";
 // TableToolbar 已提升到 App.tsx 的 topbar 下方作为固定非滚动行，
 // 此处不再内部渲染；inTable 状态通过 onInTableChange 回调外露。
 import { codeBlockView } from "./code-block-view";
-import { imageView } from "./image-node-view";
+import { imageView, refreshImageDocumentPaths } from "./image-node-view";
 import { imageUploadPlugin } from "./image-upload";
 import { smartPastePlugin } from "./smart-paste";
 import { remoteImagePlugin } from "./remote-image";
@@ -510,6 +510,11 @@ function EditorInner({
         inTableRef.current = false;
         setInTable(false);
         onInTableChangeRef.current?.(false);
+
+        // 文档切换：ProseMirror 对「同位置 + 同 src/属性」的图片节点会复用
+        // NodeView 且不调用 update()，这里显式把它们的基准路径刷成新文档，
+        // 否则新 tab 会显示旧文档目录下的同名图片（#431 评审）。
+        refreshImageDocumentPaths(view);
 
         // 2. 切入新 tab
         if (sourceMode) {

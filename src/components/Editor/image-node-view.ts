@@ -53,6 +53,30 @@ function encodeImageMeta(width: number | null, align: ImageAlign | null, cleanTi
  */
 let activeMenuOwner: ImageNodeView | null = null;
 
+/**
+ * 按编辑器视图索引的存活图片 NodeView（#431 评审）。
+ * ProseMirror 在替换文档时，对「同位置 + 同 src/属性」的节点会直接复用 NodeView
+ * 且**不调用 update()**，构造期缓存的 documentPath 会一直指向旧文档；切 tab
+ * 复用编辑器实例后必须由 Editor 显式调用 `refreshImageDocumentPaths(view)`。
+ */
+const liveImageViews = new WeakMap<PMView, Set<ImageNodeView>>();
+
+function registerImageView(view: PMView, nodeView: ImageNodeView): void {
+  let set = liveImageViews.get(view);
+  if (!set) {
+    set = new Set();
+    liveImageViews.set(view, set);
+  }
+  set.add(nodeView);
+}
+
+/** 文档切换后，用当前文档路径刷新该编辑器内所有存活的图片 NodeView */
+export function refreshImageDocumentPaths(view: PMView): void {
+  const set = liveImageViews.get(view);
+  if (!set) return;
+  for (const nodeView of set) nodeView.refreshDocumentPath();
+}
+
 export class ImageNodeView implements NodeView {
   dom: HTMLSpanElement;
   private img: HTMLImageElement;
@@ -60,6 +84,8 @@ export class ImageNodeView implements NodeView {
   private node: Node;
   private view: PMView;
   private getPos: () => number | undefined;
+  /** 当前文档路径的取值函数（实例跨 tab 复用，不能只在构造时取一次值） */
+  private readonly resolveDocumentPath: () => string;
   private documentPath: string;
   private source: string | null = null;
   private sourceGeneration = 0;
@@ -76,12 +102,13 @@ export class ImageNodeView implements NodeView {
     node: Node,
     view: PMView,
     getPos: () => number | undefined,
-    documentPath: string,
+    resolveDocumentPath: () => string,
   ) {
     this.node = node;
     this.view = view;
     this.getPos = getPos;
-    this.documentPath = documentPath;
+    this.resolveDocumentPath = resolveDocumentPath;
+    this.documentPath = resolveDocumentPath();
 
     this.dom = document.createElement("span");
     this.dom.className = "milkdown-image-wrap";
@@ -105,7 +132,29 @@ export class ImageNodeView implements NodeView {
     // 右键菜单：对齐
     this.dom.addEventListener("contextmenu", this.onContextMenu);
 
+    registerImageView(view, this);
     this.render();
+  }
+
+  /**
+   * 切换文档后刷新基准路径（#431 评审）。复用的 NodeView 不会收到 update()，
+   * 必须由 Editor 在文档切换时显式调用；路径变化时清掉 source 缓存，
+   * 让同一个 src 按新文档目录重新解析。
+   */
+  refreshDocumentPath(): void {
+    if (this.destroyed) return;
+    const next = this.resolveDocumentPath();
+    if (next === this.documentPath) return;
+    this.documentPath = next;
+    const src = this.node.attrs.src ?? "";
+    if (src === this.source) {
+      // 同一 src、仅基准目录变化：强制按新目录重解析，但保留当前图片直到
+      // 新地址就绪，避免切换瞬间闪一次空白。
+      this.source = null;
+      this.renderSource(src, true);
+    } else {
+      this.render();
+    }
   }
 
   private render() {
@@ -144,11 +193,11 @@ export class ImageNodeView implements NodeView {
   }
 
   /** 异步解析本地路径；generation 防止旧 Promise 覆盖较新的 src */
-  private renderSource(src: string) {
+  private renderSource(src: string, keepCurrentUntilResolved = false) {
     if (src === this.source) return;
     this.source = src;
     const generation = ++this.sourceGeneration;
-    this.img.removeAttribute("src");
+    if (!keepCurrentUntilResolved) this.img.removeAttribute("src");
     if (!src) return;
 
     void resolveImageSrc(src, this.documentPath)
@@ -309,6 +358,7 @@ export class ImageNodeView implements NodeView {
   destroy() {
     this.destroyed = true;
     this.sourceGeneration += 1;
+    liveImageViews.get(this.view)?.delete(this);
     // issue #184：节点销毁时一并清理打开中的菜单与 document 级监听，
     // 避免删除图片/切文件后菜单永久残留、监听器泄漏
     this.closeContextMenu();
@@ -321,6 +371,7 @@ export class ImageNodeView implements NodeView {
 export const imageView = (documentPath: string | (() => string)) => {
   const resolveDocPath = typeof documentPath === "function" ? documentPath : () => documentPath;
   return $view(imageSchema.node, () => (node, view, getPos) =>
-    new ImageNodeView(node, view, getPos, resolveDocPath()),
+    // 传取值函数而非当时的字符串：NodeView 会跨文档复用（#431 评审）
+    new ImageNodeView(node, view, getPos, resolveDocPath),
   );
 };

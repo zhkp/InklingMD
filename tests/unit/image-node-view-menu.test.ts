@@ -25,7 +25,7 @@ function fakeNode(): Node {
 
 function makeView(): ImageNodeView {
   const view = { dispatch: vi.fn() } as unknown as PMView;
-  return new ImageNodeView(fakeNode(), view, () => undefined, "/doc.md");
+  return new ImageNodeView(fakeNode(), view, () => undefined, () => "/doc.md");
 }
 
 function openMenu(view: ImageNodeView): void {

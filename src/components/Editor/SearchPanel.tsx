@@ -72,10 +72,12 @@ export function SearchPanel({ getEditor, onClose, showReplace, onShowReplaceChan
   useEffect(() => {
     const editor = getEditor();
     if (!editor) return;
-    if (debouncedFind) flushActiveHydration();
     const opts: SearchOpts = { find: debouncedFind, caseSensitive, useRegex };
     editor.action((ctx) => {
       const view = ctx.get(editorViewCtx);
+      // 只补齐**本面板搜索的目标编辑器**（#431 评审）：无参 flush 会遍历所有
+      // 活跃水合任务，分屏另一侧的大文档会被一次查找同步插完，重新造出长任务。
+      if (debouncedFind) flushActiveHydration(view);
       view.dispatch(view.state.tr.setMeta(searchKey, debouncedFind ? { type: "set", opts } : { type: "clear" }));
       const s = searchKey.getState(view.state);
       setCount(s?.matches.length ?? 0);
