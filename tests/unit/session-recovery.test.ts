@@ -279,7 +279,7 @@ describe("#365 恢复与丢弃", () => {
     seedDraft("/w/open.md", { content: "草稿", updatedAt: 1_000 });
     __setCursorIo({
       appDataDir: async () => "/appdata",
-      readTextFile: async () =>
+      readRecoveryFile: async () =>
         JSON.stringify({
           version: 1,
           tabs: { "/w/open.md": { pos: 9, scrollTop: 7, updatedAt: 1 } },
@@ -431,7 +431,7 @@ describe("#378 崩溃重启链路（注入 IO 的端到端模拟）", () => {
     // 光标 checkpoint 与草稿正文分文件存；这里用同一份内存文件系统模拟真实重启后的磁盘
     __setCursorIo({
       appDataDir: async () => "/appdata",
-      readTextFile: async (path) => files.get(path) ?? "",
+      readRecoveryFile: async (path) => files.get(path) ?? "",
       writeTextFile: async (path, content) => {
         files.set(path, content);
       },

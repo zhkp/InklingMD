@@ -36,7 +36,7 @@ export const lastDraftWriteOutcome = new Map<string, DraftWriteOutcome>();
  * 写入点：`writeDraftNow` 写成功即 true；`flushAllDrafts` 再按本次结果覆盖
  * （超限但旧副本仍在时保持 true，见 `keepsOldCopy`）。
  * 清理点：`clearDraft` 真的删掉副本后 delete —— 否则一条历史 `true` 会让
- * `hasRecoverableDraft()` 在副本已不存在时仍然放行退出。
+ * `countDraftlessTabs()` 把「副本已不存在」的 tab 误判成有副本、放行退出。
  */
 export const lastDraftWriteOk = new Map<string, boolean>();
 
@@ -294,7 +294,12 @@ export async function clearDraft(tabPath: string): Promise<void> {
     window.clearTimeout(timer);
     timers.delete(tabPath);
   }
-  if (!journaled.has(tabPath)) return;
+  if (!journaled.has(tabPath)) {
+    // 超限路径从未写成功过：journaled 里没有它，但提示历史仍要清——否则关掉重开同一路径
+    // 再超限时用户收不到「未建立崩溃恢复副本」。这里没有副本可删，清了不会被写成假话。
+    oversizeNotified.delete(tabPath);
+    return;
+  }
   try {
     const dir = await recoveryDir();
     await io.removeFile(draftPath(dir, tabPath));
@@ -302,6 +307,8 @@ export async function clearDraft(tabPath: string): Promise<void> {
     journaled.delete(tabPath);
     // 副本已不存在：写盘成功表必须同步清掉，否则退出确认会凭一条历史 true 放行
     lastDraftWriteOk.delete(tabPath);
+    // 副本确实删掉了才重置提示历史：删失败时盘上还留着旧副本，不能假装「没有副本」
+    oversizeNotified.delete(tabPath);
   } catch {
     // 删不掉就留着：启动时的清理器（PR-5b）会按 TTL 处理
   }

@@ -85,11 +85,17 @@ export async function flushAllDrafts(
   journalHealth = failed === 0 ? "healthy" : "degraded";
 }
 
-/** 是否存在可信的恢复副本（草稿写成功过，且健康度正常） */
-export function hasRecoverableDraft(): boolean {
-  if (journalHealth !== "healthy") return false;
-  for (const ok of lastDraftWriteOk.values()) if (ok) return true;
-  return false;
+/**
+ * 这些 tab 里有多少条**没有**可信的恢复副本（退出确认按这个数量决定是否放行）。
+ *
+ * 必须逐条判定：早先的 `hasRecoverableDraft()` 是「任意一条有副本就算有」的全局口径，
+ * 于是「A 超限没副本 + B 有副本」会直接跳过确认，A 的最后修改静默丢失。
+ * health 非 healthy 时所有副本都不可信，按全部缺失计。
+ */
+export function countDraftlessTabs(paths: readonly string[]): number {
+  if (paths.length === 0) return 0;
+  if (journalHealth !== "healthy") return paths.length;
+  return paths.filter((path) => lastDraftWriteOk.get(path) !== true).length;
 }
 
 function sessionFilePath(dir: string): string {
