@@ -40,6 +40,11 @@ export interface HydrationMeta {
   appendFromPos?: number;
   /** 可选：切回缓存 tab 时首帧即发布已缓存的大纲快照 */
   initialOutline?: EditorOutlineSnapshot | null;
+  /**
+   * 末片是否校正公式编号（#431 评审 B3）：
+   * 缓存时的编号开关与当前设置不一致，或缓存来自中断的首开水合（编号可能未跑）时为 true。
+   */
+  renumberFormulas?: boolean;
 }
 
 export const hydrationMetaKey = new PluginKey<HydrationMeta>("inkling-tab-hydration");
@@ -60,6 +65,10 @@ export interface TabEditorSnapshot {
    * 判定不会因为尾部块逐帧追加而持续变化（#426）。
    */
   totalHeight: number;
+  /** 缓存时「公式自动编号」开关值（命中时与当前设置比较，决定是否校正编号） */
+  formulaAutoNumber: boolean;
+  /** 缓存时是否已完成全量水合：中断的首开缓存可能还没跑过编号 */
+  numberingApplied: boolean;
 }
 
 export interface TabEditorCache {
@@ -210,6 +219,8 @@ export interface StartHydrationOptions {
    */
   heightPlaceholder?: { el: HTMLElement; height: number } | null;
   chunkSize?: number;
+  /** 缓存命中时是否在末片校正公式编号（设置变化 / 中断水合，见 HydrationMeta） */
+  renumberFormulas?: boolean;
   onComplete?: () => void;
 }
 
@@ -227,6 +238,7 @@ export function startDocHydration({
   initialOutline,
   heightPlaceholder,
   chunkSize = HYDRATION_CHUNK_SIZE_TAB_SWITCH,
+  renumberFormulas = false,
   onComplete,
 }: StartHydrationOptions): HydrationTask {
   const plugins = view.state.plugins;
@@ -258,6 +270,7 @@ export function startDocHydration({
         done: true,
         fromCache,
         initialOutline,
+        ...(renumberFormulas ? { renumberFormulas: true } : {}),
       } satisfies HydrationMeta);
     applySafeSelection(tr, selection);
     applyHistoryStateMeta(tr, plugins, historyState);
@@ -330,6 +343,7 @@ export function startDocHydration({
         fromCache,
         appendFromIndex,
         appendFromPos,
+        ...(isLast && renumberFormulas ? { renumberFormulas: true } : {}),
         ...(isLast ? { initialOutline } : {}),
       } satisfies HydrationMeta);
 

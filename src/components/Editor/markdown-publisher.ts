@@ -5,6 +5,7 @@
 import { Plugin, PluginKey } from "@milkdown/kit/prose/state";
 import type { Node } from "@milkdown/kit/prose/model";
 import type { EditorView } from "@milkdown/kit/prose/view";
+import { isSamePath } from "../../lib/path-utils";
 import { hydrationMetaKey } from "./tab-editor-cache";
 
 export interface MarkdownPublisherDeps {
@@ -13,23 +14,46 @@ export interface MarkdownPublisherDeps {
   getLastSynced: () => string;
   setLastSynced: (markdown: string) => void;
   onChange: (markdown: string) => void;
+  /** 该编辑器当前挂载的文档路径（实例跨 tab 复用，必须每次实时读取） */
+  getFilePath: () => string;
 }
 
 const publisherKey = new PluginKey<{ skipSeq: number }>("inkling-markdown-publisher");
 
+/**
+ * 只改运行时属性、不改变 Markdown 输出的同步事务标记（如公式编号 number attr）。
+ * 这类事务不应触发全文序列化（#431 评审 B3）。
+ */
+export const SKIP_MARKDOWN_PUBLISH_META = "inkling-skip-markdown-publish";
+
 // 存活编辑器的 flush 注册表：保存路径在读取 store 前统一 flush，
 // 避免防抖窗口内 Ctrl/Cmd+S 读到旧内容（PR #34 review）。
 // 按 EditorView 索引，交互路径只 flush 自己那份，避免顺手序列化分屏的全文（#431 评审）。
-const pendingFlushes = new Map<EditorView, () => void>();
+interface PublisherEntry {
+  flush: () => void;
+  /** 实时读取当前挂载路径：实例跨 tab 复用，注册时不能固化 */
+  getFilePath: () => string;
+}
+const pendingFlushes = new Map<EditorView, PublisherEntry>();
 const tabCancelTimers = new WeakMap<EditorView, () => void>();
 
 export function flushAllMarkdownPublishers(): void {
-  for (const flush of [...pendingFlushes.values()]) flush();
+  for (const entry of [...pendingFlushes.values()]) entry.flush();
 }
 
 /** 只 flush 指定编辑器的待发编辑（切 tab / 进源码模式等单编辑器交互路径） */
 export function flushMarkdownPublisherFor(view: EditorView): void {
-  pendingFlushes.get(view)?.();
+  pendingFlushes.get(view)?.flush();
+}
+
+/**
+ * 只 flush 当前挂载在指定文档上的待发编辑（store 侧切 tab/关闭/保存路径使用）。
+ * 分屏停在别的文件时不会被顺带全文序列化（#431 评审 B7）。
+ */
+export function flushMarkdownPublishersForPath(path: string): void {
+  for (const entry of [...pendingFlushes.values()]) {
+    if (isSamePath(entry.getFilePath(), path)) entry.flush();
+  }
 }
 
 /** 切 tab 替换 doc 前取消未触发的防抖定时器，避免串写到新 tab */
@@ -54,7 +78,11 @@ export const markdownPublisherPlugin = (deps: MarkdownPublisherDeps) =>
     state: {
       init: () => ({ skipSeq: 0 }),
       apply: (tr, prev) => {
-        if (tr.getMeta(hydrationMetaKey)?.hydrating || isHeadingIdSyncTr(tr)) {
+        if (
+          tr.getMeta(hydrationMetaKey)?.hydrating ||
+          isHeadingIdSyncTr(tr) ||
+          tr.getMeta(SKIP_MARKDOWN_PUBLISH_META) === true
+        ) {
           return { skipSeq: prev.skipSeq + 1 };
         }
         return prev;
@@ -103,7 +131,10 @@ export const markdownPublisherPlugin = (deps: MarkdownPublisherDeps) =>
         lastSkipSeq = publisherKey.getState(view.state)?.skipSeq ?? lastSkipSeq;
       });
       view.dom.addEventListener("blur", flush);
-      pendingFlushes.set(view as EditorView, flush);
+      pendingFlushes.set(view as EditorView, {
+        flush,
+        getFilePath: deps.getFilePath,
+      });
       return {
         update: (nextView, prevState) => {
           const skipSeq = publisherKey.getState(nextView.state)?.skipSeq ?? lastSkipSeq;

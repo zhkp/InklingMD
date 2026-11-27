@@ -44,7 +44,8 @@ import { tableTrackerPlugin } from "./table-tracker";
 import { selectAllPlugin } from "./select-all";
 import { useSourceModeTransition } from "./useSourceModeTransition";
 import { useCursorStateRestore } from "./useCursorStateRestore";
-import { placeCursorForRootClick, pointerNeedsHydration } from "./editor-root-click";
+import { placeCursorForRootClick } from "./editor-root-click";
+import { attachHydrationFlushOnInteraction } from "./hydration-interaction";
 import {
   createTabEditorCache,
   flushActiveHydration,
@@ -276,6 +277,8 @@ function EditorInner({
                 setLastSynced: (md) => {
                   lastSyncedRef.current = md;
                 },
+                // store 侧按路径 flush 时要用当前挂载路径（实例跨 tab 复用）
+                getFilePath: () => filePathRef.current,
                 onChange: (md) => {
                   if (mountedDocRef.current) {
                     mountedDocRef.current.value = md;
@@ -414,9 +417,11 @@ function EditorInner({
         return;
       }
     } else if (prev.filePath === filePath && prev.revision === revision) {
-      // 同文件模式翻转或回调更新：更新记录并同步 onChangeRef
+      // 同文件模式翻转或回调更新：同步 onChangeRef，但**不能**把外部 value 写进
+      // prev.value——那是「已挂载 doc 的内容基线」，只能由 onChange/解析/水合路径写。
+      // 写进来会让下方 value 同步 effect 判断成「已同步」，吞掉同 path/revision 的
+      // 外部更新（崩溃恢复合并没有递增 revision，#431 评审 B1）。
       prev.sourceMode = sourceMode;
-      prev.value = value;
       onChangeRef.current = onChange;
       return;
     }
@@ -463,14 +468,19 @@ function EditorInner({
               // 切走时布局是干净的：这里读一次 scrollHeight 代价很低，
               // 供切回时分片水合期间撑住容器高度（#426）。若本 tab 的水合
               // 还没跑完，尺寸不完整，按已水合块的平均高度外推完整高度。
+              // 若切入的是源码模式 tab，WYSIWYG 在 commit 阶段已 display:none，
+              // 现场 scrollHeight 会塌陷成小值；改用锚点采样持续缓存的真实高度
+              // （#431 评审 B2）。
               const scrollEl =
                 (view as EditorView & { scrollDOM?: HTMLElement }).scrollDOM ??
                 view.dom.closest<HTMLElement>(".editor-scroll");
               const totalHeight = wasHydrating
                 ? inflightTask!.estimateFullHeight()
-                : scrollEl
-                  ? scrollEl.scrollHeight
-                  : 0;
+                : sourceMode
+                  ? wysiwygScrollHeightRef.current
+                  : scrollEl
+                    ? scrollEl.scrollHeight
+                    : 0;
 
               // tab 已被关闭时不写缓存：closeTab 先更新 openTabs（触发 prune），
               // 本次 layout effect 是同一提交里的后手，若无条件写回，关闭的大文档
@@ -499,6 +509,10 @@ function EditorInner({
                   lastSynced: lastSyncedRef.current,
                   outlineSnapshot: lastOutlineRef.current,
                   totalHeight,
+                  // 记录缓存时的编号开关与「编号是否已跑过」：中断的首开水合
+                  // （wasHydrating）可能还没编号，命中时必须校正（#431 评审 B3）。
+                  formulaAutoNumber: useSettings.getState().formulaAutoNumber,
+                  numberingApplied: !wasHydrating,
                 });
               }
             } else {
@@ -549,6 +563,11 @@ function EditorInner({
           // 分片水合期间用切走时的高度撑住容器：否则滚动容器逐帧长高，
           // `switchMs`（等高度收敛）会把整个水合时长算进切换耗时（#426）。
           const wysiwygEl = view.dom.closest<HTMLElement>(".md-editor-wysiwyg");
+          // 缓存文案的编号状态可能已过期：开关在别的 tab 上被切换过，或缓存来自
+          // 中断的首开水合（编号未跑）。命中时让末片做一次编号校正（#431 评审 B3）。
+          const renumberFormulas =
+            !cached.numberingApplied ||
+            cached.formulaAutoNumber !== useSettings.getState().formulaAutoNumber;
           // 注意：onComplete 可能在水合函数内部**同步**触发（单分片路径），
           // 因此必须用 let + 赋值后比较，不能用 const（TDZ 会抛错并被外层 catch 吞掉）。
           let task: HydrationTask | null = null;
@@ -564,6 +583,7 @@ function EditorInner({
                 ? { el: wysiwygEl, height: cached.totalHeight }
                 : null,
             chunkSize: HYDRATION_CHUNK_SIZE_TAB_SWITCH,
+            renumberFormulas,
             onComplete: () => {
               if (hydrationTaskRef.current === task) {
                 hydrationTaskRef.current = null;
@@ -748,24 +768,8 @@ function EditorInner({
             registerWysiwygAnchorSampler(filePath, sampleAnchor);
 
             // 用户在分片水合期间交互时先同步补齐全文，确保编辑/点击落点准确。
-            // 鼠标点击只在「点到尚未水合的尾部区域」时才补齐：命中已挂载内容时
-            // 坐标映射是准确的，没必要为此付一次 O(剩余全文) 的同步插入。
-            const flushOnInteraction = (event: Event) => {
-              if (event.type === "mousedown") {
-                const me = event as MouseEvent;
-                // 与根容器点击共用同一判据：命中已挂载前缀时不补齐尾部
-                if (!pointerNeedsHydration(view, me.clientX, me.clientY)) return;
-              }
-              // 只补齐**触发事件的这个编辑器**（#431 评审）：无参调用会遍历所有
-              // 活跃水合任务，分屏时在一个 pane 点一下就可能把另一个 pane 剩余的
-              // O(n) 插入同步做完，重新造出长任务。
-              flushActiveHydration(view);
-            };
-            view.dom.addEventListener("mousedown", flushOnInteraction, true);
-            view.dom.addEventListener("keydown", flushOnInteraction, true);
-            view.dom.addEventListener("beforeinput", flushOnInteraction, true);
-            view.dom.addEventListener("paste", flushOnInteraction, true);
-            view.dom.addEventListener("drop", flushOnInteraction, true);
+            // 细节（前缀命中跳过、只补齐本 view）见 hydration-interaction.ts。
+            const detachHydrationFlush = attachHydrationFlushOnInteraction(view);
 
             // #212：滚动路径不再做任何几何读取
             let settleTimer: ReturnType<typeof setTimeout> | null = null;
@@ -786,11 +790,7 @@ function EditorInner({
               settleTimer = null;
               unregisterWysiwygAnchorSampler(filePath);
               scrollEl.removeEventListener("scroll", onScroll);
-              view.dom.removeEventListener("mousedown", flushOnInteraction, true);
-              view.dom.removeEventListener("keydown", flushOnInteraction, true);
-              view.dom.removeEventListener("beforeinput", flushOnInteraction, true);
-              view.dom.removeEventListener("paste", flushOnInteraction, true);
-              view.dom.removeEventListener("drop", flushOnInteraction, true);
+              detachHydrationFlush();
             };
           }
         });

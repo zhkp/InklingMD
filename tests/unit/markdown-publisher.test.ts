@@ -13,7 +13,7 @@ interface FakeDoc {
   id: number;
 }
 
-function setup(options?: { initialSynced?: string }) {
+function setup(options?: { initialSynced?: string; filePath?: string }) {
   const onChange = vi.fn();
   const serialize = vi.fn((doc: unknown) => `md-${(doc as FakeDoc).id}`);
   let lastSynced = options?.initialSynced ?? "md-0";
@@ -23,6 +23,7 @@ function setup(options?: { initialSynced?: string }) {
     setLastSynced: (md) => {
       lastSynced = md;
     },
+    getFilePath: () => options?.filePath ?? "/docs/note.md",
     onChange,
   });
   const dom = document.createElement("div");

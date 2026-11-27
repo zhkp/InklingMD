@@ -85,16 +85,23 @@ export function useCursorStateRestore({
         if (scrollEl.isConnected) scrollEl.scrollTop = target;
       };
       apply();
-      // 大文档打开瞬间代码块/图表尚为占位高度（或仍在分片水合中），
-      // scrollHeight 可能不足，scrollTop 被钳制在 maxScroll。
-      // 在途水合期间不消耗 30 帧预算，水合完成后再逐帧收敛（至多 30 帧）。
+      // 首帧写入后记录实际落点：长文档此时可能还没排版出完整高度，
+      // scrollTop 会被钳制在 maxScroll，不能拿 target 当基线。
+      const hydrationBaseline = scrollEl.scrollTop;
+      // 水合期间不再逐帧写 scrollTop：那会把用户在水合窗口内的滚动持续拽回
+      // 记忆位置（#431 评审 B6）。水合完成后，仅当用户没有自己滚动过才收敛到 target。
       let frames = 0;
+      let hydrationFinished = false;
       const settle = () => {
         if (disposed || !scrollEl.isConnected) return;
         if (hydratingHere()) {
-          apply();
           rafId = requestAnimationFrame(settle);
           return;
+        }
+        if (!hydrationFinished) {
+          hydrationFinished = true;
+          // 用户在水合窗口内滚动过（位置已偏离首帧落点）：尊重用户，不再拽回
+          if (Math.abs(scrollEl.scrollTop - hydrationBaseline) >= 1) return;
         }
         if (Math.abs(scrollEl.scrollTop - target) < 1 || ++frames > 30) return;
         apply();

@@ -33,9 +33,10 @@ vi.mock("../../src/lib/dialogs", () => ({
 
 vi.mock("../../src/components/Editor/markdown-publisher", () => ({
   flushAllMarkdownPublishers: vi.fn(),
+  flushMarkdownPublishersForPath: vi.fn(),
 }));
 
-import { flushAllMarkdownPublishers } from "../../src/components/Editor/markdown-publisher";
+import { flushMarkdownPublishersForPath } from "../../src/components/Editor/markdown-publisher";
 
 const DOC = "/workspace/note.md";
 const OPEN_STAT = { mtimeUs: 1_760_000_000_000_000, size: 9 };
@@ -125,7 +126,7 @@ describe("useFileWatcher（#362 重写后的判定）", () => {
     vi.mocked(fs.fileStat).mockResolvedValue(EXTERNAL_STAT);
 
     const tail = "# 标题\n\n读盘期间输入的尾部";
-    vi.mocked(flushAllMarkdownPublishers).mockImplementation(() => {
+    vi.mocked(flushMarkdownPublishersForPath).mockImplementation(() => {
       useWorkspace.setState((s) => ({
         currentContent: tail,
         openTabs: s.openTabs.map((t) => (t.path === DOC ? { ...t, content: tail } : t)),

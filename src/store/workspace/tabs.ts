@@ -22,7 +22,7 @@ import { createDocId } from "../../lib/doc-identity";
 import { scheduleCursorCheckpoint } from "../../lib/cursor-checkpoint";
 import { evaluateBaseline, reconcileDiskContent } from "../../lib/save-guard";
 import { writeErrorCode, type WriteErrorCode } from "../../lib/writeErrors";
-import { flushAllMarkdownPublishers } from "../../components/Editor/markdown-publisher";
+import { flushMarkdownPublishersForPath } from "../../components/Editor/markdown-publisher";
 import { runWysiwygAnchorSampler } from "../../lib/wysiwyg-anchor-sampler";
 import { useConflict } from "../conflict";
 import {
@@ -796,7 +796,9 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
     },
 
     openUntitledTabWithContent: (initialContent: string) => {
-      flushAllMarkdownPublishers();
+      // 只 flush 即将切离的文档：分屏停在自己的文件上，不该被顺带序列化（#431 评审 B7）
+      const departing = get().activeTabPath;
+      if (departing) flushMarkdownPublishersForPath(departing);
       intents.mainFile += 1;
       const { openTabs } = get();
       // 生成唯一虚拟路径 untitled-1, untitled-2...（避免与已打开草稿重名）
@@ -840,7 +842,10 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
     },
 
     splitSwap: () => {
-      flushAllMarkdownPublishers();
+      // 两块面板都会换文件：只 flush 这两个文档，其余 tab 的待发编辑不参与
+      const beforeSwap = get();
+      if (beforeSwap.splitFile) flushMarkdownPublishersForPath(beforeSwap.splitFile);
+      if (beforeSwap.currentFile) flushMarkdownPublishersForPath(beforeSwap.currentFile);
       const { splitFile, currentFile, openTabs } = get();
       if (!splitFile || !currentFile) return;
       const mainTab = openTabs.find((t) => t.path === currentFile);
@@ -913,7 +918,7 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
       }
 
       // ④ 读盘往返期间可能有新输入/并发保存：先 flush，再取最新 tab 作为比较对象
-      flushAllMarkdownPublishers();
+      flushMarkdownPublishersForPath(filePath);
       const tabAfterRead = get().openTabs.find((t) => t.path === filePath);
       if (!tabAfterRead) return;
 
@@ -945,7 +950,7 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
       }
 
       // ⑦ 真冲突：对话框不能拿过期内容，再 flush 一次并重取，并再次确认仍活跃
-      flushAllMarkdownPublishers();
+      flushMarkdownPublishersForPath(filePath);
       const tabForDialog = get().openTabs.find((t) => t.path === filePath);
       if (!tabForDialog) return;
       if (get().activeTabPath !== filePath) return;
@@ -976,7 +981,10 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
     },
 
     switchTab: (filePath) => {
-      flushAllMarkdownPublishers();
+      // 只 flush 即将切离的文档：分屏仍停在自己的文件上，全局 flush 会同步
+      // 序列化它的大文档（#431 评审 B7）。
+      const departing = get().activeTabPath;
+      if (departing) flushMarkdownPublishersForPath(departing);
       const tab = get().openTabs.find((t) => t.path === filePath);
       if (!tab) return;
       intents.mainFile += 1;
@@ -992,7 +1000,8 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
     },
 
     closeTab: (filePath) => {
-      flushAllMarkdownPublishers();
+      // 只 flush 被关闭的文档：其他 tab（含分屏）的待发编辑与本次关闭无关
+      flushMarkdownPublishersForPath(filePath);
       const { openTabs, activeTabPath } = get();
       const idx = openTabs.findIndex((t) => t.path === filePath);
       if (idx === -1) return;
@@ -1038,10 +1047,13 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
     },
 
     closeOthers: (keepPath) => {
-      flushAllMarkdownPublishers();
       const { openTabs, splitFile } = get();
       const keep = openTabs.find((t) => t.path === keepPath);
       if (!keep) return;
+      // 只 flush 将被关闭的文档（保留的 tab 与无关视图不参与，#431 评审 B7）
+      for (const t of openTabs) {
+        if (t.path !== keepPath) flushMarkdownPublishersForPath(t.path);
+      }
       // #364：批量关闭也要清 pathRevs，否则重开同路径会从旧 rev 起步
       for (const t of openTabs) if (t.path !== keepPath) dropPathRev(t.path);
       intents.mainFile += 1;
@@ -1055,10 +1067,11 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
     },
 
     closeToRight: (fromPath) => {
-      flushAllMarkdownPublishers();
       const { openTabs, activeTabPath, splitFile } = get();
       const idx = openTabs.findIndex((t) => t.path === fromPath);
       if (idx === -1) return;
+      // 只 flush 右侧将被关闭的文档（#431 评审 B7）
+      for (const t of openTabs.slice(idx + 1)) flushMarkdownPublishersForPath(t.path);
       intents.mainFile += 1;
       const nextTabs = openTabs.slice(0, idx + 1);
       for (const t of openTabs.slice(idx + 1)) dropPathRev(t.path);
@@ -1082,7 +1095,8 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
     },
 
     closeAll: () => {
-      flushAllMarkdownPublishers();
+      // 只 flush 将被关闭的文档（#431 评审 B7）
+      for (const t of get().openTabs) flushMarkdownPublishersForPath(t.path);
       // #364：批量关闭也要清 pathRevs，否则重开同路径会从旧 rev 起步
       for (const t of get().openTabs) dropPathRev(t.path);
       intents.mainFile += 1;
@@ -1184,7 +1198,8 @@ export const createTabsSlice: StateCreator<WorkspaceState, [], [], TabsSlice> = 
       }
 
       const run = async () => {
-      flushAllMarkdownPublishers();
+      // 只 flush 被保存的文档：分屏/其他 tab 的待发编辑与本文件落盘无关（#431 评审 B7）
+      flushMarkdownPublishersForPath(filePath);
       const { openTabs } = get();
       // 目标可以是**后台 tab**（#364）：下面的镜像更新都按「是不是活跃 tab」判定
       const activeTabPath = filePath;

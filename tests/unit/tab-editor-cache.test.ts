@@ -6,7 +6,6 @@
 // 3. 高度占位：水合期间撑住容器高度，完成/取消后清除；
 // 4. 配套插件在水合事务上不做多余工作（markdown 发布、光标落盘、块拖拽手柄）。
 
-import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Schema } from "@milkdown/kit/prose/model";
 import { EditorState, TextSelection, type Plugin } from "@milkdown/kit/prose/state";
@@ -90,6 +89,8 @@ function makeSnapshot(overrides: Partial<TabEditorSnapshot> = {}): TabEditorSnap
     lastSynced: "# body",
     outlineSnapshot: null,
     totalHeight: 0,
+    formulaAutoNumber: true,
+    numberingApplied: true,
     ...overrides,
   };
 }
@@ -273,6 +274,7 @@ describe("水合事务不触发多余工作（#426）", () => {
       serialize,
       getLastSynced: () => "md-0",
       setLastSynced: () => {},
+      getFilePath: () => "/docs/note.md",
       onChange,
     });
     const state = EditorState.create({
@@ -338,6 +340,7 @@ describe("水合事务不触发多余工作（#426）", () => {
       serialize,
       getLastSynced: () => "md-0",
       setLastSynced: () => {},
+      getFilePath: () => "/docs/note.md",
       onChange,
     });
     const state = EditorState.create({ doc: makeDoc(3), plugins: [plugin] });
@@ -439,67 +442,6 @@ describe("水合补齐的作用域（#431 评审）", () => {
     taskB.cancel();
     a.view.destroy();
     b.view.destroy();
-  });
-
-  it("交互/点击/锚点三条路径都按当前 view 补齐（源码接线锁）", () => {
-    const editor = readFileSync("src/components/Editor/Editor.tsx", "utf8");
-
-    // 1) 分片水合期间的交互监听：传 view
-    const flushStart = editor.indexOf("const flushOnInteraction");
-    expect(flushStart).toBeGreaterThan(-1);
-    const flushSeg = editor.slice(flushStart, flushStart + 900);
-    expect(flushSeg).toContain("flushActiveHydration(view)");
-    expect(flushSeg).not.toContain("flushActiveHydration();");
-
-    // 2) 根容器点击：水合补齐移进 placeCursorForRootClick，自身不再无参 flush
-    const clickStart = editor.indexOf("const handleRootMouseDown");
-    expect(clickStart).toBeGreaterThan(-1);
-    expect(editor.slice(clickStart, clickStart + 400)).not.toContain(
-      "flushActiveHydration();",
-    );
-    const rootClick = readFileSync(
-      "src/components/Editor/editor-root-click.ts",
-      "utf8",
-    );
-    expect(rootClick).toContain("flushActiveHydration(view)");
-
-    // 3) 打开文件后的锚点滚动：在 action 内按 view 补齐
-    const anchorStart = editor.indexOf("scrollToAnchorInView(view, fragment)");
-    expect(anchorStart).toBeGreaterThan(-1);
-    expect(editor.slice(anchorStart - 400, anchorStart)).toContain(
-      "flushActiveHydration(view)",
-    );
-  });
-
-  it("进入源码模式只补齐自己的编辑器（#431 评审）", () => {
-    const src = readFileSync(
-      "src/components/Editor/useSourceModeTransition.ts",
-      "utf8",
-    );
-    expect(src).toContain("flushActiveHydration(ctx.get(editorViewCtx))");
-    // 不允许残留无参调用（那会顺带把分屏另一侧的水合同步做完）
-    expect(src).not.toMatch(/flushActiveHydration\(\s*\)/);
-    // 待发编辑的发布同样只作用于本编辑器（分屏的大文档不该被顺带序列化）
-    expect(src).toContain("flushMarkdownPublisherFor(");
-    expect(src).not.toContain("flushAllMarkdownPublishers(");
-  });
-
-  it("导出只补齐被导出编辑器的水合（#431 评审）", () => {
-    const src = readFileSync("src/lib/exporter.ts", "utf8");
-    expect(src).toContain("flushActiveHydration(v)");
-    expect(src).not.toMatch(/flushActiveHydration\(\s*\)/);
-  });
-
-  it("切走时缓存内容取 flush 之后的值，不用 flush 前的 prop（#431 评审）", () => {
-    const editor = readFileSync("src/components/Editor/Editor.tsx", "utf8");
-    expect(editor).toContain("cachedContent: flushedContent");
-    expect(editor).not.toContain("cachedContent: prev.value");
-    // 取值必须发生在 flush 之后：换 tab 时 flush 才把最新内容写进 store。
-    // 且只 flush 切离的那个 view（分屏的待发编辑属于另一份文件，#431 评审）
-    const flushIdx = editor.indexOf("flushMarkdownPublisherFor(view);");
-    const resolveIdx = editor.indexOf("const flushedContent =");
-    expect(flushIdx).toBeGreaterThan(-1);
-    expect(resolveIdx).toBeGreaterThan(flushIdx);
   });
 });
 

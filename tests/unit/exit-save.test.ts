@@ -18,6 +18,7 @@ vi.mock("@tauri-apps/api/window", () => ({
 vi.mock("@tauri-apps/plugin-dialog", () => ({ message: messageMock, ask: vi.fn() }));
 vi.mock("../../src/components/Editor/markdown-publisher", () => ({
   flushAllMarkdownPublishers: flushMock,
+  flushMarkdownPublishersForPath: flushMock,
 }));
 // 退出/会话底座在单测里不写真实 app data 目录
 vi.mock("../../src/lib/exit-session", () => ({

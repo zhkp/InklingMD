@@ -13,6 +13,7 @@ const { showMessageMock } = vi.hoisted(() => ({ showMessageMock: vi.fn() }));
 vi.mock("../../src/lib/dialogs", () => ({ showMessage: showMessageMock }));
 vi.mock("../../src/components/Editor/markdown-publisher", () => ({
   flushAllMarkdownPublishers: vi.fn(),
+  flushMarkdownPublishersForPath: vi.fn(),
 }));
 
 import { copyRichText } from "../../src/lib/exporter";

@@ -224,4 +224,45 @@ describe("imageUploadPlugin 粘贴图片", () => {
     expect(view.state.doc.firstChild?.content.firstChild?.type.name).toBe("text");
     expect(showMessageMock).not.toHaveBeenCalled();
   });
+
+  it("落盘期间草稿另存为（路径变化、docId 不变）仍把图片插入同一份文档（#431 评审）", async () => {
+    // 身份必须在第一个 await 之前捕获：另存为后旧路径已不在 openTabs，
+    // 若在 await 之后按旧路径重取身份会得到 null，把已 preventDefault 的粘贴丢弃
+    let releaseWrite: (() => void) | null = null;
+    writeBinaryFileMock.mockImplementationOnce(
+      () => new Promise<void>((resolve) => {
+        releaseWrite = resolve;
+      }),
+    );
+    let currentPath = "/docs/note.md";
+    const plugin = imageUploadPlugin(() => currentPath);
+    const file = new File([new Uint8Array([1, 2, 3])], "keep.png", {
+      type: "image/png",
+    });
+    (plugin.props.handlePaste as any)(view, makePasteEvent(file));
+    await flushAsync();
+    expect(releaseWrite).not.toBeNull();
+
+    // 另存为：store 把 tab 迁到新路径，docId/revision 原样保留
+    useWorkspace.setState({
+      openTabs: [
+        {
+          path: "/docs/other.md",
+          docId: "doc-note",
+          content: "",
+          dirty: false,
+          revision: 0,
+        },
+      ] as never,
+    });
+    currentPath = "/docs/other.md";
+    releaseWrite!();
+    await flushAsync();
+
+    // 同一份文档：图片照常插入
+    const inserted = view.state.doc.firstChild?.content.firstChild;
+    expect(inserted?.type.name).toBe("image");
+    expect(inserted?.attrs.src).toMatch(/^assets\/.+\.png$/);
+    expect(showMessageMock).not.toHaveBeenCalled();
+  });
 });

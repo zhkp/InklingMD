@@ -9,7 +9,8 @@
 
 import { Plugin, PluginKey } from "@milkdown/kit/prose/state";
 import { useSettings } from "../../store/settings";
-import { hydrationMetaKey } from "./tab-editor-cache";
+import { hydrationMetaKey, type HydrationMeta } from "./tab-editor-cache";
+import { SKIP_MARKDOWN_PUBLISH_META } from "./markdown-publisher";
 
 export const formulaNumberingKey = new PluginKey("inkling-formula-numbering");
 
@@ -60,14 +61,17 @@ export const formulaNumberingPlugin = () =>
   new Plugin({
     key: formulaNumberingKey,
     appendTransaction: (trs, _oldState, newState) => {
-      // 渐进式水合的中间分片跳过全树重算，等末片到齐再统一校验/编号；
-      // 缓存命中的末片也跳过——那份 doc 是从同一个编辑器缓存下来的，
-      // 编号属性本来就已经写好（#426）。
-      if (trs.some((t) => {
-        const m = t.getMeta(hydrationMetaKey);
-        return m?.hydrating && (m.fromCache || !m.done);
-      })) {
-        return null;
+      // 渐进式水合的中间分片跳过全树重算，等末片到齐再统一校验/编号。
+      // 缓存命中的末片默认跳过——doc 来自同一个编辑器缓存，编号本来已写好；
+      // 但缓存时的编号开关与当前设置不一致、或缓存来自中断的首开水合时必须校正
+      // （否则在 B 上切换开关后切回 A，A 仍是旧编号，#431 评审 B3）。
+      const hydration = trs.reduce<HydrationMeta | undefined>(
+        (found, tr) => found ?? tr.getMeta(hydrationMetaKey),
+        undefined,
+      );
+      if (hydration?.hydrating) {
+        if (!hydration.done) return null;
+        if (hydration.fromCache && !hydration.renumberFormulas) return null;
       }
       // 仅在文档变更或显式 recalc 时重算，避免纯选区移动也全树遍历
       const docChanged = trs.some((t) => t.docChanged);
@@ -79,8 +83,11 @@ export const formulaNumberingPlugin = () =>
       const fixes = collectFixes(newState.doc, enabled);
       if (fixes.length === 0) return null;
       const tr = newState.tr;
+      // 编号只改运行时 attr，不进入 Markdown 输出：不进撤销历史，也不触发全文发布
+      tr.setMeta("addToHistory", false);
+      tr.setMeta(SKIP_MARKDOWN_PUBLISH_META, true);
       // 从后往前 setNodeMarkup，避免位置偏移影响（atom 节点改 attr 不改尺寸，但稳妥起见逆序）
-      for (let i = fixes.length - 1; i >= 0; i--) {
+      for (let i = fixes.length - 1; i >= 0; i -= 1) {
         const f = fixes[i];
         tr.setNodeMarkup(f.pos, undefined, f.attrs);
       }

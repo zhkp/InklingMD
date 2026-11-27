@@ -6,6 +6,7 @@ import { pathRevs } from "../../src/store/workspace/shared";
 
 vi.mock("../../src/components/Editor/markdown-publisher", () => ({
   flushAllMarkdownPublishers: vi.fn(),
+  flushMarkdownPublishersForPath: vi.fn(),
 }));
 
 function tab(path: string, dirty: boolean, extra: Record<string, unknown> = {}) {

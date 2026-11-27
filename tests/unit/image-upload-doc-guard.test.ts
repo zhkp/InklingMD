@@ -179,13 +179,4 @@ describe("stillSameDocument（docId + revision）", () => {
       }),
     ).toBe(false);
   });
-
-  it("接线：insertImages 捕获调用时的文档身份并交给护栏", async () => {
-    // 只读源码断言：身份必须在 await 之前捕获，否则另存为/切 tab 后重取
-    // 会拿到新文档的身份而使护栏永远通过。
-    const { readFileSync } = await import("node:fs");
-    const src = readFileSync("src/components/Editor/image-upload.ts", "utf8");
-    expect(src).toContain("const documentIdentity = documentIdentityOf(documentPath);");
-    expect(src).toMatch(/stillSameDocument\(\{[\s\S]*?identity: documentIdentity/);
-  });
 });

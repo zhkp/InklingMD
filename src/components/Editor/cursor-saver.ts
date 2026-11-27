@@ -5,6 +5,7 @@
 // 到新 tab，写活跃 tab 会把旧文件状态串写过去（issue #30）。
 import { Plugin, PluginKey } from "@milkdown/kit/prose/state";
 import type { EditorView } from "@milkdown/kit/prose/view";
+import { isSamePath } from "../../lib/path-utils";
 import { hydrationMetaKey } from "./tab-editor-cache";
 
 export const cursorSaverKey = new PluginKey<{ skipSeq: number }>("inkling-cursor-saver");
@@ -74,9 +75,20 @@ export function cursorSaverPlugin(
           clearTimeout(timer);
           timer = null;
         }
-        const liveScroll = scrollEl && scrollEl.isConnected ? scrollEl.scrollTop : cachedScrollTop;
-        const pos = lastPos >= 0 ? lastPos : view.state.selection.head;
-        getSaveCursorState()(outgoingPath, pos, liveScroll);
+        // 落盘只认属于 outgoingPath 的位置：源码模式 tab 切走时本 resetter 不会被
+        // 调用，lastPos/scheduledFile 可能残留自上一个 WYSIWYG tab；此时只重置不写，
+        // 避免把旧 tab 的光标写进新 tab 的记忆（#431 评审 B5）。
+        if (scheduledFile !== null && isSamePath(scheduledFile, outgoingPath)) {
+          const pos = lastPos >= 0 ? lastPos : view.state.selection.head;
+          // 切到源码模式 tab 时编辑器 DOM 在 commit 阶段已被 display:none，
+          // 现场 scrollTop 会读成 0；用滚动时持续缓存的读数兜底（#431 评审 B2）。
+          // 用编辑器 DOM 是否仍有渲染盒判断可见性：外层滚动容器本身仍是可见的，
+          // 只看它的 clientHeight 无法发现内容已被隐藏。
+          const liveTrustworthy =
+            !!scrollEl && scrollEl.isConnected && view.dom.getClientRects().length > 0;
+          const liveScroll = liveTrustworthy ? scrollEl!.scrollTop : cachedScrollTop;
+          getSaveCursorState()(outgoingPath, pos, liveScroll);
+        }
         lastPos = -1;
         scheduledFile = null;
         cachedScrollTop = 0;
