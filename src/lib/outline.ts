@@ -520,27 +520,66 @@ function protectInlineCode(
 }
 
 /**
- * 从 `open` 位置起找配对的结束定界符，支持嵌套（链接文本里再嵌图片时 `[...]` 会嵌套）。
+ * 单趟扫描出每个开定界符与其配对闭定界符的下标。
+ *
+ * 链接文本允许嵌套括号（`[![alt](img.png)](url)`），裸链接目标里也允许成对圆括号。
+ * 若对每个开符号单独向后找配对，一行里出现大量未闭合开符号时会退化成 O(n²)；
+ * 先整体配对后，后续查询都是 O(1)。没有配对成功的开符号不会进入结果表。
  */
-function findMatchingPair(raw: string, open: number, openChar: string, closeChar: string): number {
-  let depth = 0;
-  for (let i = open; i < raw.length; i += 1) {
+function collectPairs(raw: string, openChar: string, closeChar: string): Map<number, number> {
+  const pairs = new Map<number, number>();
+  const openers: number[] = [];
+  for (let i = 0; i < raw.length; i += 1) {
     if (raw[i] === openChar) {
-      depth += 1;
+      openers.push(i);
     } else if (raw[i] === closeChar) {
-      depth -= 1;
-      if (depth === 0) return i;
+      const open = openers.pop();
+      if (open !== undefined) pairs.set(open, i);
     }
   }
-  return -1;
+  return pairs;
+}
+
+/** 从每个位置起下一个指定字符的下标（没有则为 -1），单趟反向预计算。 */
+function buildNextIndex(raw: string, char: string): Int32Array {
+  const next = new Int32Array(raw.length + 1);
+  next[raw.length] = -1;
+  for (let i = raw.length - 1; i >= 0; i -= 1) {
+    next[i] = raw[i] === char ? i : next[i + 1];
+  }
+  return next;
+}
+
+/** 链接扫描共享的 O(1) 查询表，避免对每个链接候选重复扫描后缀。 */
+interface LinkScanContext {
+  /** `[` → 配对 `]` */
+  bracketPairs: ReadonlyMap<number, number>;
+  /** `(` → 配对 `)`（裸目标地址内的嵌套括号） */
+  parenPairs: ReadonlyMap<number, number>;
+  /** 从下标起下一个 `)`，没有则为 -1 */
+  nextCloseParen: Int32Array;
+  /** 从下标起下一个 `>`，没有则为 -1 */
+  nextCloseAngle: Int32Array;
+  /** 从下标起下一个空白，没有则为 -1（裸目标地址不允许空白，含成对括号内部） */
+  nextWhitespace: Int32Array;
+}
+
+/** 从每个位置起下一个空白字符的下标（没有则为 -1），单趟反向预计算。 */
+function buildNextWhitespaceIndex(raw: string): Int32Array {
+  const next = new Int32Array(raw.length + 1);
+  next[raw.length] = -1;
+  for (let i = raw.length - 1; i >= 0; i -= 1) {
+    next[i] = isWhitespaceChar(raw[i]) ? i : next[i + 1];
+  }
+  return next;
 }
 
 /**
- * 从 `start` 起找标题的结束定界符，跳过反斜杠转义
- * （`[guide](url "the \"guide\" page")` 不能被内层的 `\"` 截断）。
+ * 在 `[start, end)` 内找标题的结束定界符，跳过反斜杠转义
+ * （`[guide](url "the \"guide\" page")` 不能被内层的 `\"` 截断）；超出范围返回 -1。
  */
-function findTitleEnd(raw: string, start: number, closeChar: string): number {
-  for (let i = start; i < raw.length; i += 1) {
+function findTitleEnd(raw: string, start: number, end: number, closeChar: string): number {
+  for (let i = start; i < end; i += 1) {
     if (raw[i] === "\\") {
       i += 1;
       continue;
@@ -551,42 +590,57 @@ function findTitleEnd(raw: string, start: number, closeChar: string): number {
 }
 
 /**
- * 找到行内链接目标地址的收尾 `)`：目标可以是 `<...>`、可含成对括号的裸地址，
- * 后面还可跟 `"title"` / `'title'` / `(title)`。
+ * 找到行内链接目标地址在 `[start, end)` 内的收尾 `)`：目标可以是 `<...>`、
+ * 可含成对括号的裸地址，后面还可跟 `"title"` / `'title'` / `(title)`。
+ *
+ * 后缀里没有 `)` 时直接失败；裸地址里的嵌套括号用预配对表整段跳过，
+ * 避免大量未闭合的 `[a](` 候选逐个扫到行尾（O(n²)）。
  */
-function findInlineDestinationEnd(raw: string, start: number): number {
+function findInlineDestinationEnd(
+  raw: string,
+  start: number,
+  end: number,
+  scan: LinkScanContext,
+): number {
   let index = start;
-  while (index < raw.length && isWhitespaceChar(raw[index])) index += 1;
+  while (index < end && isWhitespaceChar(raw[index])) index += 1;
+  if (index >= end) return -1;
+
+  const nextCloseParen = scan.nextCloseParen[index];
+  if (nextCloseParen < 0 || nextCloseParen >= end) return -1;
 
   if (raw[index] === "<") {
-    const closeAngle = raw.indexOf(">", index + 1);
-    if (closeAngle < 0) return -1;
+    const closeAngle = scan.nextCloseAngle[index + 1];
+    if (closeAngle < 0 || closeAngle >= end) return -1;
     index = closeAngle + 1;
   } else {
-    let depth = 0;
-    while (index < raw.length) {
+    while (index < end) {
       const char = raw[index];
       if (isWhitespaceChar(char)) break;
+      if (char === ")") return index;
       if (char === "(") {
-        depth += 1;
-      } else if (char === ")") {
-        if (depth === 0) return index;
-        depth -= 1;
+        const closeParen = scan.parenPairs.get(index);
+        if (closeParen === undefined || closeParen >= end) return -1;
+        // 裸目标整体不允许空白，成对括号内部也不例外（`[t]((a b))` 不是链接）。
+        const whitespace = scan.nextWhitespace[index];
+        if (whitespace >= 0 && whitespace < closeParen) return -1;
+        index = closeParen + 1;
+        continue;
       }
       index += 1;
     }
   }
 
-  while (index < raw.length && isWhitespaceChar(raw[index])) index += 1;
-  if (raw[index] === ")") return index;
+  while (index < end && isWhitespaceChar(raw[index])) index += 1;
+  if (index < end && raw[index] === ")") return index;
 
-  const quote = raw[index];
+  const quote = index < end ? raw[index] : undefined;
   if (quote !== '"' && quote !== "'" && quote !== "(") return -1;
-  const closeQuote = findTitleEnd(raw, index + 1, quote === "(" ? ")" : quote);
+  const closeQuote = findTitleEnd(raw, index + 1, end, quote === "(" ? ")" : quote);
   if (closeQuote < 0) return -1;
   index = closeQuote + 1;
-  while (index < raw.length && isWhitespaceChar(raw[index])) index += 1;
-  return raw[index] === ")" ? index : -1;
+  while (index < end && isWhitespaceChar(raw[index])) index += 1;
+  return index < end && raw[index] === ")" ? index : -1;
 }
 
 /**
@@ -630,37 +684,42 @@ function matchDefinitionLabel(line: string, nextLine: string | undefined): strin
  * - 引用式链接/图片：`[text][ref]`、`[text][]`、`[text]`，只有在 `linkLabels`
  *   里能找到对应定义时才脱壳（定义表由文档整体扫描得到）；
  * - `normalizeLabel` 负责把清洗管线的占位符还原成标签的原始写法再归一化：
- *   标签匹配按原始字符（含反斜杠转义）进行，`[a\!b]` 与 `[a!b]` 不算同一标签。
+ *   标签匹配按原始字符（含反斜杠转义）进行，`[a\!b]` 与 `[a!b]` 不算同一标签；
+ * - `[start, end)` 是相对同一 `raw` 的绝对半开区间，递归清洗共享 `scan`；
+ *   `scan.bracketPairs` 只含配对成功的 `[`，未闭合的 `[` 查不到对应项。
  */
 function stripLinkSyntax(
   raw: string,
+  start: number,
+  end: number,
   linkLabels: ReadonlySet<string>,
   normalizeLabel: (label: string) => string,
+  scan: LinkScanContext,
 ): string {
   let result = "";
-  let index = 0;
-  while (index < raw.length) {
+  let index = start;
+  while (index < end) {
     if (raw[index] !== "[") {
       result += raw[index];
       index += 1;
       continue;
     }
-    const textEnd = findMatchingPair(raw, index, "[", "]");
-    if (textEnd < 0) {
+    const textEnd = scan.bracketPairs.get(index);
+    if (textEnd === undefined || textEnd >= end) {
       result += raw[index];
       index += 1;
       continue;
     }
     const inner = raw.slice(index + 1, textEnd);
-    const after = raw[textEnd + 1];
+    const after = textEnd + 1 < end ? raw[textEnd + 1] : undefined;
     let consumedTo = -1;
 
     if (after === "(") {
-      const destEnd = findInlineDestinationEnd(raw, textEnd + 2);
+      const destEnd = findInlineDestinationEnd(raw, textEnd + 2, end, scan);
       if (destEnd >= 0) consumedTo = destEnd;
     } else if (after === "[") {
-      const labelEnd = findMatchingPair(raw, textEnd + 1, "[", "]");
-      if (labelEnd >= 0) {
+      const labelEnd = scan.bracketPairs.get(textEnd + 1);
+      if (labelEnd !== undefined && labelEnd < end) {
         const label = labelEnd === textEnd + 2 ? inner : raw.slice(textEnd + 2, labelEnd);
         if (linkLabels.has(normalizeLabel(label))) consumedTo = labelEnd;
       }
@@ -677,7 +736,14 @@ function stripLinkSyntax(
     const isImage = index > 0 && raw[index - 1] === "!" && result.endsWith("!");
     if (isImage) result = result.slice(0, -1);
     // 链接文本里可能还有语法（`[![alt](img.png)](url)`），递归清洗
-    result += stripLinkSyntax(inner, linkLabels, normalizeLabel);
+    result += stripLinkSyntax(
+      raw,
+      index + 1,
+      textEnd,
+      linkLabels,
+      normalizeLabel,
+      scan,
+    );
     index = consumedTo + 1;
   }
   return result;
@@ -707,14 +773,25 @@ function cleanMarkdownText(raw: string, linkLabels: ReadonlySet<string>): string
 
   // 先摘出行内代码（内容按字面量渲染），再摘转义字符，最后才处理链接/图片，
   // 这样 `\*`、`\[`、代码里的 `[a](b)` 都不会被当成语法。
+  const protectedRaw = protectInlineCode(raw, protect).replace(
+    // CommonMark 的 ASCII 标点转义：`\*`、`\"`、`\#` 等都渲染成字面量
+    /\\([!"#$%&'()*+,\-./:;<=>?@[\\\]^_`{|}~])/g,
+    (match, ch: string) => protect(ch, match),
+  );
+  const scan: LinkScanContext = {
+    bracketPairs: collectPairs(protectedRaw, "[", "]"),
+    parenPairs: collectPairs(protectedRaw, "(", ")"),
+    nextCloseParen: buildNextIndex(protectedRaw, ")"),
+    nextCloseAngle: buildNextIndex(protectedRaw, ">"),
+    nextWhitespace: buildNextWhitespaceIndex(protectedRaw),
+  };
   const withoutProtected = stripLinkSyntax(
-    protectInlineCode(raw, protect).replace(
-      // CommonMark 的 ASCII 标点转义：`\*`、`\"`、`\#` 等都渲染成字面量
-      /\\([!"#$%&'()*+,\-./:;<=>?@[\\\]^_`{|}~])/g,
-      (match, ch: string) => protect(ch, match),
-    ),
+    protectedRaw,
+    0,
+    protectedRaw.length,
     linkLabels,
     normalizeLabel,
+    scan,
   );
 
   const cleaned = stripEmphasisDelimiters(withoutProtected)

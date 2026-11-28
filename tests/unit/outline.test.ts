@@ -391,6 +391,65 @@ describe("Issue #382 outline inline text cleanup", () => {
     expect(parseOutline(md).map(({ text }) => text)).toEqual(expected);
   });
 
+  it("裸链接目标里的嵌套圆括号按配对表跳过", () => {
+    const md = [
+      "# a [t](u(v)w) b",
+      "# a [t](u(v) b",
+      "# a [t](u)v) b",
+      "# a [t](u(v)) b",
+      "# a [t](<u v>) b",
+      "# a [t](u \"a (b) c\") b",
+      "# a [t]( ) b",
+      "# a [t]( u ) b",
+      "# a [t](u(v(w))z) b",
+      "# a [t](u(v(w)) b",
+      "# a [t]((a b)) b",
+      "# a [t](u(v w)) b",
+      "# a [t](a(b c)d) b",
+      "# a [t](u(v) \"t (x)\") b",
+    ].join("\n");
+    const expected = [
+      "a t b",
+      "a [t](u(v) b",
+      "a tv) b",
+      "a t b",
+      "a t b",
+      "a t b",
+      "a t b",
+      "a t b",
+      "a t b",
+      "a [t](u(v(w)) b",
+      "a [t]((a b)) b",
+      "a [t](u(v w)) b",
+      "a [t](a(b c)d) b",
+      "a t b",
+    ];
+
+    expect(extractMarkdownOutline(md).map(({ text }) => text)).toEqual(expected);
+    expect(parseOutline(md).map(({ text }) => text)).toEqual(expected);
+  });
+
+  it("大量未闭合开括号/链接前缀按单趟扫描，不重复扫描后缀", () => {
+    // 三种形态都会让旧实现逐个候选扫到行尾：未闭合 `[`、无收尾 `)` 的 `[a](`、
+    // 带未闭合目标的 `[a](x`。修复前 30k 规模约 1.5–2.3s，修复后应在数毫秒内。
+    const texts = [
+      `${"[".repeat(30000)}tail`,
+      `${"[a](".repeat(7500)}tail`,
+      `${"[a](x".repeat(7500)}tail`,
+    ];
+
+    for (const text of texts) {
+      const started = performance.now();
+      const sidebar = extractMarkdownOutline(`# ${text}`);
+      const exported = parseOutline(`# ${text}`);
+      const elapsed = performance.now() - started;
+
+      expect(sidebar.map(({ text: value }) => value)).toEqual([text]);
+      expect(exported.map(({ text: value }) => value)).toEqual([text]);
+      expect(elapsed).toBeLessThan(500);
+    }
+  });
+
   it("引用式链接/图片按全文定义表脱壳，未定义时保留方括号", () => {
     const md = [
       "# [text][ref]",
