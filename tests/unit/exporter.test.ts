@@ -160,4 +160,30 @@ describe("exporter lib unit tests", () => {
       ].join("\n"),
     );
   });
+
+  it("exportOutline 的链接目标含成对括号时只留可见文本", async () => {
+    useWorkspace.setState({
+      currentContent: "# [guide](https://example.com/path_(part))",
+      currentFile: "/notes/link.md",
+    });
+
+    const download = captureOutlineDownload();
+    await exportOutline();
+
+    expect(download.blobs).toHaveLength(1);
+    // 关键点：不能出现 `guide)`（未处理成对括号时会把内层 `)` 之后的内容留在文本里）
+    expect(await download.blobs[0].text()).toBe(
+      [
+        "# link 目录",
+        "",
+        "- guide",
+        "",
+        "---",
+        "",
+        "## 原始标题结构",
+        "",
+        "# guide",
+      ].join("\n"),
+    );
+  });
 });

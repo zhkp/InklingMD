@@ -233,6 +233,14 @@ describe("Issue #382 outline inline text cleanup", () => {
       "# a*~~b~~*c",
       "# X*~~a~~*",
       "# 使用 ``a*b`` 通配",
+      "# [guide](https://example.com/path_(part))",
+      "# 见 [guide](https://example.com/a_(b)) 说明",
+      "# ![图](https://example.com/a_(b).png)",
+      "# [t](u \"title\")",
+      "# [t]()",
+      "# [a [b] c](u)",
+      "# [![alt](img.png)](u)",
+      "# [未闭合](u",
     ].join("\n");
     const expected = [
       "2 * 3 * 4 = 24",
@@ -255,6 +263,14 @@ describe("Issue #382 outline inline text cleanup", () => {
       "abc",
       "Xa",
       "使用 a*b 通配",
+      "guide",
+      "见 guide 说明",
+      "图",
+      "t",
+      "t",
+      "a [b] c",
+      "alt",
+      "[未闭合](u",
     ];
 
     // 渲染口径由 mdast-util-from-markdown 实测给出：两侧有空白的定界符不能开/闭，

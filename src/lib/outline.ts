@@ -482,6 +482,92 @@ function protectInlineCode(raw: string, protect: (value: string) => string): str
 }
 
 /**
+ * 从 `open` 位置起找配对的结束定界符，支持嵌套（链接文本里再嵌图片时 `[...]` 会嵌套）。
+ */
+function findMatchingPair(raw: string, open: number, openChar: string, closeChar: string): number {
+  let depth = 0;
+  for (let i = open; i < raw.length; i += 1) {
+    if (raw[i] === openChar) {
+      depth += 1;
+    } else if (raw[i] === closeChar) {
+      depth -= 1;
+      if (depth === 0) return i;
+    }
+  }
+  return -1;
+}
+
+/**
+ * 找到行内链接目标地址的收尾 `)`：目标可以是 `<...>`、可含成对括号的裸地址，
+ * 后面还可跟 `"title"` / `'title'` / `(title)`。
+ */
+function findInlineDestinationEnd(raw: string, start: number): number {
+  let index = start;
+  while (index < raw.length && isWhitespaceChar(raw[index])) index += 1;
+
+  if (raw[index] === "<") {
+    const closeAngle = raw.indexOf(">", index + 1);
+    if (closeAngle < 0) return -1;
+    index = closeAngle + 1;
+  } else {
+    let depth = 0;
+    while (index < raw.length) {
+      const char = raw[index];
+      if (isWhitespaceChar(char)) break;
+      if (char === "(") {
+        depth += 1;
+      } else if (char === ")") {
+        if (depth === 0) return index;
+        depth -= 1;
+      }
+      index += 1;
+    }
+  }
+
+  while (index < raw.length && isWhitespaceChar(raw[index])) index += 1;
+  if (raw[index] === ")") return index;
+
+  const quote = raw[index];
+  if (quote !== '"' && quote !== "'" && quote !== "(") return -1;
+  const closeQuote = raw.indexOf(quote === "(" ? ")" : quote, index + 1);
+  if (closeQuote < 0) return -1;
+  index = closeQuote + 1;
+  while (index < raw.length && isWhitespaceChar(raw[index])) index += 1;
+  return raw[index] === ")" ? index : -1;
+}
+
+/**
+ * 摘掉链接/图片语法，只留可见文本。目标地址按 Markdown 语法扫描（不是 `[^)]*`），
+ * 否则 `[guide](https://example.com/path_(part))` 会在内层 `)` 处截断、多留一个 `)`。
+ */
+function stripLinkSyntax(raw: string): string {
+  let result = "";
+  let index = 0;
+  while (index < raw.length) {
+    if (raw[index] !== "[") {
+      result += raw[index];
+      index += 1;
+      continue;
+    }
+    const textEnd = findMatchingPair(raw, index, "[", "]");
+    const destEnd =
+      textEnd >= 0 && raw[textEnd + 1] === "(" ? findInlineDestinationEnd(raw, textEnd + 2) : -1;
+    if (textEnd < 0 || destEnd < 0) {
+      // 不是完整的行内链接/图片：方括号按字面量保留
+      result += raw[index];
+      index += 1;
+      continue;
+    }
+    const isImage = index > 0 && raw[index - 1] === "!" && result.endsWith("!");
+    if (isImage) result = result.slice(0, -1);
+    // 链接文本里可能还有语法（`[![alt](img.png)](url)`），递归清洗
+    result += stripLinkSyntax(raw.slice(index + 1, textEnd));
+    index = destEnd + 1;
+  }
+  return result;
+}
+
+/**
  * 保留纯文本，与富文本 ProseMirror 渲染的标题文本一致。
  */
 function cleanMarkdownText(raw: string): string {
@@ -493,10 +579,12 @@ function cleanMarkdownText(raw: string): string {
 
   // 先摘出行内代码（内容按字面量渲染），再摘转义字符，最后才处理链接/图片，
   // 这样 `\*`、`\[`、代码里的 `[a](b)` 都不会被当成语法。
-  const withoutProtected = protectInlineCode(raw, protect)
-    .replace(/\\([\\`*_{}[\]()#+\-.!~>|])/g, (_match, ch: string) => protect(ch)) // 转义 -> 字面量
-    .replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1") // 图片 -> alt 文本
-    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1"); // 链接 -> 链接文本
+  const withoutProtected = stripLinkSyntax(
+    protectInlineCode(raw, protect).replace(
+      /\\([\\`*_{}[\]()#+\-.!~>|])/g,
+      (_match, ch: string) => protect(ch), // 转义 -> 字面量
+    ),
+  );
 
   const cleaned = stripEmphasisDelimiters(withoutProtected)
     .replace(/\s+/g, " ") // 合并多余空格
