@@ -296,6 +296,53 @@ describe("Issue #382 outline inline text cleanup", () => {
     );
     expect(sidebar.map(({ index }) => index)).toEqual([0, 1]);
   });
+
+  it("交叉定界符只保留先解析的一对（与渲染器一致）", () => {
+    const md = ["# *foo _bar* baz_", "# _foo *bar_ baz*", "# *foo **bar* baz**"].join("\n");
+    const expected = ["foo _bar baz_", "foo *bar baz*", "foo bar baz"];
+
+    expect(extractMarkdownOutline(md).map(({ text }) => text)).toEqual(expected);
+    expect(parseOutline(md).map(({ text }) => text)).toEqual(expected);
+  });
+
+  it("引用式链接/图片按全文定义表脱壳，未定义时保留方括号", () => {
+    const md = [
+      "# [text][ref]",
+      "# [text][]",
+      "# [text]",
+      "# [a][Foo]",
+      "# [**b**][r]",
+      "# ![alt][img]",
+      "# [missing][nope]",
+      "# [undefined]",
+      "# [inFence]",
+      "```",
+      "[inFence]: https://example.com/fenced",
+      "```",
+      "",
+      "[ref]: https://example.com/ref",
+      "[text]: https://example.com/text",
+      "[foo]: https://example.com/foo",
+      "[r]: https://example.com/r",
+      "[img]: pic.png",
+    ].join("\n");
+    // 渲染口径：完整的 / 折叠的 / 短引用都解析成链接文本；大小写不敏感；围栏内的定义不算；
+    // 未定义的引用整体按字面量保留。图片按既有口径取 alt 文本。
+    const expected = [
+      "text",
+      "text",
+      "text",
+      "a",
+      "b",
+      "alt",
+      "[missing][nope]",
+      "[undefined]",
+      "[inFence]",
+    ];
+
+    expect(extractMarkdownOutline(md).map(({ text }) => text)).toEqual(expected);
+    expect(parseOutline(md).map(({ text }) => text)).toEqual(expected);
+  });
 });
 
 describe("findActiveHeadingIndex", () => {

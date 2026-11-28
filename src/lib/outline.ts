@@ -398,6 +398,17 @@ function stripEmphasisDelimiters(raw: string): string {
   const removed = new Array<boolean>(raw.length).fill(false);
   const openers: Record<string, number[]> = { "*": [], "_": [], "~": [] };
 
+  // 成立一对后，落在两者之间的开串已经进了该强调内部，不能再与更晚的闭串配对
+  // （CommonMark 的交叉定界符规则：`*foo _bar* baz_` → `foo _bar baz_`，只保留先解析的那对）。
+  const discardInnerOpeners = (from: number, to: number): void => {
+    for (const stack of Object.values(openers)) {
+      for (let i = stack.length - 1; i >= 0; i -= 1) {
+        const start = runs[stack[i]].start;
+        if (start > from && start < to) stack.splice(i, 1);
+      }
+    }
+  };
+
   runs.forEach((run, index) => {
     if (run.canClose) {
       const stack = openers[run.char];
@@ -419,10 +430,11 @@ function stripEmphasisDelimiters(raw: string): string {
         run.closeUsed += use;
         opener.remaining -= use;
         run.remaining -= use;
+        discardInnerOpeners(opener.start, run.start);
         if (opener.remaining <= 0) {
           stack.splice(cursor, 1);
-          cursor -= 1;
         }
+        cursor = stack.length - 1;
       }
     }
     if (run.canOpen && run.remaining > 0) openers[run.char].push(index);
@@ -544,10 +556,26 @@ function findInlineDestinationEnd(raw: string, start: number): number {
 }
 
 /**
- * 摘掉链接/图片语法，只留可见文本。目标地址按 Markdown 语法扫描（不是 `[^)]*`），
- * 否则 `[guide](https://example.com/path_(part))` 会在内层 `)` 处截断、多留一个 `)`。
+ * 链接引用定义的标签归一化：去首尾空白、合并内部空白、忽略大小写（CommonMark 口径）。
  */
-function stripLinkSyntax(raw: string): string {
+function normalizeLinkLabel(label: string): string {
+  return label.trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+/**
+ * 链接引用定义行 `[label]: destination`（必须有目标地址，否则不是定义）。
+ */
+const LINK_REFERENCE_DEFINITION_PATTERN = /^ {0,3}\[((?:[^\\[\]]|\\.)+)\]:[ \t]*(?:<[^>\n]*>|\S+)/;
+
+/**
+ * 摘掉链接/图片语法，只留可见文本。
+ *
+ * - 行内链接/图片：目标地址按 Markdown 语法扫描（不是 `[^)]*`），
+ *   否则 `[guide](https://example.com/path_(part))` 会在内层 `)` 处截断、多留一个 `)`；
+ * - 引用式链接/图片：`[text][ref]`、`[text][]`、`[text]`，只有在 `linkLabels`
+ *   里能找到对应定义时才脱壳（定义表由文档整体扫描得到）。
+ */
+function stripLinkSyntax(raw: string, linkLabels: ReadonlySet<string>): string {
   let result = "";
   let index = 0;
   while (index < raw.length) {
@@ -557,10 +585,30 @@ function stripLinkSyntax(raw: string): string {
       continue;
     }
     const textEnd = findMatchingPair(raw, index, "[", "]");
-    const destEnd =
-      textEnd >= 0 && raw[textEnd + 1] === "(" ? findInlineDestinationEnd(raw, textEnd + 2) : -1;
-    if (textEnd < 0 || destEnd < 0) {
-      // 不是完整的行内链接/图片：方括号按字面量保留
+    if (textEnd < 0) {
+      result += raw[index];
+      index += 1;
+      continue;
+    }
+    const inner = raw.slice(index + 1, textEnd);
+    const after = raw[textEnd + 1];
+    let consumedTo = -1;
+
+    if (after === "(") {
+      const destEnd = findInlineDestinationEnd(raw, textEnd + 2);
+      if (destEnd >= 0) consumedTo = destEnd;
+    } else if (after === "[") {
+      const labelEnd = findMatchingPair(raw, textEnd + 1, "[", "]");
+      if (labelEnd >= 0) {
+        const label = labelEnd === textEnd + 2 ? inner : raw.slice(textEnd + 2, labelEnd);
+        if (linkLabels.has(normalizeLinkLabel(label))) consumedTo = labelEnd;
+      }
+    } else if (linkLabels.has(normalizeLinkLabel(inner))) {
+      consumedTo = textEnd;
+    }
+
+    if (consumedTo < 0) {
+      // 语法不完整或引用未定义：方括号按字面量保留
       result += raw[index];
       index += 1;
       continue;
@@ -568,16 +616,18 @@ function stripLinkSyntax(raw: string): string {
     const isImage = index > 0 && raw[index - 1] === "!" && result.endsWith("!");
     if (isImage) result = result.slice(0, -1);
     // 链接文本里可能还有语法（`[![alt](img.png)](url)`），递归清洗
-    result += stripLinkSyntax(raw.slice(index + 1, textEnd));
-    index = destEnd + 1;
+    result += stripLinkSyntax(inner, linkLabels);
+    index = consumedTo + 1;
   }
   return result;
 }
 
 /**
  * 保留纯文本，与富文本 ProseMirror 渲染的标题文本一致。
+ *
+ * `linkLabels` 是全文链接引用定义的标签集合：`[text][ref]` / `[text]` 只有在定义存在时才算链接。
  */
-function cleanMarkdownText(raw: string): string {
+function cleanMarkdownText(raw: string, linkLabels: ReadonlySet<string>): string {
   const placeholders: string[] = [];
   const protect = (value: string): string => {
     placeholders.push(value);
@@ -591,6 +641,7 @@ function cleanMarkdownText(raw: string): string {
       /\\([\\`*_{}[\]()#+\-.!~>|])/g,
       (_match, ch: string) => protect(ch), // 转义 -> 字面量
     ),
+    linkLabels,
   );
 
   const cleaned = stripEmphasisDelimiters(withoutProtected)
@@ -622,9 +673,13 @@ interface ParsedMarkdownHeading {
 /**
  * Markdown 源码大纲的唯一解析入口，统一 frontmatter、围栏和标题文本口径。
  * 返回干净的可见文本，供源码侧栏与导出大纲共同使用。
+ *
+ * 标题文本清洗需要全文的链接引用定义表（`[ref]: url` 可能出现在标题前后任意位置），
+ * 所以先收集标题原文与定义，再统一清洗。
  */
 function parseMarkdownHeadings(markdown: string): ParsedMarkdownHeading[] {
-  const headings: ParsedMarkdownHeading[] = [];
+  const rawHeadings: Array<{ level: number; raw: string; offset: number; line: number }> = [];
+  const linkLabels = new Set<string>();
   const lines = markdown.split("\n");
   let offset = 0;
   let inFence: string | null = null;
@@ -673,21 +728,33 @@ function parseMarkdownHeadings(markdown: string): ParsedMarkdownHeading[] {
     if (inFence === null) {
       const match = trimmed.match(/^(#{1,6})\s+(.+?)\s*#*\s*$/);
       if (match) {
-        const text = cleanMarkdownText(match[2].trim());
-        if (text) {
-          headings.push({
-            level: match[1].length,
-            text,
-            offset,
-            line: i + 1,
-          });
-        }
+        rawHeadings.push({
+          level: match[1].length,
+          raw: match[2].trim(),
+          offset,
+          line: i + 1,
+        });
+      } else {
+        const definition = line.match(LINK_REFERENCE_DEFINITION_PATTERN);
+        if (definition) linkLabels.add(normalizeLinkLabel(definition[1]));
       }
     }
 
     offset += line.length + 1;
   }
 
+  const headings: ParsedMarkdownHeading[] = [];
+  for (const heading of rawHeadings) {
+    const text = cleanMarkdownText(heading.raw, linkLabels);
+    if (text) {
+      headings.push({
+        level: heading.level,
+        text,
+        offset: heading.offset,
+        line: heading.line,
+      });
+    }
+  }
   return headings;
 }
 

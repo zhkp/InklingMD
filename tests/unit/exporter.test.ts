@@ -186,4 +186,41 @@ describe("exporter lib unit tests", () => {
       ].join("\n"),
     );
   });
+
+  it("exportOutline 按全文链接定义表解析引用式链接", async () => {
+    useWorkspace.setState({
+      currentContent: [
+        "# [ref text][ref]",
+        "## [shortcut]",
+        "### [undefined-ref][nope]",
+        "",
+        "[ref]: https://example.com/ref",
+        "[shortcut]: https://example.com/shortcut",
+      ].join("\n"),
+      currentFile: "/notes/ref.md",
+    });
+
+    const download = captureOutlineDownload();
+    await exportOutline();
+
+    expect(download.blobs).toHaveLength(1);
+    // 不能出现 `[ref text][ref]` / `[shortcut]`；未定义的引用按字面量保留
+    expect(await download.blobs[0].text()).toBe(
+      [
+        "# ref 目录",
+        "",
+        "- ref text",
+        "  - shortcut",
+        "    - [undefined-ref][nope]",
+        "",
+        "---",
+        "",
+        "## 原始标题结构",
+        "",
+        "# ref text",
+        "## shortcut",
+        "### [undefined-ref][nope]",
+      ].join("\n"),
+    );
+  });
 });
