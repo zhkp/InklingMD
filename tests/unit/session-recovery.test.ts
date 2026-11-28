@@ -160,20 +160,30 @@ beforeEach(() => {
       files.set(path, content);
     },
     listDir: async (path) => {
+      // 与真实 `list_dir_files` 一致：同时给出子目录（isDir）与当前层文件。
+      // 总量配额要跨窗口统计，必须能列出 `recovery/` 下的 label 目录。
       const prefix = path.endsWith("/") ? path : `${path}/`;
+      const dirs = new Set<string>();
       const names = new Set<string>();
       for (const key of files.keys()) {
-        if (key.startsWith(prefix)) names.add(key.slice(prefix.length));
+        if (!key.startsWith(prefix)) continue;
+        const rest = key.slice(prefix.length);
+        const slash = rest.indexOf("/");
+        if (slash === -1) names.add(rest);
+        else dirs.add(rest.slice(0, slash));
       }
-      return [...names].map((name) => {
-        const content = files.get(`${prefix}${name}`) ?? "";
-        return {
-          name,
-          isDir: false,
-          size: new TextEncoder().encode(content).length,
-          mtimeUs: fileMtimeUs.get(`${prefix}${name}`),
-        };
-      });
+      return [
+        ...[...dirs].map((name) => ({ name, isDir: true, size: 0 })),
+        ...[...names].map((name) => {
+          const content = files.get(`${prefix}${name}`) ?? "";
+          return {
+            name,
+            isDir: false,
+            size: new TextEncoder().encode(content).length,
+            mtimeUs: fileMtimeUs.get(`${prefix}${name}`),
+          };
+        }),
+      ];
     },
     deletePath: async (path) => {
       const targeted = failDeleteOnlyPrefix !== null && path.startsWith(failDeleteOnlyPrefix);
@@ -1679,6 +1689,52 @@ describe("#409 桌面总量配额（32MB / 按最近写入时间 LRU）", () => 
     expect(files.has(draftFile("/w/c.md"))).toBe(true);
   });
 
+  it("多窗口：总量按所有 label 求和，旧窗口的已处理副本也在预算内", async () => {
+    // main 窗口：a（较新）
+    seedDraft("/w/a.md", { sessionId: "s-main", content: "a".repeat(600), updatedAt: 200 });
+    archive("crashed-1000.json", "s-main", ["/w/a.md"]);
+
+    // 另一个窗口（label=other）：b（较旧），归档也在它自己的目录下
+    const bKey = draftFile("/w/b.md").split("/").pop()!;
+    const bFile = `/appdata/recovery/other/drafts/${bKey}`;
+    const bPayload = JSON.stringify({
+      version: 1,
+      draftId: bKey,
+      sessionId: "s-other",
+      tabPath: "/w/b.md",
+      isUntitled: false,
+      title: "b.md",
+      content: "b".repeat(600),
+      pinned: false,
+      updatedAt: 100,
+    });
+    files.set(bFile, bPayload);
+    files.set(
+      "/appdata/recovery/other/crashed-2000.json",
+      JSON.stringify({
+        version: 1,
+        sessionId: "s-other",
+        windowLabel: "other",
+        startedAt: 2_000,
+        archivedAt: 2_000,
+        cleanExit: false,
+        draftPaths: ["/w/b.md"],
+        handledDraftIds: ["/w/b.md"],
+        fullyHandled: true,
+        draftsEnumerated: true,
+      }),
+    );
+
+    // 只算当前窗口时 600 ≤ 上限，一份都不会删；跨窗口求和后超 1 字节
+    const bBytes = new TextEncoder().encode(bPayload).length;
+    __setDraftTotalBytes(bytesOf("/w/a.md") + bBytes - 1);
+
+    expect(await enforceDraftQuota()).toBe(1);
+    // 更旧的 other 窗口副本被淘汰；main 那份留下
+    expect(files.has(bFile)).toBe(false);
+    expect(files.has(draftFile("/w/a.md"))).toBe(true);
+  });
+
   it("按 updatedAt 判先后：写入更早的副本先被淘汰", async () => {
     archive("crashed-1000.json", "s-old", ["/w/a.md", "/w/b.md"]);
     seedDraft("/w/a.md", { sessionId: "s-old", content: "a".repeat(600), updatedAt: 100 });
@@ -1710,10 +1766,8 @@ describe("#409 桌面总量配额（32MB / 按最近写入时间 LRU）", () => 
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
       expect(await enforceDraftQuota()).toBe(1);
-      // 本次会话那条必须在候选过滤就被拦住；若走到删除前复核，会打出「已被本次会话重写」
-      expect(
-        warn.mock.calls.some((c) => String(c[0]).includes("已被本次会话重写")),
-      ).toBe(false);
+      // 本次会话那条必须在候选过滤就被拦住；若走到删除前复核，会打出「已被重写」
+      expect(warn.mock.calls.some((c) => String(c[0]).includes("已被重写"))).toBe(false);
     } finally {
       warn.mockRestore();
     }
@@ -1762,11 +1816,12 @@ describe("#409 桌面总量配额（32MB / 按最近写入时间 LRU）", () => 
     }
   });
 
-  it("没超上限时只做一次目录统计，不读任何草稿正文", async () => {
+  it("没超上限时只列两次目录（恢复区根 + 草稿目录），不读任何草稿正文", async () => {
     archive("crashed-1000.json", "s-old", ["/w/a.md"]);
     seedDraft("/w/a.md", { sessionId: "s-old", content: "a".repeat(10), updatedAt: 1 });
 
-    // 用 io 调用次数判断：没超上限就只该列一次目录，且不逐条读正文
+    // 用 io 调用次数判断：没超上限就只该列两次目录（恢复区根 + 当前 label 的
+    // drafts/），且不逐条读正文
     let reads = 0;
     let listDirCalls = 0;
     __setRecoveryIo({
@@ -1795,7 +1850,8 @@ describe("#409 桌面总量配额（32MB / 按最近写入时间 LRU）", () => 
     });
 
     expect(await enforceDraftQuota()).toBe(0);
-    expect(listDirCalls).toBe(1);
+    // 恢复区根 + 当前窗口的 drafts：两个窗口时也只多一次根目录列取
+    expect(listDirCalls).toBe(2);
     expect(reads).toBe(0);
   });
 
@@ -1887,5 +1943,92 @@ describe("#409 桌面总量配额（32MB / 按最近写入时间 LRU）", () => 
     expect(await enforceDraftQuota()).toBe(1);
     expect(files.has(draftFile("/w/a.md"))).toBe(false);
     expect(files.has(draftFile("/w/b.md"))).toBe(true);
+  });
+
+  it("候选被**别的窗口**重写：按快照会话比对，一律不删（不是只比本窗口 sessionId）", async () => {
+    archive("crashed-1000.json", "s-old", ["/w/a.md"]);
+    seedDraft("/w/a.md", { sessionId: "s-old", content: "a".repeat(600), updatedAt: 1 });
+    __setDraftTotalBytes(1);
+
+    let rewrote = false;
+    __setRecoveryIo({
+      appDataDir: async () => "/appdata",
+      readTextFile: async (path) => {
+        // 归档读取发生在候选快照之后、删除之前：此刻另一个窗口把同名草稿写成它的活副本
+        if (!rewrote && path.includes("crashed-")) {
+          rewrote = true;
+          files.set(
+            draftFile("/w/a.md"),
+            JSON.stringify({
+              version: 1,
+              draftId: "rewritten",
+              sessionId: "s-other-window",
+              tabPath: "/w/a.md",
+              isUntitled: false,
+              title: "a.md",
+              content: "别的窗口正在编辑",
+              pinned: false,
+              updatedAt: 9_000,
+            }),
+          );
+        }
+        const value = files.get(path);
+        if (value === undefined) throw new Error("not found");
+        return value;
+      },
+      writeTextFile: async (path, content) => {
+        files.set(path, content);
+      },
+      listDir: async (path) => {
+        const prefix = path.endsWith("/") ? path : `${path}/`;
+        const dirs = new Set<string>();
+        const names = new Set<string>();
+        for (const key of files.keys()) {
+          if (!key.startsWith(prefix)) continue;
+          const rest = key.slice(prefix.length);
+          const slash = rest.indexOf("/");
+          if (slash === -1) names.add(rest);
+          else dirs.add(rest.slice(0, slash));
+        }
+        return [
+          ...[...dirs].map((name) => ({ name, isDir: true, size: 0 })),
+          ...[...names].map((name) => ({
+            name,
+            isDir: false,
+            size: new TextEncoder().encode(files.get(`${prefix}${name}`) ?? "").length,
+          })),
+        ];
+      },
+      deletePath: async (path) => {
+        files.delete(path);
+      },
+    });
+
+    expect(await enforceDraftQuota()).toBe(0);
+    expect(files.has(draftFile("/w/a.md"))).toBe(true);
+  });
+
+  it("某个窗口枚举不完整时它的字节不再占预算：别的窗口不会因此被多删", async () => {
+    // main：a 可枚举、可淘汰
+    archive("crashed-1000.json", "s-old", ["/w/a.md"]);
+    seedDraft("/w/a.md", { sessionId: "s-old", content: "a".repeat(600), updatedAt: 1 });
+
+    // other：一条旧版草稿（缺 sessionId）→ 该窗口枚举不完整、没有候选
+    const legacyKey = draftFile("/w/legacy.md").split("/").pop()!;
+    files.set(
+      `/appdata/recovery/other/drafts/${legacyKey}`,
+      JSON.stringify({
+        version: 1,
+        draftId: "legacy",
+        tabPath: "/w/legacy.md",
+        content: "l".repeat(600),
+        updatedAt: 1,
+      }),
+    );
+    // 上限刚好容得下 main 那份：other 的字节若仍占预算，a 就会被删掉
+    __setDraftTotalBytes(bytesOf("/w/a.md") + 1);
+
+    expect(await enforceDraftQuota()).toBe(0);
+    expect(files.has(draftFile("/w/a.md"))).toBe(true);
   });
 });

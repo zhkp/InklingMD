@@ -88,7 +88,8 @@ export async function flushAllDrafts(
   // 只由本次草稿写入结果决定：失败时不能承诺「有恢复副本」；
   // 后续 flush 全部成功即可恢复 healthy，一次失败不应污染整个进程后续的判定。
   journalHealth = failed === 0 ? "healthy" : "degraded";
-  // 退出 / 失焦时顺带校准总量配额：没超上限时这里只有一次 listDir，不读正文
+  // 退出 / 失焦时顺带校准总量配额：没超上限时只有「根 + 每个窗口草稿目录」各一次
+  // listDir，不读正文
   await enforceQuotaSafely();
 }
 

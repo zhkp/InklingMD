@@ -142,12 +142,23 @@ function sepOf(base: string): string {
   return base.includes("\\") ? "\\" : "/";
 }
 
+function pathsForLabel(
+  base: string,
+  label: string,
+): { dir: string; session: string; drafts: string } {
+  const sep = sepOf(base);
+  const dir = `${base.replace(/[\\/]+$/, "")}${sep}recovery${sep}${label}`;
+  return { dir, session: `${dir}${sep}session.json`, drafts: `${dir}${sep}drafts` };
+}
+
 async function sessionPaths(): Promise<{ dir: string; session: string; drafts: string }> {
   await ensureWindowLabel();
-  const base = await io.appDataDir();
-  const sep = sepOf(base);
-  const dir = `${base.replace(/[\\/]+$/, "")}${sep}recovery${sep}${currentWindowLabel()}`;
-  return { dir, session: `${dir}${sep}session.json`, drafts: `${dir}${sep}drafts` };
+  return pathsForLabel(await io.appDataDir(), currentWindowLabel());
+}
+
+/** `recovery/` 根：各窗口按 label 各占一个子目录，总量配额必须跨它们求和 */
+function recoveryRootFrom(base: string): string {
+  return `${base.replace(/[\\/]+$/, "")}${sepOf(base)}recovery`;
 }
 
 interface SessionMarker {
@@ -206,11 +217,15 @@ export async function beginSession(now = Date.now()): Promise<SessionMarker | nu
   return previous;
 }
 
-async function crashedFiles(): Promise<
-  Array<{ file: string; data: CrashedSession; mtimeUs: number }>
-> {
+/**
+ * 列出该窗口目录下的 `crashed-*.json` 归档。
+ * `dirOverride` 供跨窗口配额使用；不传则用当前窗口的恢复区目录。
+ */
+async function crashedFiles(
+  dirOverride?: string,
+): Promise<Array<{ file: string; data: CrashedSession; mtimeUs: number }>> {
   try {
-    const { dir } = await sessionPaths();
+    const dir = dirOverride ?? (await sessionPaths()).dir;
     const sep = sepOf(dir);
     const out: Array<{ file: string; data: CrashedSession; mtimeUs: number }> = [];
     for (const entry of await io.listDir(dir)) {
@@ -384,8 +399,10 @@ export async function markDraftsHandled(
  * 或缺 `sessionId`（保留以 `sessionId: ""` 返回供用户恢复/丢弃，但无法归属会话）。
  * 归档据此决定能否声明「已枚举完整」——否则会把 `fullyHandled` 写成 true，
  * 账本被回收后漏掉的那份草稿永远没有会话归属。
+ *
+ * `draftsDirOverride` 供跨窗口配额枚举其它 label 的 `drafts/`；不传则用当前窗口路径。
  */
-async function listDraftsDetailed(): Promise<{
+async function listDraftsDetailed(draftsDirOverride?: string): Promise<{
   drafts: RecoverableDraft[];
   enumerated: boolean;
 }> {
@@ -395,10 +412,9 @@ async function listDraftsDetailed(): Promise<{
   let dirSep: string;
   try {
     // 取路径与列目录都属于枚举本身：任何一步失败都不能对外声称「没有草稿」
-    const { drafts } = await sessionPaths();
-    draftsDir = drafts;
+    draftsDir = draftsDirOverride ?? (await sessionPaths()).drafts;
     dirSep = sepOf(await io.appDataDir());
-    const entries = await io.listDir(drafts);
+    const entries = await io.listDir(draftsDir);
     names = entries.filter((e) => !e.isDir && e.name.endsWith(".json")).map((e) => e.name);
   } catch (err) {
     // 目录不存在（从没崩溃过）在 Rust 侧返回空表、不会走到这里；走到这里说明真失败了
@@ -734,68 +750,121 @@ function draftAccessTime(draft: RecoverableDraft): number {
  * 只删文件、不回写归档账本：`handledDraftIds` 记录的是「用户已处理」，
  * 副本被淘汰不代表处理事实失效；归档回收另有 `drafts/` 残留检查兜底。
  *
- * 成本控制：先用一次 `listDir` 求和；**没超上限就直接返回**，不读任何草稿正文。
+ * 成本控制：先列 `recovery/` 根一次、再每个 label 的 `drafts/` 各列一次求和
+ * （1 + N 次 IPC，只取 `size` 不读正文）；**没超上限就直接返回**。
+ *
+ * 32MB 是跨所有窗口 label 的**桌面总量**，不是每个窗口各一份。
  */
 export async function enforceDraftQuota(): Promise<number> {
   if (!isTauri()) return 0;
-  let draftsDir: string;
-  let sizes: Map<string, number>;
-  let total = 0;
+  let base: string;
+  let root: string;
   try {
-    const paths = await sessionPaths();
-    draftsDir = paths.drafts;
-    const entries = (await io.listDir(draftsDir)).filter(
-      (e) => !e.isDir && e.name.endsWith(".json"),
-    );
-    // 只统计拿到真实字节数的条目：缺 size 的条目既不能算总量、也不能当候选
-    // （兜成 0 会让「删了却不减总量」，进而多删后面的候选）
-    sizes = new Map(
-      entries
-        .filter((e) => Number.isFinite(e.size) && Number(e.size) >= 0)
-        .map((e) => [e.name, Number(e.size)] as const),
-    );
-    for (const size of sizes.values()) total += size;
+    base = await io.appDataDir();
+    root = recoveryRootFrom(base);
   } catch (err) {
-    // 列不出目录就算不出总量：宁可这次不淘汰，也不能凭猜测删副本
-    console.warn("[recovery] 读取草稿目录失败，跳过总量配额检查:", err);
+    // 解析不出恢复区根：宁可这次不淘汰，也不能凭猜测删副本
+    console.warn("[recovery] 解析恢复区路径失败，跳过总量配额检查:", err);
     return 0;
+  }
+
+  // 32MB 是**桌面总量**：各窗口按 label 各占一个子目录，只算当前窗口会让
+  // 上限随窗口数线性放大，残留的旧 label 副本也永远不计数。
+  let labels: string[];
+  try {
+    const entries = await io.listDir(root);
+    labels = entries.filter((e) => e.isDir).map((e) => e.name);
+  } catch (err) {
+    console.warn("[recovery] 读取恢复区目录失败，跳过总量配额检查:", err);
+    return 0;
+  }
+  await ensureWindowLabel();
+  const currentLabel = currentWindowLabel();
+  if (!labels.includes(currentLabel)) labels.push(currentLabel);
+
+  // 第一轮只做目录统计（每个窗口一次 listDir），不读任何正文
+  const windows: Array<{
+    label: string;
+    dir: string;
+    draftsDir: string;
+    sizes: Map<string, number>;
+    bytes: number;
+  }> = [];
+  let total = 0;
+  for (const label of labels) {
+    const paths = pathsForLabel(base, label);
+    try {
+      const entries = (await io.listDir(paths.drafts)).filter(
+        (e) => !e.isDir && e.name.endsWith(".json"),
+      );
+      // 只统计拿到真实字节数的条目：缺 size 的条目既不能算总量、也不能当候选
+      // （兜成 0 会让「删了却不减总量」，进而多删后面的候选）
+      const sizes = new Map(
+        entries
+          .filter((e) => Number.isFinite(e.size) && Number(e.size) >= 0)
+          .map((e) => [e.name, Number(e.size)] as const),
+      );
+      let bytes = 0;
+      for (const size of sizes.values()) bytes += size;
+      total += bytes;
+      windows.push({ label, dir: paths.dir, draftsDir: paths.drafts, sizes, bytes });
+    } catch (err) {
+      // 单个窗口目录列不出来：只跳过它，总量按已知部分判定（少算只会少删，方向安全）
+      console.warn("[recovery] 读取草稿目录失败，跳过该窗口的总量统计:", label, err);
+    }
   }
   if (total <= draftTotalBytes()) return 0;
 
-  // 超了才需要会话归属：枚举不完整时可能漏算/漏判，直接放弃这次淘汰
-  const { drafts, enumerated } = await listDraftsDetailed();
-  if (!enumerated) {
-    console.warn("[recovery] 草稿枚举不完整，跳过总量配额淘汰");
-    return 0;
-  }
   const current = currentSessionId();
-  const archives = await crashedFiles();
-  const handledBySession = new Map<string, Set<string>>();
-  for (const { data } of archives) {
-    if (!data.sessionId) continue;
-    const set = handledBySession.get(data.sessionId) ?? new Set<string>();
-    for (const p of data.handledDraftIds ?? []) {
-      if (typeof p === "string" && p.length > 0) set.add(p);
-    }
-    handledBySession.set(data.sessionId, set);
-  }
-
-  const sep = sepOf(draftsDir);
-  const candidates: Array<{ file: string; size: number; access: number }> = [];
-  for (const draft of drafts) {
-    if (!draft.sessionId || draft.sessionId === current || draft.pinned) continue;
-    if (!handledBySession.get(draft.sessionId)?.has(draft.tabPath)) continue;
-    let key: string;
-    try {
-      key = draftFileKey(draft.tabPath);
-    } catch (err) {
-      // 坏路径算不出文件名：跳过，不因为一条坏数据中断整轮淘汰
-      console.warn("[recovery] 草稿路径无法映射为文件名，跳过总量淘汰:", draft.tabPath, err);
+  const candidates: Array<{
+    file: string;
+    size: number;
+    access: number;
+    /** 快照时这份草稿归属的会话：删除前用它判断文件有没有被任何窗口重写 */
+    sessionId: string;
+  }> = [];
+  for (const { label, dir, draftsDir, sizes, bytes } of windows) {
+    // 超了才需要会话归属；某个窗口枚举不完整只跳过该窗口，其余窗口仍可淘汰
+    const { drafts, enumerated } = await listDraftsDetailed(draftsDir);
+    if (!enumerated) {
+      // 这一层没有候选，它的字节也不能再占预算：否则其它窗口的可删副本会被删光
+      // 也回不到上限内（跨窗口 LRU 失真、删得比必要多）
+      total -= bytes;
+      console.warn("[recovery] 草稿枚举不完整，跳过该窗口的总量淘汰:", label);
       continue;
     }
-    const size = sizes.get(`${key}.json`);
-    if (size === undefined) continue;
-    candidates.push({ file: `${draftsDir}${sep}${key}.json`, size, access: draftAccessTime(draft) });
+    const archives = await crashedFiles(dir);
+    const handledBySession = new Map<string, Set<string>>();
+    for (const { data } of archives) {
+      if (!data.sessionId) continue;
+      const set = handledBySession.get(data.sessionId) ?? new Set<string>();
+      for (const p of data.handledDraftIds ?? []) {
+        if (typeof p === "string" && p.length > 0) set.add(p);
+      }
+      handledBySession.set(data.sessionId, set);
+    }
+    const sep = sepOf(draftsDir);
+    for (const draft of drafts) {
+      // 本次会话的副本永不淘汰（窗口自己的活草稿）
+      if (!draft.sessionId || draft.sessionId === current || draft.pinned) continue;
+      if (!handledBySession.get(draft.sessionId)?.has(draft.tabPath)) continue;
+      let key: string;
+      try {
+        key = draftFileKey(draft.tabPath);
+      } catch (err) {
+        // 坏路径算不出文件名：跳过，不因为一条坏数据中断整轮淘汰
+        console.warn("[recovery] 草稿路径无法映射为文件名，跳过总量淘汰:", draft.tabPath, err);
+        continue;
+      }
+      const size = sizes.get(`${key}.json`);
+      if (size === undefined) continue;
+      candidates.push({
+        file: `${draftsDir}${sep}${key}.json`,
+        size,
+        access: draftAccessTime(draft),
+        sessionId: draft.sessionId,
+      });
+    }
   }
 
   // 最久未访问的先淘汰；删到刚好回到上限内即停，不多删
@@ -803,13 +872,14 @@ export async function enforceDraftQuota(): Promise<number> {
   let removed = 0;
   for (const candidate of candidates) {
     if (total <= draftTotalBytes()) break;
-    // 文件名只由 tabPath 决定，跨会话同名：枚举快照之后该 path 可能已被本次会话
-    // 重新写出（防抖写会覆盖同一文件）。删之前再确认一次归属，避免删掉刚写的新副本。
+    // 文件名只由 tabPath 决定，跨会话、跨窗口同名：枚举快照之后该 path 可能已被
+    // **任意一个窗口**的防抖写覆盖（不只是本窗口）。删之前比对快照里的 sessionId，
+    // 变了就说明这份文件已经换成别人的活副本，不能删。
     try {
       const raw = await io.readTextFile(candidate.file);
       const parsed = JSON.parse(raw) as { sessionId?: unknown };
-      if (parsed?.sessionId === current) {
-        console.warn("[recovery] 候选草稿已被本次会话重写，跳过淘汰:", candidate.file);
+      if (parsed?.sessionId !== candidate.sessionId) {
+        console.warn("[recovery] 候选草稿已被重写，跳过淘汰:", candidate.file);
         continue;
       }
     } catch (err) {
