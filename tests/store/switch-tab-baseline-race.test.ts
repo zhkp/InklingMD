@@ -32,11 +32,12 @@ vi.mock("../../src/lib/fs", () => ({
 
 vi.mock("../../src/components/Editor/markdown-publisher", () => ({
   flushAllMarkdownPublishers: vi.fn(),
+  flushMarkdownPublishersForPath: vi.fn(),
 }));
 
 import { useWorkspace } from "../../src/store/workspace";
 import { useConflict } from "../../src/store/conflict";
-import { flushAllMarkdownPublishers } from "../../src/components/Editor/markdown-publisher";
+import { flushAllMarkdownPublishers, flushMarkdownPublishersForPath } from "../../src/components/Editor/markdown-publisher";
 import type { DocumentSnapshot, FileStat } from "../../src/lib/fs";
 import type { OpenTab } from "../../src/store/workspace";
 
@@ -87,6 +88,7 @@ beforeEach(() => {
   fileStatMock.mockReset();
   readDocumentMock.mockReset();
   vi.mocked(flushAllMarkdownPublishers).mockImplementation(() => {});
+  vi.mocked(flushMarkdownPublishersForPath).mockImplementation(() => {});
   useConflict.setState({ conflict: null, openConflict: openConflictMock });
 });
 
@@ -146,7 +148,7 @@ describe("switchTab 磁盘核验（#362 §4.4）", () => {
     fileStatMock.mockResolvedValue(next);
     readDocumentMock.mockResolvedValue(snap("外部内容（更长）", next));
     // 模拟编辑器在 flush 时把尾部输入发布进 store：对话框不得拿过期内容
-    vi.mocked(flushAllMarkdownPublishers).mockImplementation(() => {
+    vi.mocked(flushMarkdownPublishersForPath).mockImplementation(() => {
       const state = useWorkspace.getState();
       useWorkspace.setState({
         openTabs: state.openTabs.map((t) => ({ ...t, content: "本地内容 + 尾部输入" })),

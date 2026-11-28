@@ -13,6 +13,7 @@ import {
   selectTableCommand,
 } from "@milkdown/kit/preset/gfm";
 import { deleteColumn, deleteRow } from "@milkdown/kit/prose/tables";
+import { flushActiveHydration } from "./tab-editor-cache";
 import {
   turnIntoHeading,
   wrapBulletList,
@@ -63,6 +64,9 @@ export function TableToolbar({ getEditor, inTable }: TableToolbarProps) {
     const editor = getEditor();
     if (!editor) return;
     editor.action((ctx) => {
+      // 工具栏在 view.dom 之外，交互监听覆盖不到：命令前先补齐本编辑器水合，
+      // 否则命令只改已挂载前缀，随后 publisher 会把截断文档发布出去（#431 评审）。
+      flushActiveHydration(ctx.get(editorViewCtx));
       ctx.get(commandsCtx).call(key, payload as T);
       ctx.get(editorViewCtx).focus();
     });
@@ -74,6 +78,7 @@ export function TableToolbar({ getEditor, inTable }: TableToolbarProps) {
     if (!editor) return;
     editor.action((ctx) => {
       const view = ctx.get(editorViewCtx);
+      flushActiveHydration(view);
       fn(view);
     });
   };
@@ -83,6 +88,7 @@ export function TableToolbar({ getEditor, inTable }: TableToolbarProps) {
     if (!editor) return;
     editor.action((ctx) => {
       const view = ctx.get(editorViewCtx);
+      flushActiveHydration(view);
       // 在列表内时先退出：list_item 不允许 table 作为第一个子节点，
       // 否则 insertTableCommand 会抛 "invalid content for node list_item"
       exitListIfNeeded(view);
@@ -98,6 +104,7 @@ export function TableToolbar({ getEditor, inTable }: TableToolbarProps) {
     const editor = getEditor();
     if (!editor) return;
     editor.action((ctx) => {
+      flushActiveHydration(ctx.get(editorViewCtx));
       const commands = ctx.get(commandsCtx);
       commands.call(selectTableCommand.key);
       commands.call(deleteSelectedCellsCommand.key);
@@ -112,6 +119,7 @@ export function TableToolbar({ getEditor, inTable }: TableToolbarProps) {
     if (!editor) return;
     editor.action((ctx) => {
       const view = ctx.get(editorViewCtx);
+      flushActiveHydration(view);
       deleteColumn(view.state, view.dispatch.bind(view));
       view.focus();
     });
@@ -124,6 +132,7 @@ export function TableToolbar({ getEditor, inTable }: TableToolbarProps) {
     if (!editor) return;
     editor.action((ctx) => {
       const view = ctx.get(editorViewCtx);
+      flushActiveHydration(view);
       deleteRow(view.state, view.dispatch.bind(view));
       view.focus();
     });

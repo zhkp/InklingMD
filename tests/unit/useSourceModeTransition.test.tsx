@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
-import { renderHook } from "@testing-library/react";
+import { render, renderHook } from "@testing-library/react";
+import { useLayoutEffect, useRef } from "react";
+import { EditorState } from "@milkdown/kit/prose/state";
+import { EditorView } from "@milkdown/kit/prose/view";
+import { markdownPublisherPlugin } from "../../src/components/Editor/markdown-publisher";
 import { useSourceModeTransition } from "../../src/components/Editor/useSourceModeTransition";
 import { editorViewCtx, parserCtx } from "@milkdown/kit/core";
 import { Schema } from "@milkdown/kit/prose/model";
@@ -11,6 +15,70 @@ import {
 } from "../../src/lib/outline";
 import { useOutline } from "../../src/store/outline";
 import * as dialogs from "../../src/lib/dialogs";
+
+describe("切 tab 时 enterSnapshot 在子编辑器挂载前就绪（#431 评审）", () => {  it("两个源码模式 tab 直切：新 tab 用自己的光标初始化，不继承上一个 tab", () => {
+    const A = "/tmp/source-a.md";
+    const B = "/tmp/source-b.md";
+    useWorkspace.setState({
+      activeTabPath: A,
+      currentFile: A,
+      openTabs: [
+        {
+          path: A,
+          content: "",
+          dirty: false,
+          lastSavedAt: null,
+          cursorPos: 111,
+          scrollTop: 10,
+          sourceMode: true,
+        },
+        {
+          path: B,
+          content: "",
+          dirty: false,
+          lastSavedAt: null,
+          cursorPos: 222,
+          scrollTop: 20,
+          sourceMode: true,
+        },
+      ] as never,
+    });
+
+    // Probe 模拟 SourceModeEditor：只在挂载 layout effect 里读一次 initial*
+    const mounts: Array<{ filePath: string; cursor: number }> = [];
+    function Probe({ filePath, cursor }: { filePath: string; cursor: number }) {
+      useLayoutEffect(() => {
+        mounts.push({ filePath, cursor });
+      }, []); // eslint-disable-line react-hooks/exhaustive-deps
+      return null;
+    }
+    function Harness({ filePath }: { filePath: string }) {
+      const lastSyncedRef = useRef("");
+      const { enterSnapshot } = useSourceModeTransition({
+        filePath,
+        sourceMode: true,
+        value: "",
+        getEditor: () => undefined,
+        lastSyncedRef,
+      });
+      if (!enterSnapshot) return null;
+      return (
+        <Probe key={filePath} filePath={filePath} cursor={enterSnapshot.cursor} />
+      );
+    }
+
+    const { rerender } = render(<Harness filePath={A} />);
+    expect(mounts).toEqual([{ filePath: A, cursor: 0 }]);
+
+    rerender(<Harness filePath={B} />);
+    // 旧实现：B 的 Probe 会先用 A 的快照（cursor 0）挂载，父级 layout effect
+    // 再更新 enterSnapshot 已无法影响已创建的 CM 实例
+    expect(mounts).toEqual([
+      { filePath: A, cursor: 0 },
+      { filePath: B, cursor: 222 },
+    ]);
+  });
+});
 
 describe("useSourceModeTransition", () => {
   it("enters source mode: captures non-zero scroll snapshot and content anchor from WYSIWYG", () => {
@@ -926,5 +994,78 @@ describe("useSourceModeTransition", () => {
     );
     expect(empty.meta?.anchorPos).toBeGreaterThanOrEqual(0);
     expect(empty.meta?.anchorPos).toBeLessThanOrEqual(empty.docSize);
+  });
+});
+
+describe("进入源码模式只 flush 本编辑器的待发发布（#431 评审 B7）", () => {
+  it("分屏的待发编辑不被顺带全文序列化", () => {
+    const schema = new Schema({
+      nodes: {
+        doc: { content: "block+" },
+        paragraph: {
+          group: "block",
+          content: "text*",
+          toDOM: () => ["p", 0],
+          parseDOM: [{ tag: "p" }],
+        },
+        text: { group: "inline" },
+      },
+    });
+    const doc = schema.nodes.doc.create(
+      null,
+      schema.nodes.paragraph.create(null, schema.text("hello")),
+    );
+
+    const makeView = (path: string, onChange: ReturnType<typeof vi.fn>) => {
+      const plugin = markdownPublisherPlugin({
+        serialize: () => "md-changed",
+        getLastSynced: () => "md-base",
+        setLastSynced: () => {},
+        getFilePath: () => path,
+        onChange,
+      });
+      const root = document.createElement("div");
+      document.body.append(root);
+      const view = new EditorView(root, {
+        state: EditorState.create({ doc, plugins: [plugin] }),
+      });
+      // 产生一个防抖窗口内的待发编辑
+      view.dispatch(view.state.tr.insertText("x", 1));
+      return view;
+    };
+
+    const onChangeA = vi.fn();
+    const onChangeB = vi.fn();
+    const viewA = makeView("/docs/a.md", onChangeA);
+    const viewB = makeView("/docs/split.md", onChangeB);
+    const editorA = {
+      action: (fn: (ctx: { get: (key: unknown) => unknown }) => void) =>
+        fn({
+          get: (key: unknown) => (key === editorViewCtx ? viewA : undefined),
+        }),
+    };
+
+    const lastSyncedRef = { current: "md-base" };
+    const { rerender } = renderHook(
+      ({ sourceMode }) =>
+        useSourceModeTransition({
+          filePath: "/docs/a.md",
+          sourceMode,
+          value: "hello",
+          getEditor: () => editorA as never,
+          lastSyncedRef,
+        }),
+      { initialProps: { sourceMode: false } },
+    );
+
+    rerender({ sourceMode: true });
+
+    // 只发布本编辑器；分屏的待发编辑留在它自己的防抖窗口内
+    expect(onChangeA).toHaveBeenCalledTimes(1);
+    expect(onChangeA).toHaveBeenCalledWith("md-changed");
+    expect(onChangeB).not.toHaveBeenCalled();
+
+    viewA.destroy();
+    viewB.destroy();
   });
 });

@@ -17,6 +17,7 @@ vi.mock("@tauri-apps/api/window", () => ({
 }));
 vi.mock("../../src/components/Editor/markdown-publisher", () => ({
   flushAllMarkdownPublishers: vi.fn(),
+  flushMarkdownPublishersForPath: vi.fn(),
 }));
 vi.mock("../../src/lib/fs", () => ({
   writeTextFile: vi.fn(async () => undefined),

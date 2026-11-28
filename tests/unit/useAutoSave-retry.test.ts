@@ -24,6 +24,7 @@ vi.mock("../../src/lib/fs", () => ({
 }));
 vi.mock("../../src/components/Editor/markdown-publisher", () => ({
   flushAllMarkdownPublishers: flushMock,
+  flushMarkdownPublishersForPath: flushMock,
 }));
 
 import { useAutoSave } from "../../src/lib/useAutoSave";

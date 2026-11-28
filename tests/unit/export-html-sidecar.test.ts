@@ -37,6 +37,7 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({ save: saveMock }));
 vi.mock("../../src/lib/dialogs", () => ({ showMessage: showMessageMock }));
 vi.mock("../../src/components/Editor/markdown-publisher", () => ({
   flushAllMarkdownPublishers: vi.fn(),
+  flushMarkdownPublishersForPath: vi.fn(),
 }));
 vi.mock("../../src/lib/exportTheme", () => ({
   collectDocumentCss: async () => ({ sheets: [], skipped: [] }),

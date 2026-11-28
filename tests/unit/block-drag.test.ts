@@ -7,6 +7,7 @@ import { EditorState, TextSelection } from "@milkdown/kit/prose/state";
 import { Schema } from "@milkdown/kit/prose/model";
 import type { Decoration, DecorationSet } from "@milkdown/kit/prose/view";
 import { blockDragKey, blockDragPlugin } from "../../src/components/Editor/block-drag";
+import { hydrationMetaKey } from "../../src/components/Editor/tab-editor-cache";
 
 const schema = new Schema({
   nodes: {
@@ -120,5 +121,33 @@ describe("blockDragPlugin 装饰集增量更新", () => {
     );
     const decosAfter = (blockDragKey.getState(state) as unknown as BlockDragState).decos;
     expect(decosAfter).toBe(decosBefore);
+  });
+
+  it("追加分片水合保留拖拽目标：dropIndex 不重置、指示器跟随（#431 评审）", () => {
+    // 场景：大文档拖拽中，dragover 已设定目标（插到第 3 块之前），
+    // drop 之前恰有分片水合到达——目标索引不得被清成 null（否则 drop 回退到 0，块被移到文首）
+    let state = createState(["a", "b", "c"]);
+    state = state.apply(state.tr.setMeta(blockDragKey, { dropIndex: 2 }));
+    expect(indicators(state)[0].from).toBe(6);
+
+    const appendFromPos = state.doc.content.size;
+    state = state.apply(
+      state.tr
+        .insert(appendFromPos, schema.node("paragraph", null, schema.text("d")))
+        .setMeta(hydrationMetaKey, {
+          hydrating: true,
+          done: false,
+          fromCache: true,
+          appendFromIndex: 3,
+          appendFromPos,
+        }),
+    );
+
+    const s = blockDragKey.getState(state) as unknown as BlockDragState;
+    expect(s.dropIndex).toBe(2);
+    expect(indicators(state)).toHaveLength(1);
+    expect(indicators(state)[0].from).toBe(6);
+    // 追加块补手柄，已有手柄位置不变
+    expect(handles(state).map((h) => h.from)).toEqual([0, 3, 6, 9]);
   });
 });

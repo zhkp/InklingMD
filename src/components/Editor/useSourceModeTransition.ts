@@ -8,9 +8,8 @@ import { editorViewCtx, parserCtx } from "@milkdown/kit/core";
 import { TextSelection } from "@milkdown/kit/prose/state";
 import type { Plugin } from "@milkdown/kit/prose/state";
 import type { EditorView } from "@milkdown/kit/prose/view";
-import {
-  flushAllMarkdownPublishers,
-} from "./markdown-publisher";
+import { flushMarkdownPublisherFor } from "./markdown-publisher";
+import { flushActiveHydration } from "./tab-editor-cache";
 import { markOutlineImmediateRefresh } from "./outline-tracker";
 import { useSettings } from "../../store/settings";
 import { useWorkspace } from "../../store/workspace";
@@ -177,6 +176,7 @@ export function useSourceModeTransition({
   getWysiwygTopPos,
 }: SourceModeTransitionOptions) {
   const prevSourceModeRef = useRef(sourceMode);
+  const prevFilePathRef = useRef(filePath);
   // Parsing failure updates local snapshot state and asynchronously flips the
   // store back to source mode. Ignore the intermediate local re-render so the
   // failing parser is not called in an update loop before the prop catches up.
@@ -185,6 +185,20 @@ export function useSourceModeTransition({
   const [enterSnapshot, setEnterSnapshot] = useState<CursorScrollSnapshot | null>(
     sourceMode ? { cursor: 0, scrollTop: 0 } : null,
   );
+  // enterSnapshot 是为哪个 filePath 准备的。切 tab 时必须在**渲染期**同步换掉：
+  // SourceModeEditor 以 filePath 为 key，其挂载 layout effect 先于本 hook 的
+  // layout effect 运行，晚一步更新会让新 tab 的 CodeMirror 用旧 tab 的
+  // cursor/scrollTop 初始化，且后续 props 变化不会重新应用（#431 评审）。
+  const [snapshotPath, setSnapshotPath] = useState(filePath);
+  if (snapshotPath !== filePath) {
+    setSnapshotPath(filePath);
+    if (sourceMode) {
+      const { pos, scrollTop } = useWorkspace.getState().getCursorStateFor(filePath);
+      setEnterSnapshot({ cursor: pos ?? 0, scrollTop: scrollTop ?? 0 });
+    } else {
+      setEnterSnapshot(null);
+    }
+  }
   const getEditorRef = useRef(getEditor);
   getEditorRef.current = getEditor;
   const currentFilePathRef = useRef(filePath);
@@ -215,12 +229,30 @@ export function useSourceModeTransition({
 
   useLayoutEffect(() => {
     const prev = prevSourceModeRef.current;
+    const fileChanged = prevFilePathRef.current !== filePath;
+    prevFilePathRef.current = filePath;
+    if (fileChanged) {
+      // 切 tab 引起的 filePath 变化不属于同文件 WYSIWYG↔源码模式切换：
+      // 取消前一个文件的退出过渡帧。enterSnapshot 已在渲染期按新 filePath
+      // 同步（见上），这里不再 setState——layout effect 晚于 SourceModeEditor
+      // 挂载，改在这里更新会让新 CM 用旧 tab 的位置初始化。
+      cancelPendingRestoreRef.current();
+      exitSnapshotRef.current = null;
+      parseFailurePendingRef.current = false;
+      prevSourceModeRef.current = sourceMode;
+      return;
+    }
     if (parseFailurePendingRef.current) {
       if (sourceMode) parseFailurePendingRef.current = false;
       prevSourceModeRef.current = sourceMode;
       return;
     }
     if (sourceMode && !prev) {
+      // 只为**正在切换的这个编辑器**补齐水合（#431 评审）：进入源码模式要序列化
+      // 完整 doc，但分屏另一侧的大文档没必要在本帧同步插完——无参 flush 会把它
+      // 一起做掉，重新造出分片水合想避免的长任务。
+      const entering = getEditor();
+      entering?.action((ctx) => flushActiveHydration(ctx.get(editorViewCtx)));
       const settings = useSettings.getState();
       if (settings.focusMode) settings.setFocusMode(false);
       if (settings.typewriterMode) settings.setTypewriterMode(false);
@@ -232,9 +264,18 @@ export function useSourceModeTransition({
       // scrollTop 同策略：读持续缓存的实时高度，无缓存时才退回现场值。
       let scrollHeight = getWysiwygScrollHeight ? getWysiwygScrollHeight() : 0;
       // 先 flush 防抖窗口内的待发编辑（idle 编辑器自动跳过），store 内容即事实源。
+      // 只 flush **本编辑器**：分屏侧的待发编辑属于另一份文件，无需为本次切换
+      // 同步序列化（#431 评审）。
       // 不能无条件「当场序列化」：未编辑文档的序列化结果可能与原文有规范化
       // 差异，会被误当编辑发布、标 dirty 并改写从未编辑的文件
-      flushAllMarkdownPublishers();
+      {
+        const editorForFlush = getEditor();
+        if (editorForFlush) {
+          editorForFlush.action((ctx) =>
+            flushMarkdownPublisherFor(ctx.get(editorViewCtx)),
+          );
+        }
+      }
       const fresh =
         useWorkspace.getState().openTabs.find((t) => t.path === filePath)
           ?.content ?? value;

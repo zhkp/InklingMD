@@ -8,7 +8,9 @@ import { Plugin, PluginKey } from "@milkdown/kit/prose/state";
 import type { EditorView } from "@milkdown/kit/prose/view";
 import { saveImageAsset, genAssetName } from "../../lib/assetStore";
 import { showMessage } from "../../lib/dialogs";
-import { isUntitledPath } from "../../lib/path-utils";
+import { isSamePath, isUntitledPath } from "../../lib/path-utils";
+import { documentIdentityOf, type DocumentIdentity } from "./document-identity";
+import { useWorkspace } from "../../store/workspace";
 
 const key = new PluginKey("inkling-image-upload");
 
@@ -45,6 +47,56 @@ function fileToDataUrl(file: File): Promise<string> {
  */
 export { isUntitledPath };
 
+// 文档身份类型与查询统一从 ./document-identity 导入
+//
+
+//
+//
+
+//
+
+/**
+ * 上传期间「目标文档是否仍是当初那一份」（#431 评审）。
+ *
+ * 不能按路径判等：
+ * - 草稿另存为会把路径从 untitled-N 换成真实路径，但仍是同一份文档；
+ * - 外部重载（`reloadFile`）路径不变，内容却已被替换（revision +1）；
+ * - 切到另一个 tab 时，当前路径对应的 docId 必然不同。
+ * 因此按 docId + revision 判定，并复核 view 仍存活。
+ */
+export function stillSameDocument(args: {
+  view: Pick<EditorView, "isDestroyed">;
+  /** 上传开始时的文档身份；null 表示该路径未登记为 tab（如空路径兜底） */
+  identity: DocumentIdentity | null;
+  documentPath: string;
+  getDocumentPath: () => string;
+}): boolean {
+  const { view, identity, documentPath, getDocumentPath } = args;
+  if (view.isDestroyed) return false;
+  const currentPath = getDocumentPath();
+  const current = documentIdentityOf(currentPath);
+  if (identity) {
+    // 身份已登记：只认 docId + revision。另存为换路径但保留 docId → 放行；
+    // 切 tab / 重载 / tab 被关闭 → 拒绝。
+    if (current) {
+      return (
+        current.docId === identity.docId &&
+        current.revision === identity.revision
+      );
+    }
+    // 当前视图路径已不在 openTabs：另存为/外部改名刚换了路径，而 React 还没把
+    // 新 filePath 写进 view 的 getter。此时按 docId 找回同一份文档，并确认
+    // revision 未变（重载会 +1）。docId 全局唯一，不会误认成别的 tab。
+    return useWorkspace
+      .getState()
+      .openTabs.some(
+        (t) => t.docId === identity.docId && (t.revision ?? 0) === identity.revision,
+      );
+  }
+  // 未登记路径（空路径等降级场景）没有身份可比，退回路径判等
+  return currentPath === documentPath;
+}
+
 /**
  * 将图片文件写入当前 Markdown 同目录的 assets/ 并在编辑器中插入图片节点。
  * 未保存草稿（documentPath 为空或 untitled-N 虚拟路径）直接以 Data URL 形式内联插入，
@@ -59,9 +111,22 @@ async function insertImages(
   view: EditorView,
   pos: number | null,
   documentPath: string,
+  getDocumentPath: () => string,
 ): Promise<void> {
   const imageFiles = files.filter(isImageFile);
   if (imageFiles.length === 0) return;
+  // 编辑器实例现在跨 tab 复用（#426）：每个 await 之后必须复核「当前仍是同一个文档」，
+  // 否则上传/落盘期间切走 tab 会把图片节点插进新 tab，并把旧文档的相对路径带过去。
+  // #431 评审：路径会因草稿另存为变化（仍是同一份文档），也会因外部重载而同一路径
+  // 换内容（revision 变化），所以身份取 docId + revision，不能按 path 判等。
+  const documentIdentity = documentIdentityOf(documentPath);
+  const stillSameDoc = () =>
+    stillSameDocument({
+      view,
+      identity: documentIdentity,
+      documentPath,
+      getDocumentPath,
+    });
 
   let insertPos = pos;
   const failedFiles: { name: string; reason: string }[] = [];
@@ -72,8 +137,18 @@ async function insertImages(
       let relSrc: string;
       if (!isUntitledPath(documentPath)) {
         const buf = await file.arrayBuffer();
+        if (!stillSameDoc()) return;
+        const assetName = genImageName(file);
         // markdown 中用正斜杠相对路径（跨平台兼容）；相同内容复用已有文件
-        relSrc = await saveImageAsset(documentPath, new Uint8Array(buf), genImageName(file));
+        relSrc = await saveImageAsset(documentPath, new Uint8Array(buf), assetName);
+        if (!stillSameDoc()) return;
+        // 落盘期间文档路径迁移（另存为 / 外部改名，docId 不变）：
+        // 资源刚写在旧目录，相对路径已不指向它；按当前路径重新落盘（#431 评审）。
+        const mountedPath = getDocumentPath();
+        if (!isSamePath(mountedPath, documentPath) && !isUntitledPath(mountedPath)) {
+          relSrc = await saveImageAsset(mountedPath, new Uint8Array(buf), assetName);
+          if (!stillSameDoc()) return;
+        }
       } else {
         // 未命名草稿（untitled-N 虚拟路径）没有可解析的本地目录，转 Data URL 内联插入；
         // 草稿另存到任意目录后图片依然随文档自带，不会产生失效的相对路径
@@ -81,6 +156,7 @@ async function insertImages(
           hasLargeDraftImage = true;
         }
         relSrc = await fileToDataUrl(file);
+        if (!stillSameDoc()) return;
       }
 
       const alt = file.name.replace(/\.[^.]+$/, "") || "image";
@@ -101,6 +177,7 @@ async function insertImages(
     }
   }
 
+  if (!stillSameDoc()) return;
   if (failedFiles.length > 0) {
     if (failedFiles.length === 1) {
       void showMessage(`图片插入失败：${failedFiles[0].name}（${failedFiles[0].reason}）`, {
@@ -128,8 +205,9 @@ async function insertImages(
  * - handleDrop：从系统文件管理器拖入图片，插入到鼠标释放位置
  * - handlePaste：粘贴剪贴板图片（截图等），插入到当前光标位置
  */
-export const imageUploadPlugin = (documentPath: string) =>
-  new Plugin({
+export const imageUploadPlugin = (documentPath: string | (() => string)) => {
+  const resolveDocPath = typeof documentPath === "function" ? documentPath : () => documentPath;
+  return new Plugin({
     key,
     props: {
       handleDrop: (view, event: DragEvent) => {
@@ -140,7 +218,7 @@ export const imageUploadPlugin = (documentPath: string) =>
         event.preventDefault();
         const coords = { left: event.clientX, top: event.clientY };
         const pos = view.posAtCoords(coords)?.pos ?? null;
-        void insertImages(Array.from(files), view, pos, documentPath);
+        void insertImages(Array.from(files), view, pos, resolveDocPath(), resolveDocPath);
         return true;
       },
       handlePaste: (view, event: ClipboardEvent) => {
@@ -149,8 +227,9 @@ export const imageUploadPlugin = (documentPath: string) =>
         if (!Array.from(files).some(isImageFile)) return false;
 
         event.preventDefault();
-        void insertImages(Array.from(files), view, null, documentPath);
+        void insertImages(Array.from(files), view, null, resolveDocPath(), resolveDocPath);
         return true;
       },
     },
   });
+};

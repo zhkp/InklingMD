@@ -26,6 +26,7 @@ vi.mock("../../src/lib/dialogs", () => ({
 
 vi.mock("../../src/components/Editor/markdown-publisher", () => ({
   flushAllMarkdownPublishers: vi.fn(),
+  flushMarkdownPublishersForPath: vi.fn(),
 }));
 
 const DOC = "/workspace/note.md";

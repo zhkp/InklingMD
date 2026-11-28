@@ -6,7 +6,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useWorkspace, type OpenTab } from "../../store/workspace";
-import { flushAllMarkdownPublishers } from "../Editor/markdown-publisher";
+import { flushMarkdownPublishersForPath } from "../Editor/markdown-publisher";
 import { TabContextMenu } from "./TabContextMenu";
 import { IconX } from "../icons";
 import { baseName } from "../../lib/path-utils";
@@ -144,8 +144,9 @@ export function TabsBar() {
 
   const handleClose = async (tab: OpenTab) => {
     // 先 flush 防抖窗口内的发布，关闭决策看到真实 dirty 与内容，
-    // 否则窗口内关闭会静默丢弃未发布编辑（PR #34）
-    flushAllMarkdownPublishers();
+    // 否则窗口内关闭会静默丢弃未发布编辑（PR #34）。
+    // 只 flush 被关闭的文档：分屏/其他 tab 不该被顺带序列化（#431 评审 B7）。
+    flushMarkdownPublishersForPath(tab.path);
     const fresh =
       useWorkspace.getState().openTabs.find((t) => t.path === tab.path) ?? tab;
     if (fresh.dirty) {
@@ -160,7 +161,7 @@ export function TabsBar() {
 
   /** 激活 tab（点击 / Enter / Space 共用同一入口） */
   const activatePath = (path: string) => {
-    flushAllMarkdownPublishers();
+    // flush 由 switchTab 按 departing path 收敛，这里不再全局 flush（#431 评审 B7）
     switchTab(path);
   };
 

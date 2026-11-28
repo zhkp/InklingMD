@@ -47,6 +47,7 @@ vi.mock("../../src/lib/fs", async (importOriginal) => {
 
 vi.mock("../../src/components/Editor/markdown-publisher", () => ({
   flushAllMarkdownPublishers: vi.fn(),
+  flushMarkdownPublishersForPath: vi.fn(),
 }));
 
 import { ConflictDialog } from "../../src/components/FileConflict/ConflictDialog";

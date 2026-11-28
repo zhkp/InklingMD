@@ -13,6 +13,7 @@ import {
 } from "../../lib/outline";
 import { runSourceModeScrollToHeading } from "../../lib/source-mode-scroll";
 import { selectOutlineForFile, useOutline } from "../../store/outline";
+import { flushActiveHydration } from "../Editor/tab-editor-cache";
 import {
   reuseOutlineItems,
   type CachedOutlineItem,
@@ -132,6 +133,9 @@ function scrollToHeading(
   if (!editor) return;
   editor.action((ctx) => {
     const view = ctx.get(editorViewCtx);
+    // 只补齐大纲所属的**这个**编辑器（#431 评审同类问题）：无参 flush 会把
+    // 分屏另一侧的大文档同步插完，一次大纲跳转就可能重建长任务。
+    flushActiveHydration(view);
     const doc = view.state.doc;
     const targetPos = findEditorHeadingPos(doc, heading);
     if (targetPos != null) {

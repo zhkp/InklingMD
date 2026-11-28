@@ -21,6 +21,7 @@ import {
   type EditorOutlineHeading,
   type EditorOutlineSnapshot,
 } from "../../lib/outline";
+import { hydrationMetaKey } from "./tab-editor-cache";
 
 const key = new PluginKey("inkling-outline-tracker");
 /** 视口顶部的采样偏移：标题顶端滚过视口顶该距离即视为当前章节 */
@@ -46,6 +47,10 @@ interface ImmediateRefreshRequest {
   anchorPos: number | null;
   /** 源码光标（编辑位置）换算到新文档的 PM 位置；与 anchorPos 取较靠后者 */
   caretPos: number | null;
+  /** 渐进式水合事务序号（#426：切 tab 时跳过中间分片扫描，避免 O(n²) 与尾部长任务） */
+  hydrationSeq: number;
+  hydrationDone: boolean;
+  hydrationInitialOutline: EditorOutlineSnapshot | null;
 }
 
 const NO_REFRESH_REQUEST: ImmediateRefreshRequest = {
@@ -53,6 +58,9 @@ const NO_REFRESH_REQUEST: ImmediateRefreshRequest = {
   active: null,
   anchorPos: null,
   caretPos: null,
+  hydrationSeq: 0,
+  hydrationDone: true,
+  hydrationInitialOutline: null,
 };
 
 /**
@@ -190,15 +198,21 @@ export const outlineTrackerPlugin = (
     state: {
       init: (): ImmediateRefreshRequest => NO_REFRESH_REQUEST,
       apply: (tr, value): ImmediateRefreshRequest => {
+        const hydration = tr.getMeta(hydrationMetaKey);
         const meta = tr.getMeta(key) as
           | Partial<ImmediateRefreshRequest>
           | undefined;
-        if (!meta) return value;
+        if (!meta && !hydration?.hydrating) return value;
         return {
-          seq: value.seq + 1,
-          active: meta.active ?? null,
-          anchorPos: meta.anchorPos ?? null,
-          caretPos: meta.caretPos ?? null,
+          seq: meta ? value.seq + 1 : value.seq,
+          active: meta ? (meta.active ?? null) : value.active,
+          anchorPos: meta ? (meta.anchorPos ?? null) : value.anchorPos,
+          caretPos: meta ? (meta.caretPos ?? null) : value.caretPos,
+          hydrationSeq: hydration?.hydrating ? value.hydrationSeq + 1 : value.hydrationSeq,
+          hydrationDone: hydration?.hydrating ? hydration.done : value.hydrationDone,
+          hydrationInitialOutline: hydration?.hydrating
+            ? (hydration.initialOutline ?? null)
+            : value.hydrationInitialOutline,
         };
       },
     },
@@ -209,9 +223,10 @@ export const outlineTrackerPlugin = (
         view.state.selection.head,
       );
       /** 已处理到的同步刷新序号（初值取当前状态，避免把历史请求当成新请求） */
-      let refreshSeq = (
-        key.getState(view.state) ?? NO_REFRESH_REQUEST
-      ).seq;
+      const initialReq = key.getState(view.state) ?? NO_REFRESH_REQUEST;
+      let refreshSeq = initialReq.seq;
+      let hydrationSeq = initialReq.hydrationSeq;
+      let publishedHydrationOutline: EditorOutlineSnapshot | null = null;
       /**
        * 几何缓存已失效：整文档替换后缓存描述的是替换前的 DOM。
        * 由 `rebuildHeadingTops` 单点清除——散在调用点维护必然漏清一次，
@@ -412,8 +427,73 @@ export const outlineTrackerPlugin = (
           const request = key.getState(nextView.state) ?? NO_REFRESH_REQUEST;
           const immediateRefresh = request.seq !== refreshSeq;
           refreshSeq = request.seq;
+          const hydrationChanged = request.hydrationSeq !== hydrationSeq;
+          hydrationSeq = request.hydrationSeq;
+
+          if (hydrationChanged) {
+            if (extractTimer) {
+              clearTimeout(extractTimer);
+              extractTimer = null;
+            }
+            if (geometryTimer) {
+              clearTimeout(geometryTimer);
+              geometryTimer = null;
+            }
+            if (restTimer) {
+              clearTimeout(restTimer);
+              restTimer = null;
+            }
+            if (initialSampleFrame != null) {
+              cancelAnimationFrame(initialSampleFrame);
+              initialSampleFrame = null;
+            }
+            geometryDirty = true;
+
+            if (!request.hydrationDone) {
+              stale = true;
+              if (
+                request.hydrationInitialOutline &&
+                request.hydrationInitialOutline !== publishedHydrationOutline
+              ) {
+                publishedHydrationOutline = request.hydrationInitialOutline;
+                headings = request.hydrationInitialOutline.headings;
+                activeIndex = request.hydrationInitialOutline.activeIndex;
+                onChange({ headings, activeIndex });
+              }
+              return;
+            }
+
+            // 末片（或单步同步切 tab）：若未发布过缓存大纲，则落地完整大纲
+            if (request.hydrationInitialOutline) {
+              headings = request.hydrationInitialOutline.headings;
+              activeIndex = request.hydrationInitialOutline.activeIndex;
+              if (request.hydrationInitialOutline !== publishedHydrationOutline) {
+                publishedHydrationOutline = request.hydrationInitialOutline;
+                onChange({ headings, activeIndex });
+              }
+            } else {
+              publishedHydrationOutline = null;
+              headings = extractEditorOutline(nextView.state.doc);
+              activeIndex = findActiveHeadingIndex(
+                headings,
+                nextView.state.selection.head,
+              );
+              onChange({ headings, activeIndex });
+            }
+            stale = false;
+            if (nextView.state.doc.childCount <= 250) {
+              initialSampleFrame = requestAnimationFrame(() => {
+                initialSampleFrame = null;
+                if (!destroyed) refreshGeometryAndSample();
+              });
+            } else {
+              scheduleGeometryRefresh();
+            }
+            return;
+          }
 
           if (docChanged) {
+            publishedHydrationOutline = null;
             // 整文档替换（退出源码模式）：本帧同步重算并发布，首个可见帧
             // 不得是替换前的旧快照（#375）。防抖窗口若还挂着旧文档的重算，
             // 直接丢弃——它算的是替换前的标题集。

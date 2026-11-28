@@ -14,12 +14,15 @@ import { editorViewCtx } from "@milkdown/kit/core";
 import { TextSelection } from "@milkdown/kit/prose/state";
 import type { EditorView } from "@milkdown/kit/prose/view";
 import { useWorkspace } from "../../store/workspace";
+import { hasActiveHydration } from "./tab-editor-cache";
 
 interface CursorStateRestoreOptions {
   /** 是否处于源码模式 */
   sourceMode: boolean;
   /** 本编辑器实例绑定的文件路径 */
   filePath: string;
+  /** 同路径重载修订号：reloadFile 后需要重新恢复记忆位置（改前靠重挂触发） */
+  revision: number;
   /** Milkdown 编辑器是否就绪 */
   loading: boolean;
   getEditor: () => Editor | undefined;
@@ -28,6 +31,7 @@ interface CursorStateRestoreOptions {
 export function useCursorStateRestore({
   sourceMode,
   filePath,
+  revision,
   loading,
   getEditor,
 }: CursorStateRestoreOptions) {
@@ -35,19 +39,31 @@ export function useCursorStateRestore({
   // 上次 effect 运行时的 sourceMode：发生变化说明本次触发来自模式切换，
   // 恢复应让位给 useSourceModeTransition
   const prevSourceModeRef = useRef(sourceMode);
+  const prevFilePathRef = useRef(filePath);
 
   useEffect(() => {
-    const modeFlipped = prevSourceModeRef.current !== sourceMode;
+    const sameFile = prevFilePathRef.current === filePath;
+    prevFilePathRef.current = filePath;
+    const modeFlipped = sameFile && prevSourceModeRef.current !== sourceMode;
     prevSourceModeRef.current = sourceMode;
     if (modeFlipped) return;
     if (loading || sourceMode) return;
     const editor = getEditor();
     if (!editor) return;
     const { pos, scrollTop } = getCursorStateFor(filePath);
+    let disposed = false;
+    let rafId = 0;
     editor.action((ctx) => {
       const view = ctx.get(editorViewCtx);
-      // 恢复光标位置，夹紧到文档有效范围
-      if (pos != null) {
+      // 本编辑器实例是否仍在分片水合（按 view 判定：分屏侧水合不该牵连主编辑器）
+      const hydratingHere = () => hasActiveHydration(view);
+      // 位置记忆只恢复折叠光标：切回缓存 tab 时 Editor 已恢复切走前的区间选区，
+      // 这里再用 TextSelection.near(pos) 会把它折叠成单点。小文档缓存命中时
+      // 水合在 Editor 的 layout effect 里同步完成，本 effect 运行时
+      // hasActiveHydration 已为 false，原判据拦不住（#431 评审）。
+      const hasRangeSelection = !view.state.selection.empty;
+      // 恢复光标位置，夹紧到文档有效范围（水合未完成时末片会用缓存选区再恢复一次）
+      if (pos != null && !hydratingHere() && !hasRangeSelection) {
         const docSize = view.state.doc.content.size;
         const safePos = Math.max(0, Math.min(pos, docSize));
         try {
@@ -69,17 +85,33 @@ export function useCursorStateRestore({
         if (scrollEl.isConnected) scrollEl.scrollTop = target;
       };
       apply();
-      // 大文档打开瞬间代码块/图表尚为占位高度，scrollHeight 可能不足，
-      // scrollTop 被钳制在 maxScroll。逐帧重试直到占位撑开、位置到位
-      // （30 帧上限；占位高度 v2.3.4 起接近最终值，通常 1-2 帧收敛）
+      // 首帧写入后记录实际落点：长文档此时可能还没排版出完整高度，
+      // scrollTop 会被钳制在 maxScroll，不能拿 target 当基线。
+      const hydrationBaseline = scrollEl.scrollTop;
+      // 水合期间不再逐帧写 scrollTop：那会把用户在水合窗口内的滚动持续拽回
+      // 记忆位置（#431 评审 B6）。水合完成后，仅当用户没有自己滚动过才收敛到 target。
       let frames = 0;
+      let hydrationFinished = false;
       const settle = () => {
-        if (!scrollEl.isConnected) return;
+        if (disposed || !scrollEl.isConnected) return;
+        if (hydratingHere()) {
+          rafId = requestAnimationFrame(settle);
+          return;
+        }
+        if (!hydrationFinished) {
+          hydrationFinished = true;
+          // 用户在水合窗口内滚动过（位置已偏离首帧落点）：尊重用户，不再拽回
+          if (Math.abs(scrollEl.scrollTop - hydrationBaseline) >= 1) return;
+        }
         if (Math.abs(scrollEl.scrollTop - target) < 1 || ++frames > 30) return;
         apply();
-        requestAnimationFrame(settle);
+        rafId = requestAnimationFrame(settle);
       };
-      requestAnimationFrame(settle);
+      rafId = requestAnimationFrame(settle);
     });
-  }, [filePath, loading, getEditor, getCursorStateFor, sourceMode]);
+    return () => {
+      disposed = true;
+      cancelAnimationFrame(rafId);
+    };
+  }, [filePath, revision, loading, getEditor, getCursorStateFor, sourceMode]);
 }

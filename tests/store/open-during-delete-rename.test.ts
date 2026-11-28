@@ -32,6 +32,7 @@ vi.mock("../../src/lib/fs", () => ({
 
 vi.mock("../../src/components/Editor/markdown-publisher", () => ({
   flushAllMarkdownPublishers: vi.fn(),
+  flushMarkdownPublishersForPath: vi.fn(),
 }));
 
 import { useWorkspace } from "../../src/store/workspace";

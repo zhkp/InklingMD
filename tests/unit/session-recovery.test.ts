@@ -23,6 +23,7 @@ vi.mock("@tauri-apps/api/window", () => ({
 }));
 vi.mock("../../src/components/Editor/markdown-publisher", () => ({
   flushAllMarkdownPublishers: vi.fn(),
+  flushMarkdownPublishersForPath: vi.fn(),
 }));
 
 // `applyRecovery` 对「有路径的草稿」会读一次当前磁盘基线，避免保存时静默覆盖

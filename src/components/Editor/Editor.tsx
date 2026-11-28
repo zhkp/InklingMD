@@ -23,24 +23,41 @@ import "@milkdown/kit/prose/tables/style/tables.css";
 // TableToolbar 已提升到 App.tsx 的 topbar 下方作为固定非滚动行，
 // 此处不再内部渲染；inTable 状态通过 onInTableChange 回调外露。
 import { codeBlockView } from "./code-block-view";
-import { imageView } from "./image-node-view";
+import { imageView, refreshImageDocumentPaths } from "./image-node-view";
 import { imageUploadPlugin } from "./image-upload";
 import { smartPastePlugin } from "./smart-paste";
 import { remoteImagePlugin } from "./remote-image";
 import { linkClickPlugin, scrollToAnchorInView } from "./link-click";
 import { outlineTrackerPlugin } from "./outline-tracker";
-import { markdownPublisherPlugin } from "./markdown-publisher";
+import {
+  cancelPendingMarkdownPublish,
+  flushMarkdownPublisherFor,
+  markdownPublisherPlugin,
+} from "./markdown-publisher";
 import { normalizeListPlaceholders } from "./markdown-serialize";
 import { formulaNumberingPlugin, formulaNumberingKey } from "./formula-numbering";
 import { editorModesPlugin } from "./editor-modes";
 import { blockDragPlugin } from "./block-drag";
 import { searchPlugin } from "./search";
-import { cursorSaverPlugin } from "./cursor-saver";
+import { cursorSaverPlugin, flushCursorSaverForTabSwitch } from "./cursor-saver";
 import { tableTrackerPlugin } from "./table-tracker";
 import { selectAllPlugin } from "./select-all";
 import { useSourceModeTransition } from "./useSourceModeTransition";
 import { useCursorStateRestore } from "./useCursorStateRestore";
 import { placeCursorForRootClick } from "./editor-root-click";
+import { attachHydrationFlushOnInteraction } from "./hydration-interaction";
+import {
+  createTabEditorCache,
+  flushActiveHydration,
+  hydrationMetaKey,
+  HYDRATION_CHUNK_SIZE_FIRST_OPEN,
+  HYDRATION_CHUNK_SIZE_TAB_SWITCH,
+  readHistoryState,
+  startDocHydration,
+  type HydrationMeta,
+  type HydrationTask,
+  type TabEditorCache,
+} from "./tab-editor-cache";
 import { useSettings } from "../../store/settings";
 import { useWorkspace } from "../../store/workspace";
 import type { EditorOutlineSnapshot } from "../../lib/outline";
@@ -84,6 +101,8 @@ import type { EditorView } from "@milkdown/kit/prose/view";
 interface EditorProps {
   /** 当前 Markdown 文件完整路径，用于解析相对图片路径 */
   filePath: string;
+  /** 同路径重载修订号（reloadFile 时自增，使同路径缓存失效） */
+  revision?: number;
   /** 受控的 Markdown 文本。外部传入新值时会覆盖编辑器内容 */
   value: string;
   /** 内容变更回调，输出当前 Markdown 源码 */
@@ -100,7 +119,7 @@ interface EditorProps {
 
 /**
  * 内部组件：在 MilkdownProvider 内部使用 useEditor / useInstance。
- * 负责创建编辑器实例、同步外部 value、对外抛出 markdown 变更。
+ * 负责创建编辑器实例、跨 tab 缓存与分片水合、同步外部 value、对外抛出 markdown 变更。
  *
  * 注意：React 集成层会在 getEditor 返回后自行调用 editor.create()，
  * 所以这里不要调用 .create()，也不要调用 .container()（该方法不存在）。
@@ -108,6 +127,7 @@ interface EditorProps {
  */
 function EditorInner({
   filePath,
+  revision = 0,
   value,
   onChange,
   onReady,
@@ -115,6 +135,16 @@ function EditorInner({
   onInTableChange,
   sourceMode = false,
 }: EditorProps) {
+  // 动态路径/状态 ref：Milkdown 实例跨 tab 复用（#426），插件与 NodeView 通过 getter 读取当前活跃文件
+  const filePathRef = useRef(filePath);
+  filePathRef.current = filePath;
+  const valueRef = useRef(value);
+  valueRef.current = value;
+  const revisionRef = useRef(revision);
+  revisionRef.current = revision;
+  const sourceModeRef = useRef(sourceMode);
+  sourceModeRef.current = sourceMode;
+
   // 记录最近一次同步进编辑器的 value，避免 onChange 回写的值又触发覆盖，造成循环
   const lastSyncedRef = useRef(value);
   // 持续缓存富文本编辑器的滚动位置，避免在 display:none 或切换时现场读取被浏览器重排钳 0
@@ -132,14 +162,32 @@ function EditorInner({
   // 基线重置为「解析后 doc 的序列化结果」，与原始 value 存在规范化差异，
   // 若不跳过，外部同步 effect 会在每次挂载时把 doc 冗余重灌一遍。
   const initialSyncDoneRef = useRef(false);
-  // onChange 用 ref 持有，避免它变化导致编辑器重建
+  // onChange 用 ref 持有，避免它变化导致编辑器重建；
+  // 切换 tab 的 layout effect 先用旧 onChange 刷完旧 tab 待发编辑，再切换到新 onChange
   const onChangeRef = useRef(onChange);
-  useEffect(() => {
-    onChangeRef.current = onChange;
-  }, [onChange]);
-  // 大纲回调用 ref 持有，避免回调变化导致编辑器重建
+  // 大纲回调用 ref 持有，避免回调变化导致编辑器重建；同步记录当前文件最近快照供切 tab 缓存
   const onOutlineChangeRef = useRef(onOutlineChange);
   onOutlineChangeRef.current = onOutlineChange;
+  const lastOutlineRef = useRef<EditorOutlineSnapshot | null>(null);
+
+  // 跨 tab 编辑器状态缓存（LRU）与在途分片水合句柄
+  const tabCacheRef = useRef<TabEditorCache | null>(null);
+  if (!tabCacheRef.current) {
+    tabCacheRef.current = createTabEditorCache();
+  }
+  const hydrationTaskRef = useRef<HydrationTask | null>(null);
+  const initialCreatePropsRef = useRef<{
+    filePath: string;
+    revision: number;
+    value: string;
+    sourceMode: boolean;
+  } | null>(null);
+  const mountedDocRef = useRef<{
+    filePath: string;
+    revision: number;
+    value: string;
+    sourceMode: boolean;
+  } | null>(null);
 
   // 光标是否位于表格内，用于控制表格工具栏的上下文按钮组
   const [inTable, setInTable] = useState(false);
@@ -175,6 +223,13 @@ function EditorInner({
     onInTableChangeRef.current?.(inTable);
   }, [inTable]);
 
+  // 水合完成后重采一次视口锚点：首个 rAF 采样时可能只挂上了首个分片，
+  // 用部分高度做源码模式映射会失真（#426 评审 N8）。
+  const resampleAnchorRef = useRef<() => void>(() => {});
+  const queueAnchorResample = () => {
+    requestAnimationFrame(() => resampleAnchorRef.current());
+  };
+
   // 编辑位置记忆：持有 store 方法，插件内部通过 ref 调用避免重建
   const saveCursorState = useWorkspace((s) => s.saveCursorState);
   const saveCursorStateRef = useRef(saveCursorState);
@@ -191,11 +246,18 @@ function EditorInner({
       // 工厂返回 undefined 后 @milkdown/react 的 loading 永不结束（它只在
       // create() 的 finally 里翻 false），由 markFactoryFailed() 显式上报，
       // 降级检测立即切到只读 textarea（issue #172，原实现靠 3 秒超时误判）。
+      initialCreatePropsRef.current = {
+        filePath: filePathRef.current,
+        revision: revisionRef.current,
+        value: valueRef.current,
+        sourceMode: sourceModeRef.current,
+      };
       try {
         return Editor.make()
           .config((ctx) => {
             ctx.set(rootCtx, container);
-            ctx.set(defaultValueCtx, value);
+            // 若首个打开的文件处于源码模式，先以空文档轻量化初始化 WYSIWYG
+            ctx.set(defaultValueCtx, sourceModeRef.current ? "" : valueRef.current);
             // #297：标题 DOM id 与应用 slugify 统一口径。上游默认生成器只替换空白、
             // 保留标点（`Hello, World!` → `hello,-world!`），会让 TOC / 锚点 / 导出 HTML
             // 出现与 GitHub 生态不一致的 id。去重后缀仍由 syncHeadingIdPlugin 追加
@@ -215,19 +277,26 @@ function EditorInner({
                 setLastSynced: (md) => {
                   lastSyncedRef.current = md;
                 },
-                onChange: (md) => onChangeRef.current?.(md),
+                // store 侧按路径 flush 时要用当前挂载路径（实例跨 tab 复用）
+                getFilePath: () => filePathRef.current,
+                onChange: (md) => {
+                  if (mountedDocRef.current) {
+                    mountedDocRef.current.value = md;
+                  }
+                  onChangeRef.current?.(md);
+                },
               }),
               // 图片拖拽/粘贴上传：复制到当前文档的 assets/ 并插入相对路径
               // （须排在 Smart Paste 之前：剪贴板带图片文件时优先按文件落盘）
-              imageUploadPlugin(filePath),
+              imageUploadPlugin(() => filePathRef.current),
               // Smart Paste：网页 HTML / Markdown 源码粘贴解析为富文本（#219/#229）
               smartPastePlugin({ parseMarkdown: (md) => ctx.get(parserCtx)(md) }),
               // 粘贴进来的远程图片后台下载落盘到 assets/（#220）
-              remoteImagePlugin({ documentPath: filePath }),
+              remoteImagePlugin({ documentPath: () => filePathRef.current }),
               // 链接跟随：Ctrl/Cmd+点击打开外部链接或跳转内部锚点。
               // #298：DOM 捕获层统一接管，link mark 与 html-view 的 <a> 走同一条通路。
               linkClickPlugin({
-                documentPath: filePath,
+                documentPath: () => filePathRef.current,
                 workspaceRoot: () => useWorkspace.getState().rootPath,
                 notify: (message, kind) => notifyLinkRef.current(message, kind),
                 // #296：workspace-file 臂依赖。全部走 getState 实时读取，避免闭包拿到旧 store。
@@ -240,9 +309,10 @@ function EditorInner({
               // 仅主编辑器发布大纲；分屏编辑器不传回调，避免覆盖主面板。
               ...(onOutlineChange
                 ? [
-                    outlineTrackerPlugin((snapshot) =>
-                      onOutlineChangeRef.current?.(snapshot),
-                    ),
+                    outlineTrackerPlugin((snapshot) => {
+                      lastOutlineRef.current = snapshot;
+                      onOutlineChangeRef.current?.(snapshot);
+                    }),
                   ]
                 : []),
               // 公式自动编号：给 math_display 节点按顺序设置 number attr
@@ -255,7 +325,7 @@ function EditorInner({
               // [TOC] 目录自动生成：根据文档标题实时生成目录
               tocPlugin(),
               // 编辑位置记忆：选区/滚动变化时缓存到本地
-              cursorSaverPlugin(filePath, () => saveCursorStateRef.current),
+              cursorSaverPlugin(() => filePathRef.current, () => saveCursorStateRef.current),
               // 斜杠菜单：输入 `/` 弹出块类型选择菜单
               slashMenuPlugin(),
               // 自动配对补全：输入括号/引号自动配对
@@ -273,7 +343,7 @@ function EditorInner({
           // 代码块：CodeMirror 高亮 + 行号 + 语言切换
           .use(codeBlockView)
           // 图片：相对路径解析为可加载 URL（保持 markdown 源码为相对路径）
-          .use(imageView(filePath))
+          .use(imageView(() => filePathRef.current))
           // 数学公式：remark-math 解析 + KaTeX 渲染（行内 $...$ 和块级 $$...$$）
           .use(remarkMathPlugin)
           .use(mathInlineSchema)
@@ -304,11 +374,311 @@ function EditorInner({
         return undefined;
       }
     },
-    // 依赖数组为空，编辑器只在挂载时创建一次；filePath 变化由外层 key 触发重建
+    // 依赖数组为空，编辑器只在挂载时创建一次；tab 切换与重载通过内部状态缓存与水合处理
     [],
   );
 
-  // 在浏览器绘制可点击的大纲前发布实例；卸载时同步清除旧 getter。
+  // 对外发布编辑器实例 getter（跨 tab 切换保持稳定，仅卸载时清除）
+  useLayoutEffect(() => {
+    if (loading || !getEditor()) return;
+    onReady?.(getEditor);
+    return () => {
+      onReady?.(null);
+    };
+  }, [loading, getEditor, onReady]);
+
+  // 跨 tab 切换 / 同文件重载时的状态缓存与渐进水合（#426）
+  useLayoutEffect(() => {
+    if (loading) return;
+    const editor = getEditor();
+    if (!editor) {
+      onChangeRef.current = onChange;
+      return;
+    }
+
+    const prev = mountedDocRef.current;
+    if (!prev) {
+      const created = initialCreatePropsRef.current;
+      // 首次 create() 完成时若期间未发生切 tab/重载且模式一致，直接标记当前文档已挂载
+      if (
+        created &&
+        created.filePath === filePath &&
+        created.revision === revision &&
+        created.sourceMode === sourceMode
+      ) {
+        mountedDocRef.current = {
+          filePath,
+          revision,
+          value: created.value,
+          sourceMode,
+        };
+        initialSyncDoneRef.current = true;
+        onChangeRef.current = onChange;
+        return;
+      }
+    } else if (prev.filePath === filePath && prev.revision === revision) {
+      // 同文件模式翻转或回调更新：同步 onChangeRef，但**不能**把外部 value 写进
+      // prev.value——那是「已挂载 doc 的内容基线」，只能由 onChange/解析/水合路径写。
+      // 写进来会让下方 value 同步 effect 判断成「已同步」，吞掉同 path/revision 的
+      // 外部更新（崩溃恢复合并没有递增 revision，#431 评审 B1）。
+      prev.sourceMode = sourceMode;
+      onChangeRef.current = onChange;
+      return;
+    }
+
+    const cache = tabCacheRef.current!;
+
+    try {
+      editor.action((ctx) => {
+        const view = ctx.get(editorViewCtx);
+        const parser = ctx.get(parserCtx);
+        const serializer = ctx.get(serializerCtx);
+
+        // 1. 切离旧 tab：先用旧 onChangeRef 刷完未发布编辑，再缓存其完整 doc/选区/历史/大纲
+        if (prev) {
+          if (prev.filePath === filePath && prev.revision !== revision) {
+            hydrationTaskRef.current?.cancel();
+            hydrationTaskRef.current = null;
+            cache.delete(filePath);
+          } else if (prev.filePath !== filePath) {
+            const inflightTask = hydrationTaskRef.current;
+            hydrationTaskRef.current = null;
+            if (!prev.sourceMode) {
+              // 若通过 Sidebar/QuickOpen 切 tab，store 入口未调 flush，在此补齐（仍在旧 onChangeRef 下）。
+              // 只 flush 切离的那个 view：分屏编辑器仍停在自己的文件上，不该为本次切 tab
+              // 同步序列化它的大文档（#431 评审）。
+              flushMarkdownPublisherFor(view);
+              cancelPendingMarkdownPublish(view);
+              flushCursorSaverForTabSwitch(view, prev.filePath);
+
+              const wasHydrating = inflightTask?.isActive() ?? false;
+              const fullDoc = wasHydrating ? inflightTask!.fullDoc : view.state.doc;
+              // 水合窗口内用户点击过已挂载前缀（标记了交互）：现场选区才是用户意图，
+              // 不能用启动水合时的快照（否则切回后光标回到点击前的位置，#431 评审）。
+              const selection =
+                wasHydrating &&
+                inflightTask?.selection &&
+                !inflightTask.userInteracted()
+                  ? inflightTask.selection
+                  : {
+                      anchor: view.state.selection.anchor,
+                      head: view.state.selection.head,
+                    };
+              const historyState = wasHydrating
+                ? inflightTask!.historyState
+                : readHistoryState(view.state);
+              inflightTask?.cancel();
+
+              // 切走时布局是干净的：这里读一次 scrollHeight 代价很低，
+              // 供切回时分片水合期间撑住容器高度（#426）。若本 tab 的水合
+              // 还没跑完，尺寸不完整，按已水合块的平均高度外推完整高度。
+              // 若切入的是源码模式 tab，WYSIWYG 在 commit 阶段已 display:none，
+              // 现场 scrollHeight 会塌陷成小值；改用锚点采样持续缓存的真实高度
+              // （#431 评审 B2）。
+              const scrollEl =
+                (view as EditorView & { scrollDOM?: HTMLElement }).scrollDOM ??
+                view.dom.closest<HTMLElement>(".editor-scroll");
+              const totalHeight = wasHydrating
+                ? inflightTask!.estimateFullHeight()
+                : sourceMode
+                  ? wysiwygScrollHeightRef.current
+                  : scrollEl
+                    ? scrollEl.scrollHeight
+                    : 0;
+
+              // tab 已被关闭时不写缓存：closeTab 先更新 openTabs（触发 prune），
+              // 本次 layout effect 是同一提交里的后手，若无条件写回，关闭的大文档
+              // 会一直驻留到下一次 openTabs 变化（#426 评审 N16）。
+              const stillOpen = useWorkspace
+                .getState()
+                .openTabs.some((t) => t.path === prev.filePath);
+              if (stillOpen) {
+                // 缓存内容必须取 **flush 之后** 的值（#431 评审 P2）：若用户在
+                // 150ms 发布防抖窗口内切 tab，上面的 flush 已经把新内容写进 store，
+                // 而 `prev.value` 还是 flush 前的 prop。用它写缓存会让下次打开时
+                // `cachedContent !== value` → 缓存 miss → 重新解析并清空
+                // ProseMirror history（Ctrl+Z 丢最近编辑）。
+                const flushedContent =
+                  useWorkspace
+                    .getState()
+                    .openTabs.find((t) => t.path === prev.filePath)?.content ??
+                  prev.value;
+                cache.set({
+                  filePath: prev.filePath,
+                  revision: prev.revision,
+                  cachedContent: flushedContent,
+                  fullDoc,
+                  selection,
+                  historyState,
+                  lastSynced: lastSyncedRef.current,
+                  outlineSnapshot: lastOutlineRef.current,
+                  totalHeight,
+                  // 记录缓存时的编号开关与「编号是否已跑过」：中断的首开水合
+                  // （wasHydrating）可能还没编号，命中时必须校正（#431 评审 B3）。
+                  formulaAutoNumber: useSettings.getState().formulaAutoNumber,
+                  numberingApplied: !wasHydrating,
+                });
+              }
+            } else {
+              inflightTask?.cancel();
+            }
+          }
+        }
+
+        // 旧 tab 收尾完成，切换 onChangeRef 到新 tab
+        onChangeRef.current = onChange;
+        inTableRef.current = false;
+        setInTable(false);
+        onInTableChangeRef.current?.(false);
+
+        // 文档切换：ProseMirror 对「同位置 + 同 src/属性」的图片节点会复用
+        // NodeView 且不调用 update()，这里显式把它们的基准路径刷成新文档，
+        // 否则新 tab 会显示旧文档目录下的同名图片（#431 评审）。
+        refreshImageDocumentPaths(view);
+
+        // 2. 切入新 tab
+        if (sourceMode) {
+          lastSyncedRef.current = value;
+          lastOutlineRef.current = null;
+          const emptyDoc = view.state.schema.nodes.doc.createAndFill();
+          if (emptyDoc && view.state.doc.content.size > 0) {
+            const tr = view.state.tr
+              .replaceWith(0, view.state.doc.content.size, emptyDoc.content)
+              .setMeta("addToHistory", false)
+              .setMeta(hydrationMetaKey, {
+                hydrating: true,
+                done: true,
+                fromCache: true,
+                initialOutline: null,
+              } satisfies HydrationMeta);
+            view.dispatch(tr);
+          }
+          mountedDocRef.current = { filePath, revision, value, sourceMode: true };
+          initialSyncDoneRef.current = true;
+          return;
+        }
+
+        const cached = cache.get(filePath, revision, value);
+        if (cached) {
+          lastSyncedRef.current = cached.lastSynced;
+          lastOutlineRef.current = cached.outlineSnapshot;
+          mountedDocRef.current = { filePath, revision, value, sourceMode: false };
+          initialSyncDoneRef.current = true;
+          // 分片水合期间用切走时的高度撑住容器：否则滚动容器逐帧长高，
+          // `switchMs`（等高度收敛）会把整个水合时长算进切换耗时（#426）。
+          const wysiwygEl = view.dom.closest<HTMLElement>(".md-editor-wysiwyg");
+          // 缓存文案的编号状态可能已过期：开关在别的 tab 上被切换过，或缓存来自
+          // 中断的首开水合（编号未跑）。命中时让末片做一次编号校正（#431 评审 B3）。
+          const renumberFormulas =
+            !cached.numberingApplied ||
+            cached.formulaAutoNumber !== useSettings.getState().formulaAutoNumber;
+          // 注意：onComplete 可能在水合函数内部**同步**触发（单分片路径），
+          // 因此必须用 let + 赋值后比较，不能用 const（TDZ 会抛错并被外层 catch 吞掉）。
+          let task: HydrationTask | null = null;
+          task = startDocHydration({
+            view,
+            fullDoc: cached.fullDoc,
+            fromCache: true,
+            selection: cached.selection,
+            historyState: cached.historyState,
+            initialOutline: cached.outlineSnapshot,
+            heightPlaceholder:
+              wysiwygEl && cached.totalHeight > 0
+                ? { el: wysiwygEl, height: cached.totalHeight }
+                : null,
+            chunkSize: HYDRATION_CHUNK_SIZE_TAB_SWITCH,
+            renumberFormulas,
+            onComplete: () => {
+              if (hydrationTaskRef.current === task) {
+                hydrationTaskRef.current = null;
+              }
+              queueAnchorResample();
+            },
+          });
+          hydrationTaskRef.current = task.isActive() ? task : null;
+          return;
+        }
+
+        // 缓存未命中：解析文档并按分片/单步水合
+        let parsedDoc;
+        try {
+          parsedDoc = parser(value);
+        } catch (e) {
+          console.error("编辑器内容解析失败：", e);
+          const schema = view.state.schema;
+          const para = value
+            ? schema.nodes.paragraph.create(null, schema.text(value))
+            : schema.nodes.paragraph.create();
+          parsedDoc = schema.nodes.doc.create(null, para);
+        }
+
+        lastSyncedRef.current = value;
+        lastOutlineRef.current = null;
+        mountedDocRef.current = { filePath, revision, value, sourceMode: false };
+        initialSyncDoneRef.current = true;
+
+        // 缓存未命中：解析文档并按分片/单步水合。
+        // 选区用该 tab 记忆的编辑位置（夹紧到文档范围）：改前依赖 Editor 重挂后
+        // `useCursorStateRestore` 恢复，现在实例复用、effect 不会重跑，必须在这里带上。
+        const remembered = useWorkspace.getState().getCursorStateFor(filePath).pos;
+        const docSize = parsedDoc.content.size;
+        const restored = remembered == null ? 0 : Math.max(0, Math.min(remembered, docSize));
+
+        let task: HydrationTask | null = null;
+        task = startDocHydration({
+          view,
+          fullDoc: parsedDoc,
+          fromCache: false,
+          selection: { anchor: restored, head: restored },
+          historyState: undefined,
+          initialOutline: null,
+          chunkSize: HYDRATION_CHUNK_SIZE_FIRST_OPEN,
+          onComplete: () => {
+            if (hydrationTaskRef.current === task) {
+              hydrationTaskRef.current = null;
+            }
+            if (
+              !view.isDestroyed &&
+              mountedDocRef.current?.filePath === filePath &&
+              parsedDoc.childCount <= HYDRATION_CHUNK_SIZE_FIRST_OPEN
+            ) {
+              try {
+                lastSyncedRef.current = serializer(normalizeListPlaceholders(view.state.doc));
+              } catch {
+                // 保持原基线
+              }
+            }
+            queueAnchorResample();
+          },
+        });
+        hydrationTaskRef.current = task.isActive() ? task : null;
+      });
+    } catch (e) {
+      // 不允许静默：水合/插件异常会让「已切 tab」与「已挂载 doc」长期不一致
+      console.error("[editor] 切换 tab 的状态水合失败：", e);
+      onChangeRef.current = onChange;
+    }
+  }, [loading, getEditor, filePath, revision, sourceMode, onChange]);
+
+  // 订阅 openTabs：标签页关闭后立即释放对应缓存条目
+  useEffect(() => {
+    return useWorkspace.subscribe((state, prevState) => {
+      if (state.openTabs === prevState.openTabs) return;
+      const openPaths = new Set(state.openTabs.map((t) => t.path));
+      tabCacheRef.current?.prune(openPaths);
+    });
+  }, []);
+
+  // 组件销毁时取消任何在途分片水合与缓存
+  useEffect(() => {
+    return () => {
+      hydrationTaskRef.current?.cancel();
+      hydrationTaskRef.current = null;
+      tabCacheRef.current?.clear();
+    };
+  }, []);
+
+  // 锚点采样与滚动缓存：按 filePath 注册，初始采样延后至首帧绘制后，避免挂载同步重排（#426）
   useLayoutEffect(() => {
     if (loading || !getEditor()) return;
     const editor = getEditor();
@@ -321,8 +691,6 @@ function EditorInner({
             (view as EditorView & { scrollDOM?: HTMLElement }).scrollDOM ??
             view.dom.closest<HTMLElement>(".editor-scroll");
           if (scrollEl) {
-            wysiwygScrollTopRef.current = scrollEl.scrollTop;
-            wysiwygScrollHeightRef.current = scrollEl.scrollHeight;
             // 视口顶部块定位：posAtCoords 命中不透明 nodeview（内嵌 CM6 的
             // 代码块）时只能给出块边界位置（doc 根 depth=0），无法表达真实
             // 可见行。此时改用几何定位：在顶层块起始位置上二分（块顶坐标随
@@ -383,7 +751,7 @@ function EditorInner({
             };
             // #212：锚点采样器——在「几何现场读可靠」的时机执行：
             // 1) 切换指令触发时（setTabSourceMode 内经注册表调用，编辑器
-            //    仍可见）；2) 滚动停歇后（下方 debounce）；3) 本 effect 挂载时。
+            //    仍可见）；2) 滚动停歇后（下方 debounce）；3) 首帧 rAF 兜底。
             // 容器已塌陷（源码模式激活中，clientHeight=0）时直接跳过，
             // 防止把缓存污染成塌陷读数（scrollTop=0/scrollHeight≈0）。
             const sampleAnchor = () => {
@@ -392,16 +760,22 @@ function EditorInner({
               wysiwygScrollHeightRef.current = scrollEl.scrollHeight;
               cacheTopPos();
             };
-            sampleAnchor();
+            wysiwygScrollTopRef.current = 0;
+            wysiwygScrollHeightRef.current = 0;
+            wysiwygTopPosRef.current = 0;
+            let initialAnchorFrame = requestAnimationFrame(() => {
+              initialAnchorFrame = 0;
+              sampleAnchor();
+            });
+            // 水合完成后再采一次（首帧可能只有第一片，见 queueAnchorResample 注释）
+            resampleAnchorRef.current = sampleAnchor;
             registerWysiwygAnchorSampler(filePath, sampleAnchor);
-            // #212：滚动路径不再做任何几何读取（旧实现每滚动帧跑一次
-            // cacheTopPos：posAtCoords 内部 elementFromPoint 在懒挂载持续
-            // 脏化布局时每帧强制同步重排整篇文档，万行文档单次 6~32ms，
-            // 120Hz 预算 8.33ms 被吃满——正是本仓库 outline-tracker 在
-            // v2.3.3 弃用 posAtCoords 的同一教训）。锚点正确性由「切换指令
-            // 触发时同步采样」保证；滚动停歇后的补采仅作防御性保鲜——
-            // 停歇时机一次强制布局无掉帧顾虑，也符合「重建安排在滚动停歇
-            // 或 idle」的既定解法。
+
+            // 用户在分片水合期间交互时先同步补齐全文，确保编辑/点击落点准确。
+            // 细节（前缀命中跳过、只补齐本 view）见 hydration-interaction.ts。
+            const detachHydrationFlush = attachHydrationFlushOnInteraction(view);
+
+            // #212：滚动路径不再做任何几何读取
             let settleTimer: ReturnType<typeof setTimeout> | null = null;
             const onScroll = () => {
               if (settleTimer !== null) clearTimeout(settleTimer);
@@ -412,10 +786,15 @@ function EditorInner({
             };
             scrollEl.addEventListener("scroll", onScroll, { passive: true });
             cleanupScroll = () => {
+              if (initialAnchorFrame) cancelAnimationFrame(initialAnchorFrame);
+              if (resampleAnchorRef.current === sampleAnchor) {
+                resampleAnchorRef.current = () => {};
+              }
               if (settleTimer !== null) clearTimeout(settleTimer);
               settleTimer = null;
               unregisterWysiwygAnchorSampler(filePath);
               scrollEl.removeEventListener("scroll", onScroll);
+              detachHydrationFlush();
             };
           }
         });
@@ -423,12 +802,10 @@ function EditorInner({
         // ignore
       }
     }
-    onReady?.(getEditor);
     return () => {
       cleanupScroll?.();
-      onReady?.(null);
     };
-  }, [loading, getEditor, onReady]);
+  }, [loading, getEditor, filePath]);
 
   // #296：消费「打开文件后滚到锚点」的一次性登记。必须等编辑器就绪再消费（doc 为空时
   // 锚点表匹配不到）；消费即删，切 tab 重挂不会重复滚动。同文件自链接不经过这里——打开臂
@@ -449,7 +826,13 @@ function EditorInner({
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
         try {
-          editor.action((ctx) => scrollToAnchorInView(ctx.get(editorViewCtx), fragment));
+          editor.action((ctx) => {
+            const view = ctx.get(editorViewCtx);
+            // 只补齐本文档自己的编辑器（#431 评审）：全局 flush 会顺带把分屏另一侧
+            // 的大文档同步插完，把「打开文件定位」变成长任务。
+            flushActiveHydration(view);
+            scrollToAnchorInView(view, fragment);
+          });
         } catch {
           // 滚动失败不影响文件已打开
         }
@@ -485,6 +868,8 @@ function EditorInner({
   });
 
   // 点击编辑器空白区域时的光标定位（详见 editor-root-click.ts）
+  // 水合补齐已移进 `placeCursorForRootClick` 内部，按**被点击的那个 view** 作用域
+  // 执行（#431 评审）：这里无参调用会把分屏另一侧的剩余分片同步插入完。
   const handleRootMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
     const editor = getEditorRef.current();
     if (editor) placeCursorForRootClick(editor, e);
@@ -501,6 +886,9 @@ function EditorInner({
       if (!editor) return;
       editor.action((ctx) => {
         const view = ctx.get(editorViewCtx);
+        // 设置变更只影响本编辑器：按 view 补齐水合即可（#431 评审），
+        // 无参调用会把分屏另一侧的大文档同步插完。
+        flushActiveHydration(view);
         // 发送 recalc meta 触发公式编号重算（空 tr 本身不 docChanged，需 meta 显式触发）
         view.dispatch(view.state.tr.setMeta(formulaNumberingKey, { recalc: true }));
       });
@@ -521,9 +909,19 @@ function EditorInner({
       initialSyncDoneRef.current = true;
       return;
     }
-    if (value === lastSyncedRef.current) return;
+    if (
+      mountedDocRef.current &&
+      (mountedDocRef.current.filePath !== filePath ||
+        mountedDocRef.current.revision !== revision)
+    ) {
+      return;
+    }
+    if (value === lastSyncedRef.current || value === mountedDocRef.current?.value) return;
     const editor = getEditor();
     if (!editor) return;
+    hydrationTaskRef.current?.cancel();
+    hydrationTaskRef.current = null;
+    tabCacheRef.current?.delete(filePath);
     try {
       editor.action((ctx) => {
         const view = ctx.get(editorViewCtx);
@@ -534,6 +932,7 @@ function EditorInner({
         );
       });
       lastSyncedRef.current = value;
+      if (mountedDocRef.current) mountedDocRef.current.value = value;
     } catch (e) {
       // 解析失败时降级：清空编辑器并写入纯文本段落，避免异常冒泡导致白屏
       console.error("编辑器内容解析失败：", e);
@@ -548,16 +947,17 @@ function EditorInner({
           );
         });
         lastSyncedRef.current = value;
+        if (mountedDocRef.current) mountedDocRef.current.value = value;
       } catch {
         // 连降级都失败，放弃同步，交由 ErrorBoundary 兜底
       }
     }
-  }, [value, loading, getEditor, sourceMode]);
+  }, [value, loading, getEditor, sourceMode, filePath, revision]);
 
   // 编辑位置记忆：切 tab/打开文件时按 filePath 恢复光标和滚动位置。
   // 必须按本实例的 filePath 读取，不能读 activeTabPath：切 tab 时它已指向新文件（issue #30）。
   // sourceMode 翻转的那一次让位给 useSourceModeTransition（单一写者，issue #136）
-  useCursorStateRestore({ sourceMode, filePath, loading, getEditor });
+  useCursorStateRestore({ sourceMode, filePath, revision, loading, getEditor });
 
   // 降级模式：Milkdown 初始化失败，显示只读 textarea 展示原始 markdown
   if (fallback) {
@@ -603,10 +1003,12 @@ function EditorInner({
       )}
       {sourceMode && enterSnapshot && (
         <SourceModeEditor
+          key={filePath}
           filePath={filePath}
           value={value}
           onChange={(md) => {
             lastSyncedRef.current = md;
+            if (mountedDocRef.current) mountedDocRef.current.value = md;
             onChangeRef.current?.(md);
           }}
           initialCursor={enterSnapshot.cursor}
@@ -633,6 +1035,7 @@ function EditorInner({
  */
 export function MarkdownEditor({
   filePath,
+  revision = 0,
   value,
   onChange,
   onReady,
@@ -644,6 +1047,7 @@ export function MarkdownEditor({
     <MilkdownProvider>
       <EditorInner
         filePath={filePath}
+        revision={revision}
         value={value}
         onChange={onChange}
         onReady={onReady}

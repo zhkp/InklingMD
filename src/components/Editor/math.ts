@@ -142,12 +142,14 @@ export function createMathView(displayMode: boolean): NodeViewConstructor {
 
     let current = node;
     let editing = false;
+    let destroyed = false;
     let editor: HTMLTextAreaElement | null = null;
 
     // issue #168：katex 改为异步加载，render 以 seq 守卫发射——
     // 加载返回时若已有更新的 render（节点值快速变化），丢弃旧结果
     let renderSeq = 0;
     const render = (value: string, number: number | null) => {
+      if (destroyed) return;
       const seq = ++renderSeq;
       dom.setAttribute("data-value", value);
       // 空公式：显示占位提示，避免 KaTeX 渲染空字符串导致节点不可见
@@ -160,7 +162,7 @@ export function createMathView(displayMode: boolean): NodeViewConstructor {
       }
       dom.classList.remove("math-empty");
       void loadKatex().then((katex) => {
-        if (seq !== renderSeq) return; // 已被后续渲染取代
+        if (destroyed || seq !== renderSeq) return; // 已销毁或已被后续渲染取代
         // display 公式启用自动编号时追加 \tag{n}（用户手写 \tag 时不覆盖）
         let expr = value;
         if (displayMode && number != null && !/\\tag\b/.test(value)) {
@@ -264,6 +266,9 @@ export function createMathView(displayMode: boolean): NodeViewConstructor {
       // 编辑中拦截事件避免 ProseMirror 抢焦点
       stopEvent: () => editing,
       ignoreMutation: () => true,
+      destroy: () => {
+        destroyed = true;
+      },
     };
   };
 }

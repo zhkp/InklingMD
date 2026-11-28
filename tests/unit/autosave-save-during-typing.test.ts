@@ -14,6 +14,7 @@ vi.mock("@tauri-apps/api/core", () => ({ isTauri: () => true }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ save: vi.fn(), message: vi.fn(), ask: vi.fn() }));
 vi.mock("../../src/components/Editor/markdown-publisher", () => ({
   flushAllMarkdownPublishers: vi.fn(),
+  flushMarkdownPublishersForPath: vi.fn(),
 }));
 vi.mock("../../src/lib/fs", () => ({
   saveDocument: saveDocumentMock,

@@ -13,6 +13,14 @@ import type { EolStyle } from "../../lib/eol";
 export interface OpenTab {
   /** 文件完整路径（未命名草稿用 untitled-N 虚拟路径） */
   path: string;
+  /**
+   * 文档身份（#431 评审）：路径会因「另存为 / 外部改名」变化，但文档还是同一份；
+   * 异步任务必须用它判断目标身份，不能用 path 代替。运行期字段，不持久化。
+   *
+   * 所有生产创建路径（openFile / newTab / 崩溃恢复）都必须赋值；缺失只可能来自
+   * 测试夹具或未登记的降级路径，消费方按「无身份 → 退回路径判等」处理。
+   */
+  docId?: string;
   /** 文件内容 */
   content: string;
   /** 是否未保存 */

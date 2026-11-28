@@ -58,8 +58,8 @@ export function SplitPane({
       >
         <EditorErrorBoundary fileName={file}>
           <MarkdownEditor
-            key={`${file}-${revision}`}
             filePath={file}
+            revision={revision}
             value={content}
             onChange={(md) =>
               useWorkspace.getState().setSplitContentFor(file, md)
