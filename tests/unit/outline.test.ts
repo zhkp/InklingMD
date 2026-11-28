@@ -241,6 +241,9 @@ describe("Issue #382 outline inline text cleanup", () => {
       "# [a [b] c](u)",
       "# [![alt](img.png)](u)",
       "# [未闭合](u",
+      "# a*©*b",
+      "# a*+*b",
+      "# C++ *and* Rust",
     ].join("\n");
     const expected = [
       "2 * 3 * 4 = 24",
@@ -271,6 +274,9 @@ describe("Issue #382 outline inline text cleanup", () => {
       "a [b] c",
       "alt",
       "[未闭合](u",
+      "a*©*b",
+      "a*+*b",
+      "C++ and Rust",
     ];
 
     // 渲染口径由 mdast-util-from-markdown 实测给出：两侧有空白的定界符不能开/闭，

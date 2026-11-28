@@ -269,6 +269,13 @@ export function findSourceModeHeadingOffset(
 const INLINE_TEXT_SENTINEL = "\u0000";
 
 const WHITESPACE_PATTERN = /\s/u;
+
+/**
+ * 强调的「标点」判定，必须与渲染器一致：micromark 的实现是
+ * `unicodePunctuation = /\p{P}|\p{S}/u`（**含符号 `\p{S}`**，与 CommonMark 规范正文里
+ * 只列 `\p{P}` 不同，micromark 自己的注释也没提符号）。
+ * 因此 `a*©*b`、`a*+*b` 在 Milkdown 里不成强调、`*` 原样保留；改成纯 `\p{P}` 会与渲染口径相反。
+ */
 const PUNCTUATION_PATTERN = /[\p{P}\p{S}]/u;
 
 interface DelimiterRun {
