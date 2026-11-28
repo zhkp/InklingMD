@@ -18,6 +18,19 @@ export const DRAFT_DEBOUNCE_MS = 1_200;
 
 /** 设计 §8.3：桌面单条草稿上限，按**序列化后的 JSON** 的 UTF-8 字节计（信封也计入） */
 export const DRAFT_MAX_BYTES = 10 * 1024 * 1024;
+/** 设计 §8.3：桌面临时草稿总量上限；超了只淘汰「已 handled 的 crashed 会话副本」 */
+const DRAFT_TOTAL_BYTES = 32 * 1024 * 1024;
+let maxDraftTotalBytes = DRAFT_TOTAL_BYTES;
+
+/** 当前生效的总量上限（配额检查用它，测试可缩小） */
+export function draftTotalBytes(): number {
+  return maxDraftTotalBytes;
+}
+
+/** 单测用：缩小总量上限，避免为了越过 32MB 在测试里造几十兆正文 */
+export function __setDraftTotalBytes(next: number | null): void {
+  maxDraftTotalBytes = next ?? DRAFT_TOTAL_BYTES;
+}
 /** 提示文案用的是设计口径（10MB），故意不跟随 `__setDraftMaxBytes` 的测试注入 */
 const DRAFT_MAX_MB = DRAFT_MAX_BYTES / (1024 * 1024);
 
@@ -232,6 +245,7 @@ export async function writeDraftNow(
   try {
     // `draftFileKey` 用 `encodeURIComponent`：孤立代理项等非法路径会抛 URIError。
     // 放进 try 内，让这种路径只表现为「这条草稿没写成」，而不是让 flushAllDrafts 整体 reject。
+    const now = Date.now();
     const draft: DraftFile = {
       version: 1,
       draftId: draftFileKey(tab.path),
@@ -241,7 +255,7 @@ export async function writeDraftNow(
       title: tab.title ?? tab.path.split(/[\\/]/).pop() ?? tab.path,
       content: tab.content,
       pinned: false,
-      updatedAt: Date.now(),
+      updatedAt: now,
     };
     const payload = JSON.stringify(draft);
     // 设计 §8.3 的 10MB 按**序列化后的 JSON** 计：信封（tabPath / title / 时间戳）

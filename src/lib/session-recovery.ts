@@ -22,6 +22,7 @@ import {
   currentSessionId,
   currentWindowLabel,
   draftFileKey,
+  draftTotalBytes,
   ensureWindowLabel,
 } from "./draft-journal";
 import { detectEol } from "./eol";
@@ -83,7 +84,9 @@ export interface CrashedSession {
 interface RecoveryDirEntry {
   name: string;
   isDir: boolean;
-  /** 文件 mtime（微秒）：旧归档缺 `archivedAt` 时用它判龄。size 属配额片，本片不取 */
+  /** 文件字节数：总量配额用它求和（`list_dir_files` 本来就返回） */
+  size?: number;
+  /** 文件 mtime（微秒）：旧归档缺 `archivedAt` 时用它判龄 */
   mtimeUs?: number;
 }
 
@@ -116,7 +119,12 @@ const defaultIo: RecoveryIo = {
     // `list_dir_files` 只列一层，正好是草稿目录需要的粒度（`drafts/*.json`）
     const { listDirFiles } = await import("./fs");
     const entries = await listDirFiles(path);
-    return entries.map((e) => ({ name: e.name, isDir: e.isDir, mtimeUs: e.mtimeUs }));
+    return entries.map((e) => ({
+      name: e.name,
+      isDir: e.isDir,
+      size: e.size,
+      mtimeUs: e.mtimeUs,
+    }));
   },
   async deletePath(path) {
     const { deletePath } = await import("./fs");
@@ -699,6 +707,128 @@ export async function cleanupExpiredDrafts(
         }
       }
     }
+  }
+  // 启动清理顺带做一次总量校准：上一次会话可能留下超过 32MB 的副本
+  await enforceDraftQuota();
+  return removed;
+}
+
+/**
+ * 草稿的 LRU 排序键：`updatedAt`（最近一次写入）。
+ *
+ * 设计写的是 last-access，但候选只包含「用户已处理过、副本因删除失败留下的」crashed
+ * 会话草稿——处理之后不会再有访问把它推新；启动时的列表读取若刷新时间戳，反而会把
+ * 全部候选重置成当前时间、让 LRU 失效。对这批只写不读的副本，写入时间就是最后活跃
+ * 时间，故直接用 `updatedAt`，不再维护一个与它恒等的镜像字段。
+ */
+function draftAccessTime(draft: RecoverableDraft): number {
+  return draft.updatedAt;
+}
+
+/**
+ * 总量配额（#409 第二片）：`drafts/` 总字节超过 32MB 时，按最近写入时间（LRU）淘汰
+ * **已 handled 的 crashed 会话副本**。返回删除条数。
+ *
+ * 白名单（永不淘汰）：本次会话的未保存副本（用户还在编辑）、`pinned`、
+ * 未被用户处理过的 crash 副本、没有归档归属的孤儿（无法判定是否已处理）。
+ * 只删文件、不回写归档账本：`handledDraftIds` 记录的是「用户已处理」，
+ * 副本被淘汰不代表处理事实失效；归档回收另有 `drafts/` 残留检查兜底。
+ *
+ * 成本控制：先用一次 `listDir` 求和；**没超上限就直接返回**，不读任何草稿正文。
+ */
+export async function enforceDraftQuota(): Promise<number> {
+  if (!isTauri()) return 0;
+  let draftsDir: string;
+  let sizes: Map<string, number>;
+  let total = 0;
+  try {
+    const paths = await sessionPaths();
+    draftsDir = paths.drafts;
+    const entries = (await io.listDir(draftsDir)).filter(
+      (e) => !e.isDir && e.name.endsWith(".json"),
+    );
+    // 只统计拿到真实字节数的条目：缺 size 的条目既不能算总量、也不能当候选
+    // （兜成 0 会让「删了却不减总量」，进而多删后面的候选）
+    sizes = new Map(
+      entries
+        .filter((e) => Number.isFinite(e.size) && Number(e.size) >= 0)
+        .map((e) => [e.name, Number(e.size)] as const),
+    );
+    for (const size of sizes.values()) total += size;
+  } catch (err) {
+    // 列不出目录就算不出总量：宁可这次不淘汰，也不能凭猜测删副本
+    console.warn("[recovery] 读取草稿目录失败，跳过总量配额检查:", err);
+    return 0;
+  }
+  if (total <= draftTotalBytes()) return 0;
+
+  // 超了才需要会话归属：枚举不完整时可能漏算/漏判，直接放弃这次淘汰
+  const { drafts, enumerated } = await listDraftsDetailed();
+  if (!enumerated) {
+    console.warn("[recovery] 草稿枚举不完整，跳过总量配额淘汰");
+    return 0;
+  }
+  const current = currentSessionId();
+  const archives = await crashedFiles();
+  const handledBySession = new Map<string, Set<string>>();
+  for (const { data } of archives) {
+    if (!data.sessionId) continue;
+    const set = handledBySession.get(data.sessionId) ?? new Set<string>();
+    for (const p of data.handledDraftIds ?? []) {
+      if (typeof p === "string" && p.length > 0) set.add(p);
+    }
+    handledBySession.set(data.sessionId, set);
+  }
+
+  const sep = sepOf(draftsDir);
+  const candidates: Array<{ file: string; size: number; access: number }> = [];
+  for (const draft of drafts) {
+    if (!draft.sessionId || draft.sessionId === current || draft.pinned) continue;
+    if (!handledBySession.get(draft.sessionId)?.has(draft.tabPath)) continue;
+    let key: string;
+    try {
+      key = draftFileKey(draft.tabPath);
+    } catch (err) {
+      // 坏路径算不出文件名：跳过，不因为一条坏数据中断整轮淘汰
+      console.warn("[recovery] 草稿路径无法映射为文件名，跳过总量淘汰:", draft.tabPath, err);
+      continue;
+    }
+    const size = sizes.get(`${key}.json`);
+    if (size === undefined) continue;
+    candidates.push({ file: `${draftsDir}${sep}${key}.json`, size, access: draftAccessTime(draft) });
+  }
+
+  // 最久未访问的先淘汰；删到刚好回到上限内即停，不多删
+  candidates.sort((a, b) => a.access - b.access);
+  let removed = 0;
+  for (const candidate of candidates) {
+    if (total <= draftTotalBytes()) break;
+    // 文件名只由 tabPath 决定，跨会话同名：枚举快照之后该 path 可能已被本次会话
+    // 重新写出（防抖写会覆盖同一文件）。删之前再确认一次归属，避免删掉刚写的新副本。
+    try {
+      const raw = await io.readTextFile(candidate.file);
+      const parsed = JSON.parse(raw) as { sessionId?: unknown };
+      if (parsed?.sessionId === current) {
+        console.warn("[recovery] 候选草稿已被本次会话重写，跳过淘汰:", candidate.file);
+        continue;
+      }
+    } catch (err) {
+      // 读不出来（已被删/损坏）就不动它：宁可总量多留，也不删无法确认归属的文件
+      console.warn("[recovery] 候选草稿无法复核归属，跳过淘汰:", candidate.file, err);
+      continue;
+    }
+    try {
+      await io.deletePath(candidate.file);
+      total -= candidate.size;
+      removed += 1;
+    } catch (err) {
+      // 删不掉就跳过：总量可能仍超，但不能因此中断或抛给调用方
+      console.warn("[recovery] 草稿淘汰失败，保留到下次配额检查:", candidate.file, err);
+    }
+  }
+  if (removed > 0) {
+    const mb = Math.round(draftTotalBytes() / (1024 * 1024));
+    console.warn(`[recovery] 草稿总量超过 ${mb}MB，已淘汰 ${removed} 份已处理的崩溃副本`);
   }
   return removed;
 }
