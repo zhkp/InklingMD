@@ -268,6 +268,11 @@ export function findSourceModeHeadingOffset(
  */
 const INLINE_TEXT_SENTINEL = "\u0000";
 
+const INLINE_TEXT_PLACEHOLDER_PATTERN = new RegExp(
+  `${INLINE_TEXT_SENTINEL}(\\d+)${INLINE_TEXT_SENTINEL}`,
+  "g",
+);
+
 const WHITESPACE_PATTERN = /\s/u;
 
 /**
@@ -450,12 +455,26 @@ function stripEmphasisDelimiters(raw: string): string {
 /**
  * 摘出行内代码段：定界符必须是等长的反引号串（`` ``a*b`` `` 用两个反引号），
  * 内容按 CommonMark 规则「首尾各有一个空格时各去掉一个」后按字面量保留。
+ *
+ * `protect` 同时接收可见内容与代码段原文（含定界符）：引用标签匹配需要原文写法。
+ * 被反斜杠转义的反引号（`\``）按字面量处理，不能开启代码段。
  */
-function protectInlineCode(raw: string, protect: (value: string) => string): string {
+function protectInlineCode(
+  raw: string,
+  protect: (visible: string, source: string) => string,
+): string {
   let result = "";
   let index = 0;
   while (index < raw.length) {
     if (raw[index] !== "`") {
+      result += raw[index];
+      index += 1;
+      continue;
+    }
+    let backslashes = 0;
+    for (let i = index - 1; i >= 0 && raw[i] === "\\"; i -= 1) backslashes += 1;
+    if (backslashes % 2 === 1) {
+      // 奇数个反斜杠表示该反引号被转义：按字面量保留，交给后续转义还原。
       result += raw[index];
       index += 1;
       continue;
@@ -494,7 +513,7 @@ function protectInlineCode(raw: string, protect: (value: string) => string): str
     ) {
       content = content.slice(1, -1);
     }
-    result += protect(content);
+    result += protect(content, raw.slice(index, closeStart + fenceLength));
     index = closeStart + fenceLength;
   }
   return result;
@@ -609,9 +628,15 @@ function matchDefinitionLabel(line: string, nextLine: string | undefined): strin
  * - 行内链接/图片：目标地址按 Markdown 语法扫描（不是 `[^)]*`），
  *   否则 `[guide](https://example.com/path_(part))` 会在内层 `)` 处截断、多留一个 `)`；
  * - 引用式链接/图片：`[text][ref]`、`[text][]`、`[text]`，只有在 `linkLabels`
- *   里能找到对应定义时才脱壳（定义表由文档整体扫描得到）。
+ *   里能找到对应定义时才脱壳（定义表由文档整体扫描得到）；
+ * - `normalizeLabel` 负责把清洗管线的占位符还原成标签的原始写法再归一化：
+ *   标签匹配按原始字符（含反斜杠转义）进行，`[a\!b]` 与 `[a!b]` 不算同一标签。
  */
-function stripLinkSyntax(raw: string, linkLabels: ReadonlySet<string>): string {
+function stripLinkSyntax(
+  raw: string,
+  linkLabels: ReadonlySet<string>,
+  normalizeLabel: (label: string) => string,
+): string {
   let result = "";
   let index = 0;
   while (index < raw.length) {
@@ -637,9 +662,9 @@ function stripLinkSyntax(raw: string, linkLabels: ReadonlySet<string>): string {
       const labelEnd = findMatchingPair(raw, textEnd + 1, "[", "]");
       if (labelEnd >= 0) {
         const label = labelEnd === textEnd + 2 ? inner : raw.slice(textEnd + 2, labelEnd);
-        if (linkLabels.has(normalizeLinkLabel(label))) consumedTo = labelEnd;
+        if (linkLabels.has(normalizeLabel(label))) consumedTo = labelEnd;
       }
-    } else if (linkLabels.has(normalizeLinkLabel(inner))) {
+    } else if (linkLabels.has(normalizeLabel(inner))) {
       consumedTo = textEnd;
     }
 
@@ -652,7 +677,7 @@ function stripLinkSyntax(raw: string, linkLabels: ReadonlySet<string>): string {
     const isImage = index > 0 && raw[index - 1] === "!" && result.endsWith("!");
     if (isImage) result = result.slice(0, -1);
     // 链接文本里可能还有语法（`[![alt](img.png)](url)`），递归清洗
-    result += stripLinkSyntax(inner, linkLabels);
+    result += stripLinkSyntax(inner, linkLabels, normalizeLabel);
     index = consumedTo + 1;
   }
   return result;
@@ -662,13 +687,23 @@ function stripLinkSyntax(raw: string, linkLabels: ReadonlySet<string>): string {
  * 保留纯文本，与富文本 ProseMirror 渲染的标题文本一致。
  *
  * `linkLabels` 是全文链接引用定义的标签集合：`[text][ref]` / `[text]` 只有在定义存在时才算链接。
+ * 标签按原文写法匹配（`[a\!b]` 与 `[a!b]` 是不同标签），可见文本仍按转义还原。
  */
 function cleanMarkdownText(raw: string, linkLabels: ReadonlySet<string>): string {
-  const placeholders: string[] = [];
-  const protect = (value: string): string => {
-    placeholders.push(value);
+  // visible = 还原到可见文本时的值；source = 在原文中的写法。
+  // 引用标签必须按 source 匹配：`[a\!b]` 与 `[a!b]` 在渲染器里是不同标签。
+  const placeholders: Array<{ visible: string; source: string }> = [];
+  const protect = (visible: string, source: string): string => {
+    placeholders.push({ visible, source });
     return `${INLINE_TEXT_SENTINEL}${placeholders.length - 1}${INLINE_TEXT_SENTINEL}`;
   };
+  const decodeSource = (value: string): string =>
+    value.replace(
+      INLINE_TEXT_PLACEHOLDER_PATTERN,
+      (_match, index: string) => placeholders[Number(index)].source,
+    );
+  const normalizeLabel = (label: string): string =>
+    normalizeLinkLabel(decodeSource(label));
 
   // 先摘出行内代码（内容按字面量渲染），再摘转义字符，最后才处理链接/图片，
   // 这样 `\*`、`\[`、代码里的 `[a](b)` 都不会被当成语法。
@@ -676,9 +711,10 @@ function cleanMarkdownText(raw: string, linkLabels: ReadonlySet<string>): string
     protectInlineCode(raw, protect).replace(
       // CommonMark 的 ASCII 标点转义：`\*`、`\"`、`\#` 等都渲染成字面量
       /\\([!"#$%&'()*+,\-./:;<=>?@[\\\]^_`{|}~])/g,
-      (_match, ch: string) => protect(ch),
+      (match, ch: string) => protect(ch, match),
     ),
     linkLabels,
+    normalizeLabel,
   );
 
   const cleaned = stripEmphasisDelimiters(withoutProtected)
@@ -688,8 +724,8 @@ function cleanMarkdownText(raw: string, linkLabels: ReadonlySet<string>): string
   // 占位符不是空白字符，所以还原后要再 trim 一次：内容只有空白的标题不算可见标题。
   return cleaned
     .replace(
-      new RegExp(`${INLINE_TEXT_SENTINEL}(\\d+)${INLINE_TEXT_SENTINEL}`, "g"),
-      (_match, index: string) => placeholders[Number(index)],
+      INLINE_TEXT_PLACEHOLDER_PATTERN,
+      (_match, index: string) => placeholders[Number(index)].visible,
     )
     .trim();
 }

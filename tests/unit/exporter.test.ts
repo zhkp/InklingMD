@@ -187,6 +187,38 @@ describe("exporter lib unit tests", () => {
     );
   });
 
+  it("exportOutline 引用标签含转义标点时按原始写法匹配", async () => {
+    useWorkspace.setState({
+      currentContent: [
+        "# [escaped][a\\!b]",
+        "## [a\\!b]",
+        "",
+        "[a\\!b]: https://example.com/a",
+      ].join("\n"),
+      currentFile: "/notes/escaped-ref.md",
+    });
+
+    const download = captureOutlineDownload();
+    await exportOutline();
+
+    expect(download.blobs).toHaveLength(1);
+    expect(await download.blobs[0].text()).toBe(
+      [
+        "# escaped-ref 目录",
+        "",
+        "- escaped",
+        "  - a!b",
+        "",
+        "---",
+        "",
+        "## 原始标题结构",
+        "",
+        "# escaped",
+        "## a!b",
+      ].join("\n"),
+    );
+  });
+
   it("exportOutline 按全文链接定义表解析引用式链接", async () => {
     useWorkspace.setState({
       currentContent: [

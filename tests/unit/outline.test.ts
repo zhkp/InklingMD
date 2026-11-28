@@ -318,6 +318,26 @@ describe("Issue #382 outline inline text cleanup", () => {
     expect(parseOutline(md).map(({ text }) => text)).toEqual(expected);
   });
 
+  it("转义反引号按字面量保留，不被当作行内代码定界符", () => {
+    const md = [
+      "# a \\`b\\` c",
+      "# a \\\\`code` b",
+      "# a \\` `code` b",
+      "# a `code \\` b` c",
+      "# a \\``` b",
+    ].join("\n");
+    const expected = [
+      "a `b` c",
+      "a \\code b",
+      "a ` code b",
+      "a code \\ b` c",
+      "a ``` b",
+    ];
+
+    expect(extractMarkdownOutline(md).map(({ text }) => text)).toEqual(expected);
+    expect(parseOutline(md).map(({ text }) => text)).toEqual(expected);
+  });
+
   it("跨行链接定义（目标写在下一行）同样生效", () => {
     const md = [
       "# [text][ref]",
@@ -331,6 +351,41 @@ describe("Issue #382 outline inline text cleanup", () => {
       "[none]:",
     ].join("\n");
     const expected = ["text", "angle", "[missing][none]"];
+
+    expect(extractMarkdownOutline(md).map(({ text }) => text)).toEqual(expected);
+    expect(parseOutline(md).map(({ text }) => text)).toEqual(expected);
+  });
+
+  it("引用标签按原始写法匹配（转义标点、行内代码）", () => {
+    const md = [
+      "# [text][a\\!b]",
+      "# [a\\!b][]",
+      "# [a\\!b]",
+      "# [text][a\\!b\\*c]",
+      "# [text][a\\[b\\]]",
+      "# [text][a `b` c]",
+      "# [a `b` c]",
+      "# ![alt][a\\!b]",
+      "# [plain-miss][a!b]",
+      "",
+      "[a\\!b]: https://example.com/a",
+      "[a\\!b\\*c]: https://example.com/b",
+      "[a\\[b\\]]: https://example.com/c",
+      "[a `b` c]: https://example.com/d",
+    ].join("\n");
+    // 渲染口径：标签按原始写法（含反斜杠转义）匹配，转义与未转义不算同一标签；
+    // 未命中时整体按字面量保留（转义字符仍按可见文本还原）。
+    const expected = [
+      "text",
+      "a!b",
+      "a!b",
+      "text",
+      "text",
+      "text",
+      "a b c",
+      "alt",
+      "[plain-miss][a!b]",
+    ];
 
     expect(extractMarkdownOutline(md).map(({ text }) => text)).toEqual(expected);
     expect(parseOutline(md).map(({ text }) => text)).toEqual(expected);
