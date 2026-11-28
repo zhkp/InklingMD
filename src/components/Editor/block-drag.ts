@@ -116,14 +116,27 @@ export const blockDragPlugin = () =>
             typeof hydration.appendFromPos === "number"
           ) {
             let decos = value.decos.map(tr.mapping, newState.doc);
+            // 拖拽中的目标索引必须跨水合分片保留（#431 评审）：追加只发生在文档尾部，
+            // 已有块的索引不变；若在这里清成 null，分片恰好在 dragover 与 drop 之间
+            // 到达时，drop 会回退到索引 0，把块移到文档开头。
+            const nextDropIndex = value.dropIndex;
+            const olds = decos.find(
+              undefined,
+              undefined,
+              (spec) => (spec as { indicator?: boolean }).indicator === true,
+            );
+            if (olds.length) decos = decos.remove(olds);
             const adds: Decoration[] = [];
+            if (nextDropIndex != null) {
+              adds.push(indicatorDecoration(indicatorPos(newState.doc, nextDropIndex)));
+            }
             let pos = hydration.appendFromPos;
             for (let i = hydration.appendFromIndex; i < newState.doc.childCount; i += 1) {
               adds.push(handleDecoration(pos));
               pos += newState.doc.child(i).nodeSize;
             }
             if (adds.length) decos = decos.add(newState.doc, adds);
-            return { dropIndex: null, decos, doc: newState.doc };
+            return { dropIndex: nextDropIndex, decos, doc: newState.doc };
           }
           return {
             dropIndex: null,
