@@ -18,7 +18,7 @@ export interface MarkdownPublisherDeps {
   getFilePath: () => string;
 }
 
-const publisherKey = new PluginKey<{ skipSeq: number }>("inkling-markdown-publisher");
+const publisherKey = new PluginKey<{ userDocSeq: number }>("inkling-markdown-publisher");
 
 /**
  * 只改运行时属性、不改变 Markdown 输出的同步事务标记（如公式编号 number attr）。
@@ -76,21 +76,23 @@ export const markdownPublisherPlugin = (deps: MarkdownPublisherDeps) =>
   new Plugin({
     key: publisherKey,
     state: {
-      init: () => ({ skipSeq: 0 }),
+      init: () => ({ userDocSeq: 0 }),
       apply: (tr, prev) => {
-        if (
+        const skip = Boolean(
           tr.getMeta(hydrationMetaKey)?.hydrating ||
-          isHeadingIdSyncTr(tr) ||
-          tr.getMeta(SKIP_MARKDOWN_PUBLISH_META) === true
-        ) {
-          return { skipSeq: prev.skipSeq + 1 };
-        }
-        return prev;
+            isHeadingIdSyncTr(tr) ||
+            tr.getMeta(SKIP_MARKDOWN_PUBLISH_META) === true,
+        );
+        // 用户文档变更单独计数（#431 评审 P1）：一次 view 更新可能同时包含用户编辑
+        // 事务与 heading-id 补写事务（appendTransaction 同批应用）。只跳过后者的
+        // 序列化，不能把同批的用户编辑一起吞掉，否则保存/切 tab 前 store 里是旧内容。
+        if (skip || !tr.docChanged) return prev;
+        return { userDocSeq: prev.userDocSeq + 1 };
       },
     },
     view: (view) => {
       let timer: ReturnType<typeof setTimeout> | null = null;
-      let lastSkipSeq = publisherKey.getState(view.state)?.skipSeq ?? 0;
+      let lastUserDocSeq = publisherKey.getState(view.state)?.userDocSeq ?? 0;
       // 打开文件时以「解析后 doc 的实际序列化结果」为基线，而非原始文件内容。
       // 否则编辑器初始化的首个 flush 会因序列化规范化差异（如末尾换行）把
       // 从未编辑的文档误判为变更、经 onChange 标 dirty，导致关闭 tab 时
@@ -128,7 +130,7 @@ export const markdownPublisherPlugin = (deps: MarkdownPublisherDeps) =>
       };
       tabCancelTimers.set(view as EditorView, () => {
         cancelTimer();
-        lastSkipSeq = publisherKey.getState(view.state)?.skipSeq ?? lastSkipSeq;
+        lastUserDocSeq = publisherKey.getState(view.state)?.userDocSeq ?? lastUserDocSeq;
       });
       view.dom.addEventListener("blur", flush);
       pendingFlushes.set(view as EditorView, {
@@ -137,11 +139,13 @@ export const markdownPublisherPlugin = (deps: MarkdownPublisherDeps) =>
       });
       return {
         update: (nextView, prevState) => {
-          const skipSeq = publisherKey.getState(nextView.state)?.skipSeq ?? lastSkipSeq;
-          if (skipSeq !== lastSkipSeq) {
-            lastSkipSeq = skipSeq;
-            return;
-          }
+          const userDocSeq =
+            publisherKey.getState(nextView.state)?.userDocSeq ?? lastUserDocSeq;
+          const userEdited = userDocSeq !== lastUserDocSeq;
+          lastUserDocSeq = userDocSeq;
+          // 本批没有用户文档变更（纯水合 / heading-id 补写 / 编号 recalc / 选区移动）：
+          // 不发布。同一批若还带了用户编辑，userDocSeq 已变化，照常发布。
+          if (!userEdited) return;
           if (nextView.state.doc === prevState.doc) return;
           if (timer) clearTimeout(timer);
           timer = setTimeout(flush, 150);

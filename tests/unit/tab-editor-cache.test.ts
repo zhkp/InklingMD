@@ -8,7 +8,7 @@
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Schema } from "@milkdown/kit/prose/model";
-import { EditorState, TextSelection, type Plugin } from "@milkdown/kit/prose/state";
+import { EditorState, Plugin, TextSelection } from "@milkdown/kit/prose/state";
 import { EditorView } from "@milkdown/kit/prose/view";
 import {
   createTabEditorCache,
@@ -393,6 +393,45 @@ describe("水合事务不触发多余工作（#426）", () => {
     view.dispatch(view.state.tr.insertText("z", 1));
     vi.advanceTimersByTime(200);
     expect(serialize).toHaveBeenCalledTimes(1);
+    view.destroy();
+  });
+
+  it("heading-id 补写与用户编辑同批到达：用户编辑仍必须发布（#431 评审 P1）", () => {
+    vi.useFakeTimers();
+    const onChange = vi.fn();
+    const serialize = vi.fn(() => "md-heading-edit");
+    // 上游 syncHeadingIdPlugin 的形态：appendTransaction 在**同一次 view 更新**里
+    // 追加只改 heading id 的事务——跳过序列化只能作用于这条补写事务本身
+    const headingIdSyncPlugin = new Plugin({
+      appendTransaction: (trs, _oldState, newState) => {
+        if (!trs.some((tr) => tr.docChanged)) return null;
+        return newState.tr.setMeta("MILKDOWN_HEADING_ID", true);
+      },
+    });
+    const publisher = markdownPublisherPlugin({
+      serialize,
+      getLastSynced: () => "md-0",
+      setLastSynced: () => {},
+      getFilePath: () => "/docs/note.md",
+      onChange,
+    });
+    const state = EditorState.create({
+      doc: makeDoc(3),
+      plugins: [publisher, headingIdSyncPlugin],
+    });
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    const view = new EditorView(root, { state });
+    serialize.mockClear();
+
+    // 用户编辑 heading 文本；补 id 事务在同批应用
+    view.dispatch(view.state.tr.insertText("H", 1));
+    vi.advanceTimersByTime(600);
+
+    // 同批的用户编辑不能被补写事务一起吞掉：必须发布，否则保存/切 tab 前
+    // store 里还是旧内容（P1 数据丢失）
+    expect(serialize).toHaveBeenCalledTimes(1);
+    expect(onChange).toHaveBeenCalledWith("md-heading-edit");
     view.destroy();
   });
 

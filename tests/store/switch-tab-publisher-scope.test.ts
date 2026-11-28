@@ -1,10 +1,13 @@
 // store 切 tab 的 Markdown 发布 flush 必须按 departing path 收敛（#431 评审 B7）
 //
-// 真实 publisher 插件（真实防抖/flush 路径）+ store.switchTab：
+// 真实 publisher 插件 + 真实 EditorState/EditorView + store.switchTab：
 // 主面板切 tab 时，只应发布即将切离的文档；分屏仍停在自己的文件上，
 // 其待发编辑不得被本次切 tab 同步序列化。
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { Schema } from "@milkdown/kit/prose/model";
+import { EditorState } from "@milkdown/kit/prose/state";
+import { EditorView } from "@milkdown/kit/prose/view";
 import { markdownPublisherPlugin } from "../../src/components/Editor/markdown-publisher";
 import { useWorkspace } from "../../src/store/workspace";
 
@@ -13,13 +16,24 @@ vi.mock("@tauri-apps/api/core", () => ({
   convertFileSrc: (path: string) => path,
 }));
 
-interface FakeDoc {
-  id: number;
-}
+const schema = new Schema({
+  nodes: {
+    doc: { content: "paragraph+" },
+    paragraph: {
+      content: "text*",
+      toDOM: () => ["p", 0],
+      parseDOM: [{ tag: "p" }],
+    },
+    text: { group: "inline" },
+  },
+});
+
+const views: EditorView[] = [];
 
 function registerPublisher(filePath: string) {
   const onChange = vi.fn();
-  const serialize = vi.fn((doc: unknown) => `${filePath}#${(doc as FakeDoc).id}`);
+  let markdown = `${filePath}#0`;
+  const serialize = vi.fn(() => markdown);
   const plugin = markdownPublisherPlugin({
     serialize,
     getLastSynced: () => `${filePath}#0`,
@@ -29,21 +43,18 @@ function registerPublisher(filePath: string) {
   });
   const dom = document.createElement("div");
   document.body.append(dom);
-  const view = { dom, state: { doc: { id: 0 } as FakeDoc } };
-  const pluginView = plugin.spec.view?.(view as never) as unknown as {
-    update: (next: never, prev: never) => void;
-    destroy: () => void;
-  };
+  const doc = schema.nodes.doc.create(null, schema.nodes.paragraph.create());
+  const view = new EditorView(dom, {
+    state: EditorState.create({ doc, plugins: [plugin] }),
+  });
+  views.push(view);
   serialize.mockClear();
   const bump = (id: number) => {
-    const prevState = { doc: view.state.doc };
-    view.state.doc = { id };
-    pluginView.update(
-      { state: { doc: view.state.doc } } as never,
-      prevState as never,
-    );
+    markdown = `${filePath}#${id}`;
+    // 真实用户编辑：产生 doc 变更事务，进入发布防抖窗口
+    view.dispatch(view.state.tr.insertText("x", view.state.selection.from));
   };
-  return { onChange, serialize, pluginView, bump };
+  return { onChange, serialize, view, bump };
 }
 
 beforeEach(() => {
@@ -61,6 +72,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  for (const v of views.splice(0)) v.destroy();
   vi.useRealTimers();
   document.body.innerHTML = "";
 });
@@ -84,8 +96,5 @@ describe("switchTab 的 publisher flush 作用域（#431 评审 B7）", () => {
     vi.advanceTimersByTime(200);
     expect(split.onChange).toHaveBeenCalledTimes(1);
     expect(split.onChange).toHaveBeenCalledWith("/docs/split.md#1");
-
-    main.pluginView.destroy();
-    split.pluginView.destroy();
   });
 });
