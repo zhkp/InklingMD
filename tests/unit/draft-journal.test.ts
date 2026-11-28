@@ -36,6 +36,7 @@ import { writeTextFile } from "../../src/lib/fs";
 import {
   __resetSession,
   __setDraftMaxBytes,
+  __setDraftTotalBytes,
   __setJournalIo,
   __setNoticeSink,
   clearDraft,
@@ -54,6 +55,7 @@ import {
   markCleanExit,
   markUncleanExit,
 } from "../../src/lib/exit-session";
+import { __setRecoveryIo } from "../../src/lib/session-recovery";
 import { useWorkspace } from "../../src/store/workspace";
 import {
   __resetCursorCheckpoint,
@@ -103,6 +105,7 @@ beforeEach(() => {
 
 afterEach(() => {
   __setJournalIo(null);
+  __setRecoveryIo(null);
   __setCursorIo(null);
   __resetCursorCheckpoint();
   vi.useRealTimers();
@@ -148,6 +151,8 @@ describe("#365 草稿日志", () => {
       pinned: false,
     });
     expect(draft.sessionId).toBeTruthy();
+    // 总量 LRU 的排序键：每次落盘都要刷新写入时间
+    expect(draft.updatedAt).toBeGreaterThan(0);
     // 平时不付 fsync：退出时才 Sync
     expect(writes.at(-1)?.options?.durability).toBe("none");
     expect(writes.at(-1)?.options?.createParents).toBe(true);
@@ -262,7 +267,7 @@ describe("#365 草稿日志", () => {
   });
 });
 
-describe("#409 配额：单条草稿 10MB 上限", () => {
+describe("#409 配额：单条 10MB 上限 + 总量 32MB 淘汰", () => {
   let notices: string[] = [];
 
   beforeEach(() => {
@@ -273,6 +278,7 @@ describe("#409 配额：单条草稿 10MB 上限", () => {
   afterEach(() => {
     __setNoticeSink(null);
     __setDraftMaxBytes(null);
+    __setDraftTotalBytes(null);
   });
 
   it("上限按 UTF-8 字节计：字符数没超但字节数超了也要拒绝", async () => {
@@ -444,6 +450,139 @@ describe("#409 配额：单条草稿 10MB 上限", () => {
     expect(files.has(`${DRAFT_DIR}/${draftFileKey("/w/big.md")}.json`)).toBe(false);
     expect(countDraftlessTabs(["/w/big.md"])).toBe(1);
     expect(countDraftlessTabs(["/w/a.md"])).toBe(0);
+  });
+
+  it("退出 flush 会顺带执行总量淘汰：删掉已处理的旧副本，本会话新副本保留", async () => {
+    // 配额走 session-recovery 的 io：这里让它读同一份内存文件表
+    __setRecoveryIo({
+      appDataDir: async () => "/appdata",
+      readTextFile: async (path) => {
+        const v = files.get(path);
+        if (v === undefined) throw new Error("not found");
+        return v;
+      },
+      writeTextFile: async (path, content) => {
+        files.set(path, content);
+      },
+      listDir: async (path) => {
+        const prefix = path.endsWith("/") ? path : `${path}/`;
+        return [...files.keys()]
+          .filter((k) => k.startsWith(prefix))
+          .map((k) => ({
+            name: k.slice(prefix.length),
+            isDir: false,
+            size: new TextEncoder().encode(files.get(k) ?? "").length,
+          }));
+      },
+      deletePath: async (path) => {
+        files.delete(path);
+      },
+    });
+
+    // 旧会话：用户已处理过 /w/old.md，副本还留在盘上
+    const oldKey = draftFileKey("/w/old.md");
+    files.set(
+      `${DRAFT_DIR}/${oldKey}.json`,
+      JSON.stringify({
+        version: 1,
+        draftId: oldKey,
+        sessionId: "s-old",
+        tabPath: "/w/old.md",
+        isUntitled: false,
+        title: "old.md",
+        content: "o".repeat(600),
+        pinned: false,
+        updatedAt: 1_000,
+      }),
+    );
+    files.set(
+      "/appdata/recovery/main/crashed-1000.json",
+      JSON.stringify({
+        version: 1,
+        sessionId: "s-old",
+        windowLabel: "main",
+        startedAt: 1_000,
+        archivedAt: 1_000,
+        cleanExit: false,
+        draftPaths: ["/w/old.md"],
+        handledDraftIds: ["/w/old.md"],
+        fullyHandled: true,
+        draftsEnumerated: true,
+      }),
+    );
+    __setDraftTotalBytes(1); // 强制超限
+
+    useWorkspace.setState({ openTabs: [tab("/w/new.md")] } as never);
+    await flushAllDrafts({ durability: "sync" });
+
+    // 旧副本被淘汰；本次会话的新副本必须留着
+    expect(files.has(`${DRAFT_DIR}/${oldKey}.json`)).toBe(false);
+    expect(files.has(`${DRAFT_DIR}/${draftFileKey("/w/new.md")}.json`)).toBe(true);
+  });
+
+  it("没有 dirty tab 时退出/失焦也要校准总量（Ctrl+S 后直接关窗不能跳过配额）", async () => {
+    __setRecoveryIo({
+      appDataDir: async () => "/appdata",
+      readTextFile: async (path) => {
+        const v = files.get(path);
+        if (v === undefined) throw new Error("not found");
+        return v;
+      },
+      writeTextFile: async (path, content) => {
+        files.set(path, content);
+      },
+      listDir: async (path) => {
+        const prefix = path.endsWith("/") ? path : `${path}/`;
+        return [...files.keys()]
+          .filter((k) => k.startsWith(prefix))
+          .map((k) => ({
+            name: k.slice(prefix.length),
+            isDir: false,
+            size: new TextEncoder().encode(files.get(k) ?? "").length,
+          }));
+      },
+      deletePath: async (path) => {
+        files.delete(path);
+      },
+    });
+
+    const oldKey = draftFileKey("/w/old.md");
+    files.set(
+      `${DRAFT_DIR}/${oldKey}.json`,
+      JSON.stringify({
+        version: 1,
+        draftId: oldKey,
+        sessionId: "s-old",
+        tabPath: "/w/old.md",
+        isUntitled: false,
+        title: "old.md",
+        content: "o".repeat(600),
+        pinned: false,
+        updatedAt: 1_000,
+      }),
+    );
+    files.set(
+      "/appdata/recovery/main/crashed-1000.json",
+      JSON.stringify({
+        version: 1,
+        sessionId: "s-old",
+        windowLabel: "main",
+        startedAt: 1_000,
+        archivedAt: 1_000,
+        cleanExit: false,
+        draftPaths: ["/w/old.md"],
+        handledDraftIds: ["/w/old.md"],
+        fullyHandled: true,
+        draftsEnumerated: true,
+      }),
+    );
+    __setDraftTotalBytes(1);
+
+    // 没有 dirty tab：旧实现会在这里 early return，配额整轮不跑
+    useWorkspace.setState({ openTabs: [] } as never);
+    await flushAllDrafts({ durability: "sync" });
+
+    expect(files.has(`${DRAFT_DIR}/${oldKey}.json`)).toBe(false);
   });
 
   it("全部草稿都超限：health 仍 healthy，但确实没有可恢复副本（退出提示仍准确）", async () => {

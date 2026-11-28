@@ -13,6 +13,7 @@ import { isTauri } from "@tauri-apps/api/core";
 import { appDataRoot } from "./appDataRoot";
 import { writeRecoveryFile } from "./fs";
 import { flushCursorCheckpoint } from "./cursor-checkpoint";
+import { enforceDraftQuota } from "./session-recovery";
 import { useWorkspace } from "../store/workspace";
 import {
   cancelPendingDrafts,
@@ -55,7 +56,11 @@ export async function flushAllDrafts(
   await flushCursorCheckpoint("sync");
   const { openTabs } = useWorkspace.getState();
   const dirty = openTabs.filter((tab) => tab.dirty);
-  if (dirty.length === 0) return;
+  if (dirty.length === 0) {
+    // 没有 dirty tab 也要校准总量：Ctrl+S 后直接关窗时，配额检查不能整轮不跑
+    await enforceQuotaSafely();
+    return;
+  }
 
   let failed = 0;
   await Promise.all(
@@ -83,6 +88,18 @@ export async function flushAllDrafts(
   // 只由本次草稿写入结果决定：失败时不能承诺「有恢复副本」；
   // 后续 flush 全部成功即可恢复 healthy，一次失败不应污染整个进程后续的判定。
   journalHealth = failed === 0 ? "healthy" : "degraded";
+  // 退出 / 失焦时顺带校准总量配额：没超上限时只有「根 + 每个窗口草稿目录」各一次
+  // listDir，不读正文
+  await enforceQuotaSafely();
+}
+
+/** 配额是尽力而为：任何异常都不能阻断退出落盘 */
+async function enforceQuotaSafely(): Promise<void> {
+  try {
+    await enforceDraftQuota();
+  } catch {
+    // 见上：吞掉，退出优先
+  }
 }
 
 /**
