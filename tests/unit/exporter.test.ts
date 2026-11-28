@@ -9,6 +9,42 @@ describe("exporter lib unit tests", () => {
     vi.restoreAllMocks();
   });
 
+  /** 拦截 downloadBlob 的产物，返回 exportOutline 实际写出的 Blob */
+  function captureOutlineDownload() {
+    const blobs: Blob[] = [];
+    const createObjectURL = vi.fn((blob: Blob) => {
+      blobs.push(blob);
+      return "blob:mock-url";
+    });
+    (
+      globalThis as unknown as { URL: { createObjectURL: unknown; revokeObjectURL: unknown } }
+    ).URL.createObjectURL = createObjectURL;
+    (
+      globalThis as unknown as { URL: { createObjectURL: unknown; revokeObjectURL: unknown } }
+    ).URL.revokeObjectURL = vi.fn();
+
+    let clicked = false;
+    let downloadedFileName = "";
+    const origCreateElement = document.createElement.bind(document);
+    vi.spyOn(document, "createElement").mockImplementation((tag: string) => {
+      const el = origCreateElement(tag);
+      if (tag === "a") {
+        el.click = () => {
+          clicked = true;
+          downloadedFileName = (el as HTMLAnchorElement).download;
+        };
+      }
+      return el;
+    });
+
+    return {
+      blobs,
+      createObjectURL,
+      clicked: () => clicked,
+      fileName: () => downloadedFileName,
+    };
+  }
+
   it("copyMarkdown should write content to clipboard", async () => {
     useWorkspace.setState({ currentContent: "# Test Content\n\nHello World" });
     const writeTextSpy = vi.fn().mockResolvedValue(undefined);
@@ -50,38 +86,16 @@ describe("exporter lib unit tests", () => {
       currentFile: "/notes/sample.md",
     });
 
-    // Mock URL.createObjectURL and click
-    const createdBlobs: Blob[] = [];
-    const createObjectURLMock = vi.fn((blob: Blob) => {
-      createdBlobs.push(blob);
-      return "blob:mock-url";
-    });
-    const revokeObjectURLMock = vi.fn();
-    (globalThis as unknown as { URL: { createObjectURL: unknown; revokeObjectURL: unknown } }).URL.createObjectURL = createObjectURLMock;
-    (globalThis as unknown as { URL: { createObjectURL: unknown; revokeObjectURL: unknown } }).URL.revokeObjectURL = revokeObjectURLMock;
-
-    let clicked = false;
-    let downloadedFileName = "";
-    const origCreateElement = document.createElement.bind(document);
-    vi.spyOn(document, "createElement").mockImplementation((tag: string) => {
-      const el = origCreateElement(tag);
-      if (tag === "a") {
-        el.click = () => {
-          clicked = true;
-          downloadedFileName = (el as HTMLAnchorElement).download;
-        };
-      }
-      return el;
-    });
+    const download = captureOutlineDownload();
 
     await exportOutline();
 
-    expect(clicked).toBe(true);
-    expect(downloadedFileName).toBe("sample-outline.md");
-    expect(createObjectURLMock).toHaveBeenCalled();
-    expect(createdBlobs).toHaveLength(1);
+    expect(download.clicked()).toBe(true);
+    expect(download.fileName()).toBe("sample-outline.md");
+    expect(download.createObjectURL).toHaveBeenCalled();
+    expect(download.blobs).toHaveLength(1);
 
-    const exportedMarkdown = await createdBlobs[0].text();
+    const exportedMarkdown = await download.blobs[0].text();
     expect(exportedMarkdown).toContain("\n- foo_bar_baz\n");
     expect(exportedMarkdown).toContain("\n# foo_bar_baz");
     const sidebarHeadings = extractMarkdownOutline(md);
@@ -101,5 +115,49 @@ describe("exporter lib unit tests", () => {
       ),
     ].join("\n");
     expect(exportedMarkdown).toBe(expectedMarkdown);
+  });
+
+  it("exportOutline 不改写标题里的字面 * / ~~ 与行内代码字符", async () => {
+    useWorkspace.setState({
+      currentContent: [
+        "# 2 * 3 * 4 = 24",
+        "## A ~~ x ~~ B",
+        "### 使用 `a*` 和 `b*` 通配",
+        "#### 5*3*2",
+        "##### **bold *italic***",
+        "###### ~a~~",
+      ].join("\n"),
+      currentFile: "/notes/literal.md",
+    });
+
+    const download = captureOutlineDownload();
+    await exportOutline();
+
+    expect(download.blobs).toHaveLength(1);
+    // 期望值直接按渲染口径写成字面量，不从解析函数推导，避免实现与断言同源漂移
+    const exportedMarkdown = await download.blobs[0].text();
+    expect(exportedMarkdown).toBe(
+      [
+        "# literal 目录",
+        "",
+        "- 2 * 3 * 4 = 24",
+        "  - A ~~ x ~~ B",
+        "    - 使用 a* 和 b* 通配",
+        "      - 532",
+        "        - bold italic",
+        "          - ~a~~",
+        "",
+        "---",
+        "",
+        "## 原始标题结构",
+        "",
+        "# 2 * 3 * 4 = 24",
+        "## A ~~ x ~~ B",
+        "### 使用 a* 和 b* 通配",
+        "#### 532",
+        "##### bold italic",
+        "###### ~a~~",
+      ].join("\n"),
+    );
   });
 });

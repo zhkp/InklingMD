@@ -262,18 +262,252 @@ export function findSourceModeHeadingOffset(
   return null;
 }
 
-// 保留纯文本，与富文本 ProseMirror 渲染的标题文本一致。
+/**
+ * 行内代码 / 转义字符的占位哨兵：先整体摘出、末尾还原，避免其中的 `*` / `~` / `_`
+ * 被后续强调规则二次清理（`` `a*` 和 `b*` `` 不能配成一对斜体，`\*` 是字面量）。
+ */
+const INLINE_TEXT_SENTINEL = "\u0000";
+
+const WHITESPACE_PATTERN = /\s/u;
+const PUNCTUATION_PATTERN = /[\p{P}\p{S}]/u;
+
+interface DelimiterRun {
+  /** 定界符字符：`*` / `_` / `~` */
+  char: string;
+  /** 该 run 在文本中的起始下标 */
+  start: number;
+  /** 该 run 的总长度 */
+  length: number;
+  /** 还能被消耗的长度 */
+  remaining: number;
+  /** 已作为开定界符消耗的长度（从 run 末尾往左吃） */
+  openUsed: number;
+  /** 已作为闭定界符消耗的长度（从 run 头部往右吃） */
+  closeUsed: number;
+  canOpen: boolean;
+  canClose: boolean;
+}
+
+function isWhitespaceChar(ch: string | undefined): boolean {
+  return ch === undefined || WHITESPACE_PATTERN.test(ch);
+}
+
+function isPunctuationChar(ch: string | undefined): boolean {
+  return ch !== undefined && PUNCTUATION_PATTERN.test(ch);
+}
+
+/**
+ * 扫描同名定界符串（run）的长度。
+ */
+function countRun(raw: string, start: number, char: string): number {
+  let end = start;
+  while (end < raw.length && raw[end] === char) end += 1;
+  return end - start;
+}
+
+/**
+ * 扫描强调/删除线定界符串，按 CommonMark 的 left/right-flanking 规则判定能否开/闭。
+ *
+ * 定界符串不完整（`2 ** 3 ** 4`）、两侧有空白（`2 * 3 * 4 = 24`、`A ~~ x ~~ B`）
+ * 或词内下划线（`foo_bar_baz`）都不构成「可配对」的定界符，字符必须原样保留。
+ *
+ * 另需跟随 `micromark-core-commonmark` 的 attentionMarkers 规则（GFM 把 `~` 注册进
+ * attentionMarkers）：`*` 紧邻 `~` 时可以无条件开/闭，`a*~~b~~*c` 才渲染成斜体套删除线。
+ */
+function collectDelimiterRuns(raw: string): DelimiterRun[] {
+  const runs: DelimiterRun[] = [];
+  let i = 0;
+  while (i < raw.length) {
+    const char = raw[i];
+    if (char !== "*" && char !== "_" && char !== "~") {
+      i += 1;
+      continue;
+    }
+    const length = countRun(raw, i, char);
+    const end = i + length;
+    const before = i > 0 ? raw[i - 1] : undefined;
+    const after = end < raw.length ? raw[end] : undefined;
+    const leftFlanking =
+      !isWhitespaceChar(after) &&
+      (!isPunctuationChar(after) || isWhitespaceChar(before) || isPunctuationChar(before));
+    const rightFlanking =
+      !isWhitespaceChar(before) &&
+      (!isPunctuationChar(before) || isWhitespaceChar(after) || isPunctuationChar(after));
+    const openFlanking = leftFlanking || after === "~";
+    const closeFlanking = rightFlanking || before === "~";
+    // GFM 删除线只认 1~2 个波浪线，3 个及以上按字面量处理
+    const supported = char !== "~" || length <= 2;
+    if (supported) {
+      const canOpen =
+        char === "_"
+          ? openFlanking && (!rightFlanking || isPunctuationChar(before))
+          : openFlanking;
+      const canClose =
+        char === "_"
+          ? closeFlanking && (!leftFlanking || isPunctuationChar(after))
+          : closeFlanking;
+      if (canOpen || canClose) {
+        runs.push({
+          char,
+          start: i,
+          length,
+          remaining: length,
+          openUsed: 0,
+          closeUsed: 0,
+          canOpen,
+          canClose,
+        });
+      }
+    }
+    i = end;
+  }
+  return runs;
+}
+
+/**
+ * 判断这对开/闭定界符串是否必须跳过（继续向更早的开串回溯），按渲染器的两条规则：
+ *
+ * - CommonMark「rule of three」：可开可闭的串参与配对，且两者剩余长度之和是 3 的倍数、
+ *   闭串长度不是 3 的倍数时不成对（`**a*b**` 的 `*b*` 只能当字面量）；
+ * - GFM 删除线：开、闭定界符串长度必须完全相等，`~a~~` 这类不等的按字面量保留。
+ */
+function shouldSkipPair(opener: DelimiterRun, closer: DelimiterRun): boolean {
+  if (closer.char === "~" && opener.length !== closer.length) return true;
+  if (!opener.canClose && !closer.canOpen) return false;
+  if (closer.remaining % 3 === 0) return false;
+  return (opener.remaining + closer.remaining) % 3 === 0;
+}
+
+/**
+ * 摘掉强调/删除线的定界符，只保留可见文本。
+ *
+ * 按定界符串（delimiter run）配对：闭合优先、就近匹配开定界符，每次只消费 run 的一部分
+ * ——这样 `**bold *italic***` 里共享的三连星号也能按「内层先闭合、剩余交给外层」正确拆开。
+ */
+function stripEmphasisDelimiters(raw: string): string {
+  const runs = collectDelimiterRuns(raw);
+  if (runs.length === 0) return raw;
+
+  const removed = new Array<boolean>(raw.length).fill(false);
+  const openers: Record<string, number[]> = { "*": [], "_": [], "~": [] };
+
+  runs.forEach((run, index) => {
+    if (run.canClose) {
+      const stack = openers[run.char];
+      let cursor = stack.length - 1;
+      while (run.remaining > 0 && cursor >= 0) {
+        const opener = runs[stack[cursor]];
+        if (shouldSkipPair(opener, run)) {
+          // 换更早的开串：被跳过的保留在栈里，可能配给别的闭串
+          cursor -= 1;
+          continue;
+        }
+        // 两侧都够 2 个按粗体/删除线消费，否则按斜体消费
+        const use = opener.remaining >= 2 && run.remaining >= 2 ? 2 : 1;
+        for (let k = 0; k < use; k += 1) {
+          removed[opener.start + opener.length - opener.openUsed - k - 1] = true;
+          removed[run.start + run.closeUsed + k] = true;
+        }
+        opener.openUsed += use;
+        run.closeUsed += use;
+        opener.remaining -= use;
+        run.remaining -= use;
+        if (opener.remaining <= 0) {
+          stack.splice(cursor, 1);
+          cursor -= 1;
+        }
+      }
+    }
+    if (run.canOpen && run.remaining > 0) openers[run.char].push(index);
+  });
+
+  let stripped = "";
+  for (let i = 0; i < raw.length; i += 1) {
+    if (!removed[i]) stripped += raw[i];
+  }
+  return stripped;
+}
+
+/**
+ * 摘出行内代码段：定界符必须是等长的反引号串（`` ``a*b`` `` 用两个反引号），
+ * 内容按 CommonMark 规则「首尾各有一个空格时各去掉一个」后按字面量保留。
+ */
+function protectInlineCode(raw: string, protect: (value: string) => string): string {
+  let result = "";
+  let index = 0;
+  while (index < raw.length) {
+    if (raw[index] !== "`") {
+      result += raw[index];
+      index += 1;
+      continue;
+    }
+    const fenceLength = countRun(raw, index, "`");
+    const contentStart = index + fenceLength;
+
+    let search = contentStart;
+    let closeStart = -1;
+    while (search < raw.length) {
+      if (raw[search] === "`") {
+        const run = countRun(raw, search, "`");
+        if (run === fenceLength) {
+          closeStart = search;
+          break;
+        }
+        search += run;
+        continue;
+      }
+      search += 1;
+    }
+
+    if (closeStart < 0) {
+      // 没有等长闭合串：反引号按字面量保留
+      result += raw.slice(index, contentStart);
+      index = contentStart;
+      continue;
+    }
+
+    let content = raw.slice(contentStart, closeStart);
+    if (
+      content.length > 1 &&
+      content.startsWith(" ") &&
+      content.endsWith(" ") &&
+      content.trim() !== ""
+    ) {
+      content = content.slice(1, -1);
+    }
+    result += protect(content);
+    index = closeStart + fenceLength;
+  }
+  return result;
+}
+
+/**
+ * 保留纯文本，与富文本 ProseMirror 渲染的标题文本一致。
+ */
 function cleanMarkdownText(raw: string): string {
-  return raw
+  const placeholders: string[] = [];
+  const protect = (value: string): string => {
+    placeholders.push(value);
+    return `${INLINE_TEXT_SENTINEL}${placeholders.length - 1}${INLINE_TEXT_SENTINEL}`;
+  };
+
+  // 先摘出行内代码（内容按字面量渲染），再摘转义字符，最后才处理链接/图片，
+  // 这样 `\*`、`\[`、代码里的 `[a](b)` 都不会被当成语法。
+  const withoutProtected = protectInlineCode(raw, protect)
+    .replace(/\\([\\`*_{}[\]()#+\-.!~>|])/g, (_match, ch: string) => protect(ch)) // 转义 -> 字面量
     .replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1") // 图片 -> alt 文本
-    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1") // 链接 -> 链接文本
-    .replace(/`([^`]+)`/g, "$1") // 行内代码 -> 代码内容
-    .replace(/\*\*(.*?)\*\*/g, "$1") // 星号粗体 -> 内容
-    .replace(/(?<![\p{L}\p{N}\p{M}_])__(.*?)__(?![\p{L}\p{N}\p{M}_])/gu, "$1") // 下划线粗体 -> 内容
-    .replace(/(?<![\p{L}\p{N}\p{M}_])_(.*?)_(?![\p{L}\p{N}\p{M}_])/gu, "$1") // 下划线斜体 -> 内容
-    .replace(/\*(.*?)\*/g, "$1") // 星号斜体 -> 内容
-    .replace(/~~(.*?)~~/g, "$1") // 删除线 -> 内容
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1"); // 链接 -> 链接文本
+
+  const cleaned = stripEmphasisDelimiters(withoutProtected)
     .replace(/\s+/g, " ") // 合并多余空格
+    .trim();
+
+  // 占位符不是空白字符，所以还原后要再 trim 一次：内容只有空白的标题不算可见标题。
+  return cleaned
+    .replace(
+      new RegExp(`${INLINE_TEXT_SENTINEL}(\\d+)${INLINE_TEXT_SENTINEL}`, "g"),
+      (_match, index: string) => placeholders[Number(index)],
+    )
     .trim();
 }
 

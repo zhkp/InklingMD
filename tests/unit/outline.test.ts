@@ -210,6 +210,72 @@ describe("Issue #382 outline parser consistency", () => {
   });
 });
 
+describe("Issue #382 outline inline text cleanup", () => {
+  it("保留字面量 * / ~~ 与行内代码内的字符（与渲染口径一致）", () => {
+    const md = [
+      "# 2 * 3 * 4 = 24",
+      "# A ~~ x ~~ B",
+      "# 使用 `a*` 和 `b*` 通配",
+      "# 5*3*2",
+      "# **Title 1** [guide](guide.md) `code`",
+      "# 2 ** 3 ** 4",
+      "# 填空：___",
+      "# a\\*b\\*c",
+      "# ***both***",
+      "# **bold *italic***",
+      "# *italic **bold***",
+      "# ***a* b**",
+      "# **a*b**",
+      "# *a**b*",
+      "# ~a~~",
+      "# ~~a~",
+      "# 1~2~~3",
+      "# a*~~b~~*c",
+      "# X*~~a~~*",
+      "# 使用 ``a*b`` 通配",
+    ].join("\n");
+    const expected = [
+      "2 * 3 * 4 = 24",
+      "A ~~ x ~~ B",
+      "使用 a* 和 b* 通配",
+      "532",
+      "Title 1 guide code",
+      "2 ** 3 ** 4",
+      "填空：___",
+      "a*b*c",
+      "both",
+      "bold italic",
+      "italic bold",
+      "a b",
+      "a*b",
+      "a**b",
+      "~a~~",
+      "~~a~",
+      "1~2~~3",
+      "abc",
+      "Xa",
+      "使用 a*b 通配",
+    ];
+
+    // 渲染口径由 mdast-util-from-markdown 实测给出：两侧有空白的定界符不能开/闭，
+    // 行内代码内容按字面量渲染。侧栏与导出必须与之一致，且互不漂移。
+    expect(extractMarkdownOutline(md).map(({ text }) => text)).toEqual(expected);
+    expect(parseOutline(md).map(({ text }) => text)).toEqual(expected);
+  });
+
+  it("字面量分隔符不改变 id 与索引，两种 API 仍一一对应", () => {
+    const md = "# 2 * 3 * 4 = 24\n## A ~~ x ~~ B";
+    const sidebar = extractMarkdownOutline(md);
+    const exported = parseOutline(md);
+
+    expect(exported.map(({ id }) => id)).toEqual(sidebar.map(({ id }) => id));
+    expect(exported.map(({ offset }) => offset)).toEqual(
+      sidebar.map(({ pos }) => pos),
+    );
+    expect(sidebar.map(({ index }) => index)).toEqual([0, 1]);
+  });
+});
+
 describe("findActiveHeadingIndex", () => {
   // 构造测试用 headings 数组（pos 按升序，模拟真实文档）
   function makeHeadings(positions: number[]): EditorOutlineHeading[] {
