@@ -305,6 +305,37 @@ describe("Issue #382 outline inline text cleanup", () => {
     expect(parseOutline(md).map(({ text }) => text)).toEqual(expected);
   });
 
+  it("链接标题里的转义引号不截断扫描，转义标点还原为字面量", () => {
+    const md = [
+      "# [guide](url \"the \\\"guide\\\" page\")",
+      "# [guide](u\\)v)",
+      "# He said \\\"hi\\\"",
+      "# cost \\$5",
+    ].join("\n");
+    const expected = ["guide", "guide", 'He said "hi"', "cost $5"];
+
+    expect(extractMarkdownOutline(md).map(({ text }) => text)).toEqual(expected);
+    expect(parseOutline(md).map(({ text }) => text)).toEqual(expected);
+  });
+
+  it("跨行链接定义（目标写在下一行）同样生效", () => {
+    const md = [
+      "# [text][ref]",
+      "# [angle][ang]",
+      "# [missing][none]",
+      "",
+      "[ref]:",
+      "  /url",
+      "[ang]:",
+      "  <https://example.com/a_(b)>",
+      "[none]:",
+    ].join("\n");
+    const expected = ["text", "angle", "[missing][none]"];
+
+    expect(extractMarkdownOutline(md).map(({ text }) => text)).toEqual(expected);
+    expect(parseOutline(md).map(({ text }) => text)).toEqual(expected);
+  });
+
   it("引用式链接/图片按全文定义表脱壳，未定义时保留方括号", () => {
     const md = [
       "# [text][ref]",

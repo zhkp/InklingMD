@@ -517,6 +517,21 @@ function findMatchingPair(raw: string, open: number, openChar: string, closeChar
 }
 
 /**
+ * 从 `start` 起找标题的结束定界符，跳过反斜杠转义
+ * （`[guide](url "the \"guide\" page")` 不能被内层的 `\"` 截断）。
+ */
+function findTitleEnd(raw: string, start: number, closeChar: string): number {
+  for (let i = start; i < raw.length; i += 1) {
+    if (raw[i] === "\\") {
+      i += 1;
+      continue;
+    }
+    if (raw[i] === closeChar) return i;
+  }
+  return -1;
+}
+
+/**
  * 找到行内链接目标地址的收尾 `)`：目标可以是 `<...>`、可含成对括号的裸地址，
  * 后面还可跟 `"title"` / `'title'` / `(title)`。
  */
@@ -548,7 +563,7 @@ function findInlineDestinationEnd(raw: string, start: number): number {
 
   const quote = raw[index];
   if (quote !== '"' && quote !== "'" && quote !== "(") return -1;
-  const closeQuote = raw.indexOf(quote === "(" ? ")" : quote, index + 1);
+  const closeQuote = findTitleEnd(raw, index + 1, quote === "(" ? ")" : quote);
   if (closeQuote < 0) return -1;
   index = closeQuote + 1;
   while (index < raw.length && isWhitespaceChar(raw[index])) index += 1;
@@ -566,6 +581,27 @@ function normalizeLinkLabel(label: string): string {
  * 链接引用定义行 `[label]: destination`（必须有目标地址，否则不是定义）。
  */
 const LINK_REFERENCE_DEFINITION_PATTERN = /^ {0,3}\[((?:[^\\[\]]|\\.)+)\]:[ \t]*(?:<[^>\n]*>|\S+)/;
+
+/**
+ * 只有 `[label]:` 的定义行。
+ */
+const LINK_REFERENCE_LABEL_ONLY_PATTERN = /^ {0,3}\[((?:[^\\[\]]|\\.)+)\]:[ \t]*$/;
+
+/**
+ * 跨行定义的目标行：目标地址可以写在定义的下一行（`/url`、`<...>`）。
+ */
+const LINK_REFERENCE_CONTINUATION_PATTERN = /^ {0,3}(?:<[^>\n]*>|\S+)[ \t]*$/;
+
+/**
+ * 取一行的链接引用定义标签；`[label]:` 后面没写目标时，允许目标落在下一行。
+ */
+function matchDefinitionLabel(line: string, nextLine: string | undefined): string | null {
+  const single = line.match(LINK_REFERENCE_DEFINITION_PATTERN);
+  if (single) return single[1];
+  const labelOnly = line.match(LINK_REFERENCE_LABEL_ONLY_PATTERN);
+  if (!labelOnly || nextLine === undefined) return null;
+  return LINK_REFERENCE_CONTINUATION_PATTERN.test(nextLine) ? labelOnly[1] : null;
+}
 
 /**
  * 摘掉链接/图片语法，只留可见文本。
@@ -638,8 +674,9 @@ function cleanMarkdownText(raw: string, linkLabels: ReadonlySet<string>): string
   // 这样 `\*`、`\[`、代码里的 `[a](b)` 都不会被当成语法。
   const withoutProtected = stripLinkSyntax(
     protectInlineCode(raw, protect).replace(
-      /\\([\\`*_{}[\]()#+\-.!~>|])/g,
-      (_match, ch: string) => protect(ch), // 转义 -> 字面量
+      // CommonMark 的 ASCII 标点转义：`\*`、`\"`、`\#` 等都渲染成字面量
+      /\\([!"#$%&'()*+,\-./:;<=>?@[\\\]^_`{|}~])/g,
+      (_match, ch: string) => protect(ch),
     ),
     linkLabels,
   );
@@ -735,8 +772,8 @@ function parseMarkdownHeadings(markdown: string): ParsedMarkdownHeading[] {
           line: i + 1,
         });
       } else {
-        const definition = line.match(LINK_REFERENCE_DEFINITION_PATTERN);
-        if (definition) linkLabels.add(normalizeLinkLabel(definition[1]));
+        const label = matchDefinitionLabel(line, lines[i + 1]);
+        if (label) linkLabels.add(normalizeLinkLabel(label));
       }
     }
 
