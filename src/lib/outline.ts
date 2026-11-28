@@ -1,6 +1,6 @@
 // 大纲标题解析
-// 从 markdown 文本中解析标题，生成带层级的树结构。
-// Markdown 源文本解析用于导出；编辑器面板使用 ProseMirror 渲染节点。
+// 从 Markdown / ProseMirror 文档中提取带层级的标题。
+// 源码模式和导出共用 Markdown 解析器；普通编辑器面板读取 ProseMirror 节点。
 
 import type { Node as ProseMirrorNode } from "@milkdown/kit/prose/model";
 import { perfProbeEnd, perfProbeStart } from "./perf-probe";
@@ -38,7 +38,7 @@ export const EMPTY_EDITOR_OUTLINE: EditorOutlineSnapshot = {
 export interface OutlineHeading {
   /** 标题层级 1-6 */
   level: number;
-  /** 标题文本（去除 # 前缀和尾部标记） */
+  /** 标题的可见文本（去除 Markdown 行内语法、# 前缀和尾部标记） */
   text: string;
   /** 在原文中的字符偏移（用于定位） */
   offset: number;
@@ -262,16 +262,548 @@ export function findSourceModeHeadingOffset(
   return null;
 }
 
-// 保留纯文本，与富文本 ProseMirror 渲染的标题文本一致。
-function cleanMarkdownText(raw: string): string {
-  return raw
-    .replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1") // 图片 -> alt 文本
-    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1") // 链接 -> 链接文本
-    .replace(/`([^`]+)`/g, "$1") // 行内代码 -> 代码内容
-    .replace(/(\*\*|__)(.*?)\1/g, "$2") // 粗体 -> 内容
-    .replace(/(\*|_)(.*?)\1/g, "$2") // 斜体 -> 内容
-    .replace(/~~(.*?)~~/g, "$1") // 删除线 -> 内容
+/**
+ * 行内代码 / 转义字符的占位哨兵：先整体摘出、末尾还原，避免其中的 `*` / `~` / `_`
+ * 被后续强调规则二次清理（`` `a*` 和 `b*` `` 不能配成一对斜体，`\*` 是字面量）。
+ */
+const INLINE_TEXT_SENTINEL = "\u0000";
+
+const INLINE_TEXT_PLACEHOLDER_PATTERN = new RegExp(
+  `${INLINE_TEXT_SENTINEL}(\\d+)${INLINE_TEXT_SENTINEL}`,
+  "g",
+);
+
+const WHITESPACE_PATTERN = /\s/u;
+
+/**
+ * 强调的「标点」判定，必须与渲染器一致：micromark 的实现是
+ * `unicodePunctuation = /\p{P}|\p{S}/u`（**含符号 `\p{S}`**，与 CommonMark 规范正文里
+ * 只列 `\p{P}` 不同，micromark 自己的注释也没提符号）。
+ * 因此 `a*©*b`、`a*+*b` 在 Milkdown 里不成强调、`*` 原样保留；改成纯 `\p{P}` 会与渲染口径相反。
+ */
+const PUNCTUATION_PATTERN = /[\p{P}\p{S}]/u;
+
+interface DelimiterRun {
+  /** 定界符字符：`*` / `_` / `~` */
+  char: string;
+  /** 该 run 在文本中的起始下标 */
+  start: number;
+  /** 该 run 的总长度 */
+  length: number;
+  /** 还能被消耗的长度 */
+  remaining: number;
+  /** 已作为开定界符消耗的长度（从 run 末尾往左吃） */
+  openUsed: number;
+  /** 已作为闭定界符消耗的长度（从 run 头部往右吃） */
+  closeUsed: number;
+  canOpen: boolean;
+  canClose: boolean;
+}
+
+function isWhitespaceChar(ch: string | undefined): boolean {
+  return ch === undefined || WHITESPACE_PATTERN.test(ch);
+}
+
+function isPunctuationChar(ch: string | undefined): boolean {
+  return ch !== undefined && PUNCTUATION_PATTERN.test(ch);
+}
+
+/**
+ * 扫描同名定界符串（run）的长度。
+ */
+function countRun(raw: string, start: number, char: string): number {
+  let end = start;
+  while (end < raw.length && raw[end] === char) end += 1;
+  return end - start;
+}
+
+/**
+ * 扫描强调/删除线定界符串，按 CommonMark 的 left/right-flanking 规则判定能否开/闭。
+ *
+ * 定界符串不完整（`2 ** 3 ** 4`）、两侧有空白（`2 * 3 * 4 = 24`、`A ~~ x ~~ B`）
+ * 或词内下划线（`foo_bar_baz`）都不构成「可配对」的定界符，字符必须原样保留。
+ *
+ * 另需跟随 `micromark-core-commonmark` 的 attentionMarkers 规则（GFM 把 `~` 注册进
+ * attentionMarkers）：`*` 紧邻 `~` 时可以无条件开/闭，`a*~~b~~*c` 才渲染成斜体套删除线。
+ */
+function collectDelimiterRuns(raw: string): DelimiterRun[] {
+  const runs: DelimiterRun[] = [];
+  let i = 0;
+  while (i < raw.length) {
+    const char = raw[i];
+    if (char !== "*" && char !== "_" && char !== "~") {
+      i += 1;
+      continue;
+    }
+    const length = countRun(raw, i, char);
+    const end = i + length;
+    const before = i > 0 ? raw[i - 1] : undefined;
+    const after = end < raw.length ? raw[end] : undefined;
+    const leftFlanking =
+      !isWhitespaceChar(after) &&
+      (!isPunctuationChar(after) || isWhitespaceChar(before) || isPunctuationChar(before));
+    const rightFlanking =
+      !isWhitespaceChar(before) &&
+      (!isPunctuationChar(before) || isWhitespaceChar(after) || isPunctuationChar(after));
+    const openFlanking = leftFlanking || after === "~";
+    const closeFlanking = rightFlanking || before === "~";
+    // GFM 删除线只认 1~2 个波浪线，3 个及以上按字面量处理
+    const supported = char !== "~" || length <= 2;
+    if (supported) {
+      const canOpen =
+        char === "_"
+          ? openFlanking && (!rightFlanking || isPunctuationChar(before))
+          : openFlanking;
+      const canClose =
+        char === "_"
+          ? closeFlanking && (!leftFlanking || isPunctuationChar(after))
+          : closeFlanking;
+      if (canOpen || canClose) {
+        runs.push({
+          char,
+          start: i,
+          length,
+          remaining: length,
+          openUsed: 0,
+          closeUsed: 0,
+          canOpen,
+          canClose,
+        });
+      }
+    }
+    i = end;
+  }
+  return runs;
+}
+
+/**
+ * 判断这对开/闭定界符串是否必须跳过（继续向更早的开串回溯），按渲染器的两条规则：
+ *
+ * - CommonMark「rule of three」：可开可闭的串参与配对，且两者剩余长度之和是 3 的倍数、
+ *   闭串长度不是 3 的倍数时不成对（`**a*b**` 的 `*b*` 只能当字面量）；
+ * - GFM 删除线：开、闭定界符串长度必须完全相等，`~a~~` 这类不等的按字面量保留。
+ */
+function shouldSkipPair(opener: DelimiterRun, closer: DelimiterRun): boolean {
+  if (closer.char === "~" && opener.length !== closer.length) return true;
+  if (!opener.canClose && !closer.canOpen) return false;
+  if (closer.remaining % 3 === 0) return false;
+  return (opener.remaining + closer.remaining) % 3 === 0;
+}
+
+/**
+ * 摘掉强调/删除线的定界符，只保留可见文本。
+ *
+ * 按定界符串（delimiter run）配对：闭合优先、就近匹配开定界符，每次只消费 run 的一部分
+ * ——这样 `**bold *italic***` 里共享的三连星号也能按「内层先闭合、剩余交给外层」正确拆开。
+ */
+function stripEmphasisDelimiters(raw: string): string {
+  const runs = collectDelimiterRuns(raw);
+  if (runs.length === 0) return raw;
+
+  const removed = new Array<boolean>(raw.length).fill(false);
+  const openers: Record<string, number[]> = { "*": [], "_": [], "~": [] };
+
+  // 成立一对后，落在两者之间的开串已经进了该强调内部，不能再与更晚的闭串配对
+  // （CommonMark 的交叉定界符规则：`*foo _bar* baz_` → `foo _bar baz_`，只保留先解析的那对）。
+  const discardInnerOpeners = (from: number, to: number): void => {
+    for (const stack of Object.values(openers)) {
+      for (let i = stack.length - 1; i >= 0; i -= 1) {
+        const start = runs[stack[i]].start;
+        if (start > from && start < to) stack.splice(i, 1);
+      }
+    }
+  };
+
+  runs.forEach((run, index) => {
+    if (run.canClose) {
+      const stack = openers[run.char];
+      let cursor = stack.length - 1;
+      while (run.remaining > 0 && cursor >= 0) {
+        const opener = runs[stack[cursor]];
+        if (shouldSkipPair(opener, run)) {
+          // 换更早的开串：被跳过的保留在栈里，可能配给别的闭串
+          cursor -= 1;
+          continue;
+        }
+        // 两侧都够 2 个按粗体/删除线消费，否则按斜体消费
+        const use = opener.remaining >= 2 && run.remaining >= 2 ? 2 : 1;
+        for (let k = 0; k < use; k += 1) {
+          removed[opener.start + opener.length - opener.openUsed - k - 1] = true;
+          removed[run.start + run.closeUsed + k] = true;
+        }
+        opener.openUsed += use;
+        run.closeUsed += use;
+        opener.remaining -= use;
+        run.remaining -= use;
+        discardInnerOpeners(opener.start, run.start);
+        if (opener.remaining <= 0) {
+          stack.splice(cursor, 1);
+        }
+        cursor = stack.length - 1;
+      }
+    }
+    if (run.canOpen && run.remaining > 0) openers[run.char].push(index);
+  });
+
+  let stripped = "";
+  for (let i = 0; i < raw.length; i += 1) {
+    if (!removed[i]) stripped += raw[i];
+  }
+  return stripped;
+}
+
+/**
+ * 摘出行内代码段：定界符必须是等长的反引号串（`` ``a*b`` `` 用两个反引号），
+ * 内容按 CommonMark 规则「首尾各有一个空格时各去掉一个」后按字面量保留。
+ *
+ * `protect` 同时接收可见内容与代码段原文（含定界符）：引用标签匹配需要原文写法。
+ * 被反斜杠转义的反引号（`\``）按字面量处理，不能开启代码段。
+ */
+function protectInlineCode(
+  raw: string,
+  protect: (visible: string, source: string) => string,
+): string {
+  let result = "";
+  let index = 0;
+  while (index < raw.length) {
+    if (raw[index] !== "`") {
+      result += raw[index];
+      index += 1;
+      continue;
+    }
+    let backslashes = 0;
+    for (let i = index - 1; i >= 0 && raw[i] === "\\"; i -= 1) backslashes += 1;
+    if (backslashes % 2 === 1) {
+      // 奇数个反斜杠表示该反引号被转义：按字面量保留，交给后续转义还原。
+      result += raw[index];
+      index += 1;
+      continue;
+    }
+    const fenceLength = countRun(raw, index, "`");
+    const contentStart = index + fenceLength;
+
+    let search = contentStart;
+    let closeStart = -1;
+    while (search < raw.length) {
+      if (raw[search] === "`") {
+        const run = countRun(raw, search, "`");
+        if (run === fenceLength) {
+          closeStart = search;
+          break;
+        }
+        search += run;
+        continue;
+      }
+      search += 1;
+    }
+
+    if (closeStart < 0) {
+      // 没有等长闭合串：反引号按字面量保留
+      result += raw.slice(index, contentStart);
+      index = contentStart;
+      continue;
+    }
+
+    let content = raw.slice(contentStart, closeStart);
+    if (
+      content.length > 1 &&
+      content.startsWith(" ") &&
+      content.endsWith(" ") &&
+      content.trim() !== ""
+    ) {
+      content = content.slice(1, -1);
+    }
+    result += protect(content, raw.slice(index, closeStart + fenceLength));
+    index = closeStart + fenceLength;
+  }
+  return result;
+}
+
+/**
+ * 单趟扫描出每个开定界符与其配对闭定界符的下标。
+ *
+ * 链接文本允许嵌套括号（`[![alt](img.png)](url)`），裸链接目标里也允许成对圆括号。
+ * 若对每个开符号单独向后找配对，一行里出现大量未闭合开符号时会退化成 O(n²)；
+ * 先整体配对后，后续查询都是 O(1)。没有配对成功的开符号不会进入结果表。
+ */
+function collectPairs(raw: string, openChar: string, closeChar: string): Map<number, number> {
+  const pairs = new Map<number, number>();
+  const openers: number[] = [];
+  for (let i = 0; i < raw.length; i += 1) {
+    if (raw[i] === openChar) {
+      openers.push(i);
+    } else if (raw[i] === closeChar) {
+      const open = openers.pop();
+      if (open !== undefined) pairs.set(open, i);
+    }
+  }
+  return pairs;
+}
+
+/** 从每个位置起下一个指定字符的下标（没有则为 -1），单趟反向预计算。 */
+function buildNextIndex(raw: string, char: string): Int32Array {
+  const next = new Int32Array(raw.length + 1);
+  next[raw.length] = -1;
+  for (let i = raw.length - 1; i >= 0; i -= 1) {
+    next[i] = raw[i] === char ? i : next[i + 1];
+  }
+  return next;
+}
+
+/** 链接扫描共享的 O(1) 查询表，避免对每个链接候选重复扫描后缀。 */
+interface LinkScanContext {
+  /** `[` → 配对 `]` */
+  bracketPairs: ReadonlyMap<number, number>;
+  /** `(` → 配对 `)`（裸目标地址内的嵌套括号） */
+  parenPairs: ReadonlyMap<number, number>;
+  /** 从下标起下一个 `)`，没有则为 -1 */
+  nextCloseParen: Int32Array;
+  /** 从下标起下一个 `>`，没有则为 -1 */
+  nextCloseAngle: Int32Array;
+  /** 从下标起下一个空白，没有则为 -1（裸目标地址不允许空白，含成对括号内部） */
+  nextWhitespace: Int32Array;
+}
+
+/** 从每个位置起下一个空白字符的下标（没有则为 -1），单趟反向预计算。 */
+function buildNextWhitespaceIndex(raw: string): Int32Array {
+  const next = new Int32Array(raw.length + 1);
+  next[raw.length] = -1;
+  for (let i = raw.length - 1; i >= 0; i -= 1) {
+    next[i] = isWhitespaceChar(raw[i]) ? i : next[i + 1];
+  }
+  return next;
+}
+
+/**
+ * 在 `[start, end)` 内找标题的结束定界符，跳过反斜杠转义
+ * （`[guide](url "the \"guide\" page")` 不能被内层的 `\"` 截断）；超出范围返回 -1。
+ */
+function findTitleEnd(raw: string, start: number, end: number, closeChar: string): number {
+  for (let i = start; i < end; i += 1) {
+    if (raw[i] === "\\") {
+      i += 1;
+      continue;
+    }
+    if (raw[i] === closeChar) return i;
+  }
+  return -1;
+}
+
+/**
+ * 找到行内链接目标地址在 `[start, end)` 内的收尾 `)`：目标可以是 `<...>`、
+ * 可含成对括号的裸地址，后面还可跟 `"title"` / `'title'` / `(title)`。
+ *
+ * 后缀里没有 `)` 时直接失败；裸地址里的嵌套括号用预配对表整段跳过，
+ * 避免大量未闭合的 `[a](` 候选逐个扫到行尾（O(n²)）。
+ */
+function findInlineDestinationEnd(
+  raw: string,
+  start: number,
+  end: number,
+  scan: LinkScanContext,
+): number {
+  let index = start;
+  while (index < end && isWhitespaceChar(raw[index])) index += 1;
+  if (index >= end) return -1;
+
+  const nextCloseParen = scan.nextCloseParen[index];
+  if (nextCloseParen < 0 || nextCloseParen >= end) return -1;
+
+  if (raw[index] === "<") {
+    const closeAngle = scan.nextCloseAngle[index + 1];
+    if (closeAngle < 0 || closeAngle >= end) return -1;
+    index = closeAngle + 1;
+  } else {
+    while (index < end) {
+      const char = raw[index];
+      if (isWhitespaceChar(char)) break;
+      if (char === ")") return index;
+      if (char === "(") {
+        const closeParen = scan.parenPairs.get(index);
+        if (closeParen === undefined || closeParen >= end) return -1;
+        // 裸目标整体不允许空白，成对括号内部也不例外（`[t]((a b))` 不是链接）。
+        const whitespace = scan.nextWhitespace[index];
+        if (whitespace >= 0 && whitespace < closeParen) return -1;
+        index = closeParen + 1;
+        continue;
+      }
+      index += 1;
+    }
+  }
+
+  while (index < end && isWhitespaceChar(raw[index])) index += 1;
+  if (index < end && raw[index] === ")") return index;
+
+  const quote = index < end ? raw[index] : undefined;
+  if (quote !== '"' && quote !== "'" && quote !== "(") return -1;
+  const closeQuote = findTitleEnd(raw, index + 1, end, quote === "(" ? ")" : quote);
+  if (closeQuote < 0) return -1;
+  index = closeQuote + 1;
+  while (index < end && isWhitespaceChar(raw[index])) index += 1;
+  return index < end && raw[index] === ")" ? index : -1;
+}
+
+/**
+ * 链接引用定义的标签归一化：去首尾空白、合并内部空白、忽略大小写（CommonMark 口径）。
+ */
+function normalizeLinkLabel(label: string): string {
+  return label.trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+/**
+ * 链接引用定义行 `[label]: destination`（必须有目标地址，否则不是定义）。
+ */
+const LINK_REFERENCE_DEFINITION_PATTERN = /^ {0,3}\[((?:[^\\[\]]|\\.)+)\]:[ \t]*(?:<[^>\n]*>|\S+)/;
+
+/**
+ * 只有 `[label]:` 的定义行。
+ */
+const LINK_REFERENCE_LABEL_ONLY_PATTERN = /^ {0,3}\[((?:[^\\[\]]|\\.)+)\]:[ \t]*$/;
+
+/**
+ * 跨行定义的目标行：目标地址可以写在定义的下一行（`/url`、`<...>`）。
+ */
+const LINK_REFERENCE_CONTINUATION_PATTERN = /^ {0,3}(?:<[^>\n]*>|\S+)[ \t]*$/;
+
+/**
+ * 取一行的链接引用定义标签；`[label]:` 后面没写目标时，允许目标落在下一行。
+ */
+function matchDefinitionLabel(line: string, nextLine: string | undefined): string | null {
+  const single = line.match(LINK_REFERENCE_DEFINITION_PATTERN);
+  if (single) return single[1];
+  const labelOnly = line.match(LINK_REFERENCE_LABEL_ONLY_PATTERN);
+  if (!labelOnly || nextLine === undefined) return null;
+  return LINK_REFERENCE_CONTINUATION_PATTERN.test(nextLine) ? labelOnly[1] : null;
+}
+
+/**
+ * 摘掉链接/图片语法，只留可见文本。
+ *
+ * - 行内链接/图片：目标地址按 Markdown 语法扫描（不是 `[^)]*`），
+ *   否则 `[guide](https://example.com/path_(part))` 会在内层 `)` 处截断、多留一个 `)`；
+ * - 引用式链接/图片：`[text][ref]`、`[text][]`、`[text]`，只有在 `linkLabels`
+ *   里能找到对应定义时才脱壳（定义表由文档整体扫描得到）；
+ * - `normalizeLabel` 负责把清洗管线的占位符还原成标签的原始写法再归一化：
+ *   标签匹配按原始字符（含反斜杠转义）进行，`[a\!b]` 与 `[a!b]` 不算同一标签；
+ * - `[start, end)` 是相对同一 `raw` 的绝对半开区间，递归清洗共享 `scan`；
+ *   `scan.bracketPairs` 只含配对成功的 `[`，未闭合的 `[` 查不到对应项。
+ */
+function stripLinkSyntax(
+  raw: string,
+  start: number,
+  end: number,
+  linkLabels: ReadonlySet<string>,
+  normalizeLabel: (label: string) => string,
+  scan: LinkScanContext,
+): string {
+  let result = "";
+  let index = start;
+  while (index < end) {
+    if (raw[index] !== "[") {
+      result += raw[index];
+      index += 1;
+      continue;
+    }
+    const textEnd = scan.bracketPairs.get(index);
+    if (textEnd === undefined || textEnd >= end) {
+      result += raw[index];
+      index += 1;
+      continue;
+    }
+    const inner = raw.slice(index + 1, textEnd);
+    const after = textEnd + 1 < end ? raw[textEnd + 1] : undefined;
+    let consumedTo = -1;
+
+    if (after === "(") {
+      const destEnd = findInlineDestinationEnd(raw, textEnd + 2, end, scan);
+      if (destEnd >= 0) consumedTo = destEnd;
+    } else if (after === "[") {
+      const labelEnd = scan.bracketPairs.get(textEnd + 1);
+      if (labelEnd !== undefined && labelEnd < end) {
+        const label = labelEnd === textEnd + 2 ? inner : raw.slice(textEnd + 2, labelEnd);
+        if (linkLabels.has(normalizeLabel(label))) consumedTo = labelEnd;
+      }
+    } else if (linkLabels.has(normalizeLabel(inner))) {
+      consumedTo = textEnd;
+    }
+
+    if (consumedTo < 0) {
+      // 语法不完整或引用未定义：方括号按字面量保留
+      result += raw[index];
+      index += 1;
+      continue;
+    }
+    const isImage = index > 0 && raw[index - 1] === "!" && result.endsWith("!");
+    if (isImage) result = result.slice(0, -1);
+    // 链接文本里可能还有语法（`[![alt](img.png)](url)`），递归清洗
+    result += stripLinkSyntax(
+      raw,
+      index + 1,
+      textEnd,
+      linkLabels,
+      normalizeLabel,
+      scan,
+    );
+    index = consumedTo + 1;
+  }
+  return result;
+}
+
+/**
+ * 保留纯文本，与富文本 ProseMirror 渲染的标题文本一致。
+ *
+ * `linkLabels` 是全文链接引用定义的标签集合：`[text][ref]` / `[text]` 只有在定义存在时才算链接。
+ * 标签按原文写法匹配（`[a\!b]` 与 `[a!b]` 是不同标签），可见文本仍按转义还原。
+ */
+function cleanMarkdownText(raw: string, linkLabels: ReadonlySet<string>): string {
+  // visible = 还原到可见文本时的值；source = 在原文中的写法。
+  // 引用标签必须按 source 匹配：`[a\!b]` 与 `[a!b]` 在渲染器里是不同标签。
+  const placeholders: Array<{ visible: string; source: string }> = [];
+  const protect = (visible: string, source: string): string => {
+    placeholders.push({ visible, source });
+    return `${INLINE_TEXT_SENTINEL}${placeholders.length - 1}${INLINE_TEXT_SENTINEL}`;
+  };
+  const decodeSource = (value: string): string =>
+    value.replace(
+      INLINE_TEXT_PLACEHOLDER_PATTERN,
+      (_match, index: string) => placeholders[Number(index)].source,
+    );
+  const normalizeLabel = (label: string): string =>
+    normalizeLinkLabel(decodeSource(label));
+
+  // 先摘出行内代码（内容按字面量渲染），再摘转义字符，最后才处理链接/图片，
+  // 这样 `\*`、`\[`、代码里的 `[a](b)` 都不会被当成语法。
+  const protectedRaw = protectInlineCode(raw, protect).replace(
+    // CommonMark 的 ASCII 标点转义：`\*`、`\"`、`\#` 等都渲染成字面量
+    /\\([!"#$%&'()*+,\-./:;<=>?@[\\\]^_`{|}~])/g,
+    (match, ch: string) => protect(ch, match),
+  );
+  const scan: LinkScanContext = {
+    bracketPairs: collectPairs(protectedRaw, "[", "]"),
+    parenPairs: collectPairs(protectedRaw, "(", ")"),
+    nextCloseParen: buildNextIndex(protectedRaw, ")"),
+    nextCloseAngle: buildNextIndex(protectedRaw, ">"),
+    nextWhitespace: buildNextWhitespaceIndex(protectedRaw),
+  };
+  const withoutProtected = stripLinkSyntax(
+    protectedRaw,
+    0,
+    protectedRaw.length,
+    linkLabels,
+    normalizeLabel,
+    scan,
+  );
+
+  const cleaned = stripEmphasisDelimiters(withoutProtected)
     .replace(/\s+/g, " ") // 合并多余空格
+    .trim();
+
+  // 占位符不是空白字符，所以还原后要再 trim 一次：内容只有空白的标题不算可见标题。
+  return cleaned
+    .replace(
+      INLINE_TEXT_PLACEHOLDER_PATTERN,
+      (_match, index: string) => placeholders[Number(index)].visible,
+    )
     .trim();
 }
 
@@ -281,15 +813,23 @@ function cleanMarkdownText(raw: string): string {
  */
 export const MAX_FRONTMATTER_SCAN_LINES = 100;
 
+interface ParsedMarkdownHeading {
+  level: number;
+  text: string;
+  offset: number;
+  line: number;
+}
+
 /**
- * 从 Markdown 文本中提取大纲条目（包含 offset、行号 line 等元数据）
- * 供源码模式（Source Mode）下的 OutlinePanel 渲染及同步。
+ * Markdown 源码大纲的唯一解析入口，统一 frontmatter、围栏和标题文本口径。
+ * 返回干净的可见文本，供源码侧栏与导出大纲共同使用。
+ *
+ * 标题文本清洗需要全文的链接引用定义表（`[ref]: url` 可能出现在标题前后任意位置），
+ * 所以先收集标题原文与定义，再统一清洗。
  */
-export function extractMarkdownOutline(
-  markdown: string,
-): EditorOutlineHeading[] {
-  const probeStart = perfProbeStart();
-  const headings: EditorOutlineHeading[] = [];
+function parseMarkdownHeadings(markdown: string): ParsedMarkdownHeading[] {
+  const rawHeadings: Array<{ level: number; raw: string; offset: number; line: number }> = [];
+  const linkLabels = new Set<string>();
   const lines = markdown.split("\n");
   let offset = 0;
   let inFence: string | null = null;
@@ -310,12 +850,16 @@ export function extractMarkdownOutline(
     if (inFrontmatter) {
       if (trimmed === "---" || trimmed === "...") {
         inFrontmatter = false;
-      } else if (i - frontmatterStartLine > MAX_FRONTMATTER_SCAN_LINES) {
-        // 超出合理行数上限视作未闭合 frontmatter，退出 frontmatter 状态回退为普通文本
-        inFrontmatter = false;
+        offset += line.length + 1;
+        continue;
       }
-      offset += line.length + 1;
-      continue;
+      if (i - frontmatterStartLine <= MAX_FRONTMATTER_SCAN_LINES) {
+        offset += line.length + 1;
+        continue;
+      }
+
+      // 未闭合 frontmatter 超限时，当前行按普通 Markdown 继续解析。
+      inFrontmatter = false;
     }
 
     // 围栏代码块检测
@@ -332,101 +876,67 @@ export function extractMarkdownOutline(
     }
 
     if (inFence === null) {
-      const m = trimmed.match(/^(#{1,6})\s+(.+?)\s*#*\s*$/);
-      if (m) {
-        const level = m[1].length;
-        const rawContent = m[2].trim();
-        const text = cleanMarkdownText(rawContent);
-        if (text) {
-          const index = headings.length;
-          headings.push({
-            index,
-            level,
-            text,
-            pos: offset,
-            nodeId: null,
-            id: `h-${index}-${slugify(text)}`,
-            line: i + 1,
-          });
-        }
+      const match = trimmed.match(/^(#{1,6})\s+(.+?)\s*#*\s*$/);
+      if (match) {
+        rawHeadings.push({
+          level: match[1].length,
+          raw: match[2].trim(),
+          offset,
+          line: i + 1,
+        });
+      } else {
+        const label = matchDefinitionLabel(line, lines[i + 1]);
+        if (label) linkLabels.add(normalizeLinkLabel(label));
       }
     }
 
     offset += line.length + 1;
   }
 
+  const headings: ParsedMarkdownHeading[] = [];
+  for (const heading of rawHeadings) {
+    const text = cleanMarkdownText(heading.raw, linkLabels);
+    if (text) {
+      headings.push({
+        level: heading.level,
+        text,
+        offset: heading.offset,
+        line: heading.line,
+      });
+    }
+  }
+  return headings;
+}
+
+/**
+ * 从 Markdown 文本中提取大纲条目（包含 offset、行号 line 等元数据）
+ * 供源码模式（Source Mode）下的 OutlinePanel 渲染及同步。
+ */
+export function extractMarkdownOutline(
+  markdown: string,
+): EditorOutlineHeading[] {
+  const probeStart = perfProbeStart();
+  const headings = parseMarkdownHeadings(markdown).map((heading, index) => ({
+    index,
+    level: heading.level,
+    text: heading.text,
+    pos: heading.offset,
+    nodeId: null,
+    id: `h-${index}-${slugify(heading.text)}`,
+    line: heading.line,
+  }));
   perfProbeEnd("outlineExtract", probeStart);
   return headings;
 }
 
 /**
- * 解析 markdown 文本中的标题。
- * - 支持 ATX 风格 # ~ ######
- * - 跳过代码块内的 # 行（用 ``` 和 ~~~ 围栏判断）
- * - 跳过空标题（# 后无内容）
- * - setext 风格（下划 === / ---）暂不支持，保持简单
+ * 适配为导出使用的偏移字段，解析规则和可见文本与源码侧栏保持一致。
  */
 export function parseOutline(markdown: string): OutlineHeading[] {
-  const headings: OutlineHeading[] = [];
-  const lines = markdown.split("\n");
-  let offset = 0;
-  let inFence: string | null = null; // 当前围栏标记（``` 或 ~~~）
-  let inFrontmatter = false;
-  let frontmatterStartLine = -1;
-
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    const trimmed = line.trim();
-
-    // 文档首部 frontmatter 区域检测
-    if (i === 0 && trimmed === "---") {
-      inFrontmatter = true;
-      frontmatterStartLine = 0;
-      offset += line.length + 1;
-      continue;
-    }
-    if (inFrontmatter) {
-      if (trimmed === "---" || trimmed === "...") {
-        inFrontmatter = false;
-      } else if (i - frontmatterStartLine > MAX_FRONTMATTER_SCAN_LINES) {
-        // 超出合理行数上限视作未闭合 frontmatter，退出 frontmatter 状态回退为普通文本
-        inFrontmatter = false;
-      }
-      offset += line.length + 1;
-      continue;
-    }
-
-    // 围栏代码块开闭检测
-    const fenceMatch = trimmed.match(/^(`{3,}|~{3,})/);
-    if (fenceMatch) {
-      const fence = fenceMatch[1];
-      if (inFence === null) {
-        inFence = fence[0].repeat(fence.length);
-      } else if (fence[0] === inFence[0] && fence.length >= inFence.length) {
-        inFence = null;
-      }
-      offset += line.length + 1;
-      continue;
-    }
-
-    if (inFence === null) {
-      const m = trimmed.match(/^(#{1,6})\s+(.+?)\s*#*\s*$/);
-      if (m) {
-        const level = m[1].length;
-        const text = m[2].trim();
-        if (text) {
-          headings.push({
-            level,
-            text,
-            offset,
-            id: `h-${headings.length}-${slugify(text)}`,
-          });
-        }
-      }
-    }
-
-    offset += line.length + 1; // +1 for \n
-  }
-
-  return headings;
+  return parseMarkdownHeadings(markdown).map((heading, index) => ({
+    level: heading.level,
+    text: heading.text,
+    offset: heading.offset,
+    id: `h-${index}-${slugify(heading.text)}`,
+  }));
 }

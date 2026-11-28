@@ -8,8 +8,10 @@ import {
   extractMarkdownOutline,
   findActiveHeadingIndex,
   isSameMarkdownOutline,
+  MAX_FRONTMATTER_SCAN_LINES,
   type EditorOutlineHeading,
 } from "../../src/lib/outline";
+import { ISSUE_382_OUTLINE_MARKDOWN } from "../fixtures/issue382Outline";
 
 describe("parseOutline", () => {
   it("解析 ATX 风格标题 # ~ ######", () => {
@@ -99,6 +101,28 @@ describe("parseOutline", () => {
     expect(hs[1].text).toBe("1.1 背景");
   });
 
+  it("preserves underscores inside words in sidebar and exported headings", () => {
+    const md =
+      "# foo_bar_baz\n## foo__bar__baz\n### _foo_bar_baz_\n#### __foo_bar_baz__";
+    const sidebar = extractMarkdownOutline(md);
+    const exported = parseOutline(md);
+    const expected = [
+      { level: 1, text: "foo_bar_baz" },
+      { level: 2, text: "foo__bar__baz" },
+      { level: 3, text: "foo_bar_baz" },
+      { level: 4, text: "foo_bar_baz" },
+    ];
+
+    expect(sidebar[0].text).toBe("foo_bar_baz");
+    expect(exported[0].text).toBe("foo_bar_baz");
+    expect(sidebar.map(({ level, text }) => ({ level, text }))).toEqual(expected);
+    expect(exported.map(({ level, text }) => ({ level, text }))).toEqual(expected);
+    expect(exported.map(({ id }) => id)).toEqual(sidebar.map(({ id }) => id));
+    expect(exported.map(({ offset }) => offset)).toEqual(
+      sidebar.map(({ pos }) => pos),
+    );
+  });
+
   it("缩进的 # 不算标题", () => {
     const md = "  # 缩进标题\n# 真标题";
     const hs = parseOutline(md);
@@ -126,6 +150,28 @@ describe("parseOutline", () => {
     expect(hs[1].pos).toBeGreaterThan(0);
   });
 
+  it("frontmatter 超限触发的当前行继续解析，并保持两种 API 的原文位置", () => {
+    const md = `---\n${"metadata: value\n".repeat(MAX_FRONTMATTER_SCAN_LINES)}# **Cutoff title**`;
+    const expectedOffset = md.indexOf("# **Cutoff title**");
+    const sidebar = extractMarkdownOutline(md);
+    const exported = parseOutline(md);
+
+    expect(sidebar).toHaveLength(1);
+    expect(sidebar[0]).toMatchObject({
+      level: 1,
+      text: "Cutoff title",
+      pos: expectedOffset,
+      line: MAX_FRONTMATTER_SCAN_LINES + 2,
+    });
+    expect(exported).toHaveLength(1);
+    expect(exported[0]).toMatchObject({
+      level: sidebar[0].level,
+      text: sidebar[0].text,
+      offset: expectedOffset,
+      id: sidebar[0].id,
+    });
+  });
+
   it("未闭合 frontmatter 超过行数上限自动退出，不影响后续标题解析", () => {
     const md =
       "---\ntitle: 未闭合\n" +
@@ -134,6 +180,313 @@ describe("parseOutline", () => {
     const hs = extractMarkdownOutline(md);
     expect(hs.length).toBeGreaterThan(0);
     expect(hs[0].text).toBe("正常标题");
+    const exported = parseOutline(md);
+    expect(exported.map(({ level, text, offset }) => [level, text, offset])).toEqual(
+      hs.map(({ level, text, pos }) => [level, text, pos]),
+    );
+  });
+});
+
+describe("Issue #382 outline parser consistency", () => {
+  it("keeps sidebar and export headings aligned while preserving source locations", () => {
+    const sidebar = extractMarkdownOutline(ISSUE_382_OUTLINE_MARKDOWN);
+    const exported = parseOutline(ISSUE_382_OUTLINE_MARKDOWN);
+    const expected = [
+      { level: 1, text: "Title 1 guide code" },
+      { level: 2, text: "Title 2 diagram" },
+    ];
+
+    expect(sidebar.map(({ level, text }) => ({ level, text }))).toEqual(expected);
+    expect(exported.map(({ level, text }) => ({ level, text }))).toEqual(expected);
+    expect(exported.map(({ id }) => id)).toEqual(sidebar.map(({ id }) => id));
+    expect(exported.map(({ offset }) => offset)).toEqual(
+      sidebar.map(({ pos }) => pos),
+    );
+    expect(sidebar.map(({ line }) => line)).toEqual([4, 10]);
+    expect(sidebar.map(({ pos }) => pos)).toEqual([
+      ISSUE_382_OUTLINE_MARKDOWN.indexOf("# **Title 1**"),
+      ISSUE_382_OUTLINE_MARKDOWN.indexOf("## ~~Title 2~~"),
+    ]);
+  });
+});
+
+describe("Issue #382 outline inline text cleanup", () => {
+  it("保留字面量 * / ~~ 与行内代码内的字符（与渲染口径一致）", () => {
+    const md = [
+      "# 2 * 3 * 4 = 24",
+      "# A ~~ x ~~ B",
+      "# 使用 `a*` 和 `b*` 通配",
+      "# 5*3*2",
+      "# **Title 1** [guide](guide.md) `code`",
+      "# 2 ** 3 ** 4",
+      "# 填空：___",
+      "# a\\*b\\*c",
+      "# ***both***",
+      "# **bold *italic***",
+      "# *italic **bold***",
+      "# ***a* b**",
+      "# **a*b**",
+      "# *a**b*",
+      "# ~a~~",
+      "# ~~a~",
+      "# 1~2~~3",
+      "# a*~~b~~*c",
+      "# X*~~a~~*",
+      "# 使用 ``a*b`` 通配",
+      "# [guide](https://example.com/path_(part))",
+      "# 见 [guide](https://example.com/a_(b)) 说明",
+      "# ![图](https://example.com/a_(b).png)",
+      "# [t](u \"title\")",
+      "# [t]()",
+      "# [a [b] c](u)",
+      "# [![alt](img.png)](u)",
+      "# [未闭合](u",
+      "# a*©*b",
+      "# a*+*b",
+      "# C++ *and* Rust",
+    ].join("\n");
+    const expected = [
+      "2 * 3 * 4 = 24",
+      "A ~~ x ~~ B",
+      "使用 a* 和 b* 通配",
+      "532",
+      "Title 1 guide code",
+      "2 ** 3 ** 4",
+      "填空：___",
+      "a*b*c",
+      "both",
+      "bold italic",
+      "italic bold",
+      "a b",
+      "a*b",
+      "a**b",
+      "~a~~",
+      "~~a~",
+      "1~2~~3",
+      "abc",
+      "Xa",
+      "使用 a*b 通配",
+      "guide",
+      "见 guide 说明",
+      "图",
+      "t",
+      "t",
+      "a [b] c",
+      "alt",
+      "[未闭合](u",
+      "a*©*b",
+      "a*+*b",
+      "C++ and Rust",
+    ];
+
+    // 渲染口径由 mdast-util-from-markdown 实测给出：两侧有空白的定界符不能开/闭，
+    // 行内代码内容按字面量渲染。侧栏与导出必须与之一致，且互不漂移。
+    expect(extractMarkdownOutline(md).map(({ text }) => text)).toEqual(expected);
+    expect(parseOutline(md).map(({ text }) => text)).toEqual(expected);
+  });
+
+  it("字面量分隔符不改变 id 与索引，两种 API 仍一一对应", () => {
+    const md = "# 2 * 3 * 4 = 24\n## A ~~ x ~~ B";
+    const sidebar = extractMarkdownOutline(md);
+    const exported = parseOutline(md);
+
+    expect(exported.map(({ id }) => id)).toEqual(sidebar.map(({ id }) => id));
+    expect(exported.map(({ offset }) => offset)).toEqual(
+      sidebar.map(({ pos }) => pos),
+    );
+    expect(sidebar.map(({ index }) => index)).toEqual([0, 1]);
+  });
+
+  it("交叉定界符只保留先解析的一对（与渲染器一致）", () => {
+    const md = ["# *foo _bar* baz_", "# _foo *bar_ baz*", "# *foo **bar* baz**"].join("\n");
+    const expected = ["foo _bar baz_", "foo *bar baz*", "foo bar baz"];
+
+    expect(extractMarkdownOutline(md).map(({ text }) => text)).toEqual(expected);
+    expect(parseOutline(md).map(({ text }) => text)).toEqual(expected);
+  });
+
+  it("链接标题里的转义引号不截断扫描，转义标点还原为字面量", () => {
+    const md = [
+      "# [guide](url \"the \\\"guide\\\" page\")",
+      "# [guide](u\\)v)",
+      "# He said \\\"hi\\\"",
+      "# cost \\$5",
+    ].join("\n");
+    const expected = ["guide", "guide", 'He said "hi"', "cost $5"];
+
+    expect(extractMarkdownOutline(md).map(({ text }) => text)).toEqual(expected);
+    expect(parseOutline(md).map(({ text }) => text)).toEqual(expected);
+  });
+
+  it("转义反引号按字面量保留，不被当作行内代码定界符", () => {
+    const md = [
+      "# a \\`b\\` c",
+      "# a \\\\`code` b",
+      "# a \\` `code` b",
+      "# a `code \\` b` c",
+      "# a \\``` b",
+    ].join("\n");
+    const expected = [
+      "a `b` c",
+      "a \\code b",
+      "a ` code b",
+      "a code \\ b` c",
+      "a ``` b",
+    ];
+
+    expect(extractMarkdownOutline(md).map(({ text }) => text)).toEqual(expected);
+    expect(parseOutline(md).map(({ text }) => text)).toEqual(expected);
+  });
+
+  it("跨行链接定义（目标写在下一行）同样生效", () => {
+    const md = [
+      "# [text][ref]",
+      "# [angle][ang]",
+      "# [missing][none]",
+      "",
+      "[ref]:",
+      "  /url",
+      "[ang]:",
+      "  <https://example.com/a_(b)>",
+      "[none]:",
+    ].join("\n");
+    const expected = ["text", "angle", "[missing][none]"];
+
+    expect(extractMarkdownOutline(md).map(({ text }) => text)).toEqual(expected);
+    expect(parseOutline(md).map(({ text }) => text)).toEqual(expected);
+  });
+
+  it("引用标签按原始写法匹配（转义标点、行内代码）", () => {
+    const md = [
+      "# [text][a\\!b]",
+      "# [a\\!b][]",
+      "# [a\\!b]",
+      "# [text][a\\!b\\*c]",
+      "# [text][a\\[b\\]]",
+      "# [text][a `b` c]",
+      "# [a `b` c]",
+      "# ![alt][a\\!b]",
+      "# [plain-miss][a!b]",
+      "",
+      "[a\\!b]: https://example.com/a",
+      "[a\\!b\\*c]: https://example.com/b",
+      "[a\\[b\\]]: https://example.com/c",
+      "[a `b` c]: https://example.com/d",
+    ].join("\n");
+    // 渲染口径：标签按原始写法（含反斜杠转义）匹配，转义与未转义不算同一标签；
+    // 未命中时整体按字面量保留（转义字符仍按可见文本还原）。
+    const expected = [
+      "text",
+      "a!b",
+      "a!b",
+      "text",
+      "text",
+      "text",
+      "a b c",
+      "alt",
+      "[plain-miss][a!b]",
+    ];
+
+    expect(extractMarkdownOutline(md).map(({ text }) => text)).toEqual(expected);
+    expect(parseOutline(md).map(({ text }) => text)).toEqual(expected);
+  });
+
+  it("裸链接目标里的嵌套圆括号按配对表跳过", () => {
+    const md = [
+      "# a [t](u(v)w) b",
+      "# a [t](u(v) b",
+      "# a [t](u)v) b",
+      "# a [t](u(v)) b",
+      "# a [t](<u v>) b",
+      "# a [t](u \"a (b) c\") b",
+      "# a [t]( ) b",
+      "# a [t]( u ) b",
+      "# a [t](u(v(w))z) b",
+      "# a [t](u(v(w)) b",
+      "# a [t]((a b)) b",
+      "# a [t](u(v w)) b",
+      "# a [t](a(b c)d) b",
+      "# a [t](u(v) \"t (x)\") b",
+    ].join("\n");
+    const expected = [
+      "a t b",
+      "a [t](u(v) b",
+      "a tv) b",
+      "a t b",
+      "a t b",
+      "a t b",
+      "a t b",
+      "a t b",
+      "a t b",
+      "a [t](u(v(w)) b",
+      "a [t]((a b)) b",
+      "a [t](u(v w)) b",
+      "a [t](a(b c)d) b",
+      "a t b",
+    ];
+
+    expect(extractMarkdownOutline(md).map(({ text }) => text)).toEqual(expected);
+    expect(parseOutline(md).map(({ text }) => text)).toEqual(expected);
+  });
+
+  it("大量未闭合开括号/链接前缀按单趟扫描，不重复扫描后缀", () => {
+    // 三种形态都会让旧实现逐个候选扫到行尾：未闭合 `[`、无收尾 `)` 的 `[a](`、
+    // 带未闭合目标的 `[a](x`。修复前 30k 规模约 1.5–2.3s，修复后应在数毫秒内。
+    const texts = [
+      `${"[".repeat(30000)}tail`,
+      `${"[a](".repeat(7500)}tail`,
+      `${"[a](x".repeat(7500)}tail`,
+    ];
+
+    for (const text of texts) {
+      const started = performance.now();
+      const sidebar = extractMarkdownOutline(`# ${text}`);
+      const exported = parseOutline(`# ${text}`);
+      const elapsed = performance.now() - started;
+
+      expect(sidebar.map(({ text: value }) => value)).toEqual([text]);
+      expect(exported.map(({ text: value }) => value)).toEqual([text]);
+      expect(elapsed).toBeLessThan(500);
+    }
+  });
+
+  it("引用式链接/图片按全文定义表脱壳，未定义时保留方括号", () => {
+    const md = [
+      "# [text][ref]",
+      "# [text][]",
+      "# [text]",
+      "# [a][Foo]",
+      "# [**b**][r]",
+      "# ![alt][img]",
+      "# [missing][nope]",
+      "# [undefined]",
+      "# [inFence]",
+      "```",
+      "[inFence]: https://example.com/fenced",
+      "```",
+      "",
+      "[ref]: https://example.com/ref",
+      "[text]: https://example.com/text",
+      "[foo]: https://example.com/foo",
+      "[r]: https://example.com/r",
+      "[img]: pic.png",
+    ].join("\n");
+    // 渲染口径：完整的 / 折叠的 / 短引用都解析成链接文本；大小写不敏感；围栏内的定义不算；
+    // 未定义的引用整体按字面量保留。图片按既有口径取 alt 文本。
+    const expected = [
+      "text",
+      "text",
+      "text",
+      "a",
+      "b",
+      "alt",
+      "[missing][nope]",
+      "[undefined]",
+      "[inFence]",
+    ];
+
+    expect(extractMarkdownOutline(md).map(({ text }) => text)).toEqual(expected);
+    expect(parseOutline(md).map(({ text }) => text)).toEqual(expected);
   });
 });
 
